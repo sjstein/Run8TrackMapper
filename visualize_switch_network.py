@@ -148,26 +148,7 @@ def load_tile_bounds(tiles_involved, tile_dir=TILE_DIR):
             print(f'  WARNING: Failed to decompress {filename}')
             continue
 
-        # Create dict of tiles which are 'odd' in SoCal region
-        exception_tiles = {'-00011,00040' : [0.009346, 0.006043],
-                            '-00012,00040': [0.009346, 0.006043],
-                            '-00013,00040': [0.009346, 0.006043],
-                            '-00014,00040': [0.009346, 0.006043],
-                            '-00015,00040': [0.009346, 0.006043],
-                            '-00016,00041': [0.009346, 0.006043],
-                            '-00005,00044': [0.007799, 0.001107],
-                            '-00006,00044': [0.007799, 0.001107],
-                            '-00007,00043': [0.009331, 0.002113]
-                           }
-        if int(y_str) >= 45:
-            exception_tiles[f'{x_str},{y_str}'] = [0.007799, 0.001107]
-
-        #if f'{x_str},{y_str}' in exception_tiles:
-        if False:
-            bounds = find_tile_bounds(data, exception_tiles[f'{x_str},{y_str}'][0],
-                                      exception_tiles[f'{x_str},{y_str}'][1])
-        else:
-            bounds = find_tile_bounds(data)
+        bounds = find_tile_bounds(data)
 
         if not bounds:
             print(f'  WARNING: No geographic bounds found in {filename}')
@@ -369,6 +350,59 @@ def is_switch(section):
         unique_paths.add(path_sig)
 
     return len(unique_paths) >= 2
+
+def select_nodes_to_plot(section, section_idx, is_switch_section):
+    """Select which nodes to plot based on section type and num_segments
+
+    For non-switch sections with 2 nodes, only plot the node with num_segments > 0.
+    Reports errors if both nodes have 0 or both have >0.
+
+    Args:
+        section: TrackSection object
+        section_idx: Section index for error reporting
+        is_switch_section: Boolean indicating if this is a switch
+
+    Returns:
+        tuple: (nodes_to_plot, error_message)
+            nodes_to_plot: List of TrackNode objects to plot
+            error_message: None if no error, string with error details otherwise
+    """
+    # Filter out reverse paths first
+    forward_nodes = [n for n in section.nodes if not n.is_reverse_path]
+
+    # Switch sections - plot all forward nodes (preserve existing behavior)
+    if is_switch_section:
+        return (forward_nodes, None)
+
+    # Single forward node - plot it
+    if len(forward_nodes) == 1:
+        return (forward_nodes, None)
+
+    # Two forward nodes - apply num_segments logic
+    if len(forward_nodes) == 2:
+        node0_segments = forward_nodes[0].num_segments
+        node1_segments = forward_nodes[1].num_segments
+
+        # ERROR: Both nodes have num_segments == 0
+        if node0_segments == 0 and node1_segments == 0:
+            error_msg = (f"Section {section_idx}: Both nodes have num_segments=0 "
+                        f"(tiles {forward_nodes[0].tile_index}, {forward_nodes[1].tile_index})")
+            return (forward_nodes, error_msg)
+
+        # ERROR: Both nodes have num_segments > 0
+        if node0_segments > 0 and node1_segments > 0:
+            error_msg = (f"Section {section_idx}: Both nodes have num_segments>0 "
+                        f"({node0_segments}, {node1_segments})")
+            return (forward_nodes, error_msg)
+
+        # VALID: Plot only the node with num_segments > 0
+        if node0_segments > 0:
+            return ([forward_nodes[0]], None)
+        else:
+            return ([forward_nodes[1]], None)
+
+    # 3+ forward nodes (not a switch) or 0 nodes - plot all or nothing
+    return (forward_nodes, None)
 
 def find_connecting_section(current_section, exit_point, section_map, visited):
     """Find the next section that connects to the given exit point
@@ -777,14 +811,24 @@ Examples:
         if sec_idx != args.start_section and is_switch(section_map[sec_idx]):
             colors[sec_idx] = 'blue'
 
+    # Track num_segments errors for summary
+    section_errors = []
+
     for sec_idx in sorted(all_sections):
         section = section_map[sec_idx]
         color = colors.get(sec_idx, 'green')  # Switches in red/blue, paths in green
 
-        # Draw all non-reverse paths
-        for node in section.nodes:
-            if node.is_reverse_path:
-                continue
+        # Select nodes to plot based on section type
+        section_is_switch = is_switch(section)
+        nodes_to_plot, error_msg = select_nodes_to_plot(section, sec_idx, section_is_switch)
+
+        # Handle errors
+        if error_msg:
+            section_errors.append(error_msg)
+            print(f'  WARNING: {error_msg}')
+
+        # Draw the selected nodes
+        for node in nodes_to_plot:
 
             # Get start tile
             start_tile = (node.tile_index[0], node.tile_index[1])
@@ -881,6 +925,14 @@ Examples:
                     popup=f"Section {sec_idx} boundary"
                 ).add_to(m)
 
+    # Print error summary
+    if section_errors:
+        print(f'\n{"="*80}')
+        print(f'ERRORS DETECTED: {len(section_errors)} section(s) with num_segments issues')
+        print(f'{"="*80}')
+        for error in section_errors:
+            print(f'  - {error}')
+        print(f'{"="*80}\n')
 
     # Add layer control
     folium.LayerControl(collapsed=False).add_to(m)
