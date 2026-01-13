@@ -824,7 +824,7 @@ Examples:
     m.get_root().html.add_child(folium.Element(opacity_control_js))
 
     # Draw tile boundaries (in a toggleable layer)
-    tile_layer = folium.FeatureGroup(name='Tile Boundaries', show=True)
+    tile_layer = folium.FeatureGroup(name='Tile Boundaries', show=False)
 
     for tile_coords, bounds in sorted(tile_geo_bounds.items()):
         lon_east, lon_west, lat_north, lat_south = bounds
@@ -866,8 +866,9 @@ Examples:
     tile_layer.add_to(m)
 
     # ===== Plot Signals =====
+    signal_metadata = []  # Collect signal data for JavaScript rendering
     if signal_db:
-        print('Adding signals to map...')
+        print('Collecting signal data for dynamic rendering...')
         signals_layer = folium.FeatureGroup(name='Signals', show=True)
 
         signals_plotted = 0
@@ -900,13 +901,16 @@ Examples:
                 for i, route in enumerate(signal.routes[:5]):  # Limit to first 5
                     routes_html += (f"  {i+1}. {route.route_name} <br> MPH :{route.route_max_mph}<br>"
                                     f" Version: {route.version}<br> Diverging: {route.is_diverging}<br>"
-                                    f" Speed class: {route.speed_class}<br>"
-                                    f" Block Detectors: {route.block_detectors}<br>"
-                                    f" Prev Signals: {route.prev_signal_indices}<br>"
-                                    f" Switch connectors: {route.switch_connectors}<br>")
+                                    f" Speed class: {route.route_max_mph}<br>"
+                                    f" Block Detectors: {route.block_detector_indices}<br>"
+                                    f" Prev Signals: {route.prev_signal_indices}<br>")
+                    if route.switch_connectors:
+                        routes_html += f" Switch connectors:   {len(route.switch_connectors)}<br>"
+                        for sc in route.switch_connectors:
+                            routes_html += (f"   - Switch {sc.switch_index} "
+                                            f"(clear_if_normal={sc.clear_if_thrown_normal})<br>")
                 if len(signal.routes) > 5:
-                    routes_html += f"  ... and {len(signal.routes) - 5} more<br>"
-                routes_html += "<i>(Use explore_signalHeadDb.py for full details)</i>"
+                    routes_html += f"  ... and {len(signal.routes) - 5} more"
             else:
                 routes_html = "<br><i>No routes defined</i>"
 
@@ -921,17 +925,18 @@ Examples:
             """
 
             # Tooltip (hover text)
-            tooltip_text = f"Signal {signal.signal_index}: {signal.model_name}"
+            tooltip_text = f"Signal {signal.signal_index}"
 
-            # Create and add directional marker (circle with direction bar)
-            create_signal_marker(
-                sig_lat, sig_lon,
-                signal.rotation_degrees_y,
-                signal.is_absolute,
-                tooltip_text,
-                popup_html,
-                signals_layer
-            )
+            # Store signal metadata for JavaScript rendering
+            signal_metadata.append({
+                'id': signal.signal_index,
+                'lat': sig_lat,
+                'lon': sig_lon,
+                'rotation': signal.rotation_degrees_y,
+                'is_absolute': signal.is_absolute,
+                'popup_html': popup_html.replace('\n', ' ').replace("'", "\\'"),
+                'tooltip': tooltip_text.replace("'", "\\'")
+            })
             signals_plotted += 1
 
         signals_layer.add_to(m)
@@ -1167,6 +1172,374 @@ Examples:
 """
 
     m.get_root().html.add_child(folium.Element(zoom_control_script))
+
+    # Add Ctrl+Click selection functionality
+    selection_script = """
+<script>
+(function() {
+    setTimeout(function() {
+        var mapName = '""" + m.get_name() + """';
+        var mapObj = window[mapName];
+
+        if (!mapObj) {
+            console.error('Map object not found');
+            return;
+        }
+
+        // State management
+        var selectedSections = new Map();
+        var sectionPolylines = new Map();
+        var sectionLengths = new Map();
+
+        // Extract section ID from popup HTML
+        function extractSectionId(popupHtml) {
+            var match = popupHtml.match(/<b>Section (\\d+)/);
+            return match ? parseInt(match[1]) : null;
+        }
+
+        // Extract length from popup HTML
+        function extractLength(popupHtml) {
+            var match = popupHtml.match(/Length: ([\\d.]+) ft \\(([\\d.]+) m\\)/);
+            if (!match) return null;
+            return {
+                feet: parseFloat(match[1]),
+                meters: parseFloat(match[2])
+            };
+        }
+
+        // Build section maps
+        var polylineCount = 0;
+        var withPopupCount = 0;
+        var firstPopupHtml = null;
+        mapObj.eachLayer(function(layer) {
+            // Check for Polyline but exclude Polygons (signals use Polygons)
+            if (layer instanceof L.Polyline && !(layer instanceof L.Polygon)) {
+                polylineCount++;
+                var popup = layer.getPopup();
+                if (!popup) return;
+                withPopupCount++;
+
+                var popupContent = popup.getContent();
+
+                // Convert to string if it's a DOM element
+                var popupHtml = '';
+                if (typeof popupContent === 'string') {
+                    popupHtml = popupContent;
+                } else if (popupContent && popupContent.innerHTML !== undefined) {
+                    popupHtml = popupContent.innerHTML;
+                } else if (popupContent && popupContent.textContent !== undefined) {
+                    popupHtml = popupContent.textContent;
+                }
+
+                // Store first popup for debugging
+                if (!firstPopupHtml && popupHtml) {
+                    firstPopupHtml = popupHtml;
+                }
+
+                if (popupHtml.includes('boundary')) return;
+
+                var secId = extractSectionId(popupHtml);
+                var length = extractLength(popupHtml);
+
+                if (secId !== null) {
+                    sectionPolylines.set(secId, layer);
+                    if (length) sectionLengths.set(secId, length);
+                }
+            }
+        });
+
+        console.log('First popup HTML sample:', firstPopupHtml);
+
+        console.log('Total Polylines:', polylineCount, 'With popups:', withPopupCount, 'Track sections found:', sectionPolylines.size);
+        console.log('Section IDs:', Array.from(sectionPolylines.keys()).sort((a, b) => a - b));
+        console.log('Sections with length data:', sectionLengths.size);
+
+        // Attach click handlers
+        var handlersAttached = 0;
+        sectionPolylines.forEach(function(layer, secId) {
+            layer.on('click', function(e) {
+                console.log('Click detected on section', secId, 'Ctrl key:', e.originalEvent ? e.originalEvent.ctrlKey : 'no originalEvent');
+
+                if (e.originalEvent && e.originalEvent.ctrlKey) {
+                    // Use Leaflet's proper event stopping
+                    L.DomEvent.stop(e);
+
+                    // Close any open popup
+                    mapObj.closePopup();
+
+                    toggleSection(secId);
+
+                    console.log('Ctrl+Click processed for section', secId);
+                    return false;
+                }
+            });
+            handlersAttached++;
+        });
+        console.log('Attached click handlers to', handlersAttached, 'sections');
+
+        // Toggle section selection
+        function toggleSection(secId) {
+            var layer = sectionPolylines.get(secId);
+            if (!layer) return;
+
+            if (selectedSections.has(secId)) {
+                // Deselect
+                var original = selectedSections.get(secId);
+                layer.setStyle(original);
+                selectedSections.delete(secId);
+            } else {
+                // Select
+                var original = {
+                    color: layer.options.color,
+                    weight: layer.options.weight,
+                    opacity: layer.options.opacity
+                };
+                selectedSections.set(secId, original);
+                layer.setStyle({
+                    color: '#FFFF00',
+                    weight: 8,
+                    opacity: 1.0
+                });
+            }
+
+            updateTotals();
+        }
+
+        // Calculate and display totals
+        function updateTotals() {
+            var totalMeters = 0;
+            var totalFeet = 0;
+            var sections = Array.from(selectedSections.keys()).sort((a, b) => a - b);
+
+            sections.forEach(function(secId) {
+                if (sectionLengths.has(secId)) {
+                    var len = sectionLengths.get(secId);
+                    totalMeters += len.meters;
+                    totalFeet += len.feet;
+                }
+            });
+
+            updateSummaryPanel(sections, totalMeters, totalFeet);
+        }
+
+        // Create/update summary panel
+        function updateSummaryPanel(sections, totalMeters, totalFeet) {
+            var panelId = 'track-selection-summary';
+            var panel = document.getElementById(panelId);
+
+            if (sections.length === 0) {
+                if (panel) panel.remove();
+                return;
+            }
+
+            if (!panel) {
+                panel = document.createElement('div');
+                panel.id = panelId;
+                panel.style.cssText =
+                    'position: fixed; top: 10px; right: 10px; width: 280px; ' +
+                    'max-height: 400px; overflow-y: auto; background-color: white; ' +
+                    'border: 2px solid #333; z-index: 9999; padding: 12px; ' +
+                    'border-radius: 4px; font-family: Arial, sans-serif; font-size: 12px; ' +
+                    'box-shadow: 0 2px 10px rgba(0,0,0,0.3);';
+                document.body.appendChild(panel);
+            }
+
+            var html = '<div style="font-weight: bold; margin-bottom: 10px; font-size: 14px;">' +
+                'Selected Track Sections</div>';
+
+            html += '<div style="margin-bottom: 10px;">' +
+                '<strong>Sections:</strong> ' + sections.join(', ') + '</div>';
+
+            html += '<div style="margin-bottom: 10px; padding: 8px; ' +
+                'background-color: #f0f0f0; border-radius: 3px;">' +
+                '<strong>Total Length:</strong><br>' +
+                '<div style="margin-top: 4px;">' +
+                '  <span style="font-size: 14px; font-weight: bold;">' +
+                totalFeet.toFixed(1) + '</span> feet<br>' +
+                '  <span style="font-size: 14px; font-weight: bold;">' +
+                totalMeters.toFixed(1) + '</span> meters' +
+                '</div></div>';
+
+            html += '<button id="clear-selection-btn" ' +
+                'style="width: 100%; padding: 8px; cursor: pointer; ' +
+                'background-color: #dc3545; color: white; border: none; ' +
+                'border-radius: 3px; font-weight: bold; font-size: 12px;">' +
+                'Clear Selection</button>';
+
+            panel.innerHTML = html;
+
+            document.getElementById('clear-selection-btn').onclick = function() {
+                clearAllSelections();
+            };
+        }
+
+        // Clear all selections
+        function clearAllSelections() {
+            selectedSections.forEach(function(original, secId) {
+                var layer = sectionPolylines.get(secId);
+                if (layer) layer.setStyle(original);
+            });
+            selectedSections.clear();
+
+            var panel = document.getElementById('track-selection-summary');
+            if (panel) panel.remove();
+        }
+
+        console.log('Ctrl+Click selection functionality initialized');
+
+    }, 500);  // Wait 500ms for map to fully initialize
+})();
+</script>
+"""
+
+    m.get_root().html.add_child(folium.Element(selection_script))
+
+    # Add dynamic signal rendering with zoom-dependent sizing
+    if signal_db and signal_metadata:
+        import json
+        signal_data_json = json.dumps(signal_metadata)
+
+        signal_rendering_script = """
+<script>
+(function() {
+    setTimeout(function() {
+        var mapName = '""" + m.get_name() + """';
+        var mapObj = window[mapName];
+
+        if (!mapObj) {
+            console.error('Map object not found for signal rendering');
+            return;
+        }
+
+        // Signal metadata from Python
+        var signalData = """ + signal_data_json + """;
+
+        // Map to store signal triangle polygons
+        var signalTriangles = new Map();  // id -> L.Polygon
+
+        // Create a new layer group for signals if needed
+        // Folium FeatureGroups are harder to find, so we'll create our own
+        var signalsLayer = L.featureGroup();
+        signalsLayer.addTo(mapObj);
+
+        // Try to find existing Signals FeatureGroup and use it if possible
+        var foundExistingLayer = false;
+        mapObj.eachLayer(function(layer) {
+            if (layer instanceof L.FeatureGroup && layer.options.name === 'Signals') {
+                signalsLayer = layer;
+                foundExistingLayer = true;
+            }
+        });
+
+        console.log('Using signals layer:', foundExistingLayer ? 'found existing' : 'created new');
+
+        // Calculate triangle size based on zoom level (inverse scaling)
+        function calculateTriangleSize(zoom) {
+            var baseSize = 0.00010;  // Base size at zoom 16
+            var scaleFactor = Math.pow(0.75, Math.max(0, zoom - 16));
+            return Math.max(0.00005, baseSize * scaleFactor);
+        }
+
+        // Calculate triangle vertices given center, rotation, and size
+        function calculateTriangleVertices(lat, lon, rotationDeg, triangleSize) {
+            // Convert rotation to radians and flip 180 degrees
+            var rotationRad = (rotationDeg * Math.PI / 180.0) + Math.PI;
+
+            // Vertex 1: tip of triangle (pointing direction)
+            var v1_lat = lat + triangleSize * Math.cos(rotationRad);
+            var v1_lon = lon + triangleSize * Math.sin(rotationRad) / Math.cos(lat * Math.PI / 180.0);
+
+            // Vertices 2 and 3: base of triangle (perpendicular to pointing direction)
+            var baseAngle1 = rotationRad + 2.5;
+            var baseAngle2 = rotationRad - 2.5;
+            var baseDistance = triangleSize * 0.6;
+
+            var v2_lat = lat + baseDistance * Math.cos(baseAngle1);
+            var v2_lon = lon + baseDistance * Math.sin(baseAngle1) / Math.cos(lat * Math.PI / 180.0);
+
+            var v3_lat = lat + baseDistance * Math.cos(baseAngle2);
+            var v3_lon = lon + baseDistance * Math.sin(baseAngle2) / Math.cos(lat * Math.PI / 180.0);
+
+            return [
+                [v1_lat, v1_lon],
+                [v2_lat, v2_lon],
+                [v3_lat, v3_lon]
+            ];
+        }
+
+        // Create all signal triangles
+        function createSignalTriangles(zoom) {
+            var triangleSize = calculateTriangleSize(zoom);
+
+            signalData.forEach(function(signal) {
+                // Determine colors based on signal type
+                var fillColor = signal.is_absolute ? '#FF6B35' : '#FFD700';
+                var borderColor = signal.is_absolute ? '#8B0000' : '#800080';
+
+                // Calculate vertices
+                var vertices = calculateTriangleVertices(
+                    signal.lat,
+                    signal.lon,
+                    signal.rotation,
+                    triangleSize
+                );
+
+                // Create polygon
+                var triangle = L.polygon(vertices, {
+                    color: borderColor,
+                    fillColor: fillColor,
+                    fillOpacity: 0.9,
+                    weight: 2
+                });
+
+                // Add popup and tooltip
+                triangle.bindPopup(signal.popup_html, {maxWidth: 300});
+                triangle.bindTooltip(signal.tooltip);
+
+                // Add to layer and store reference
+                triangle.addTo(signalsLayer);
+                signalTriangles.set(signal.id, triangle);
+            });
+        }
+
+        // Update signal triangle sizes based on zoom
+        function updateSignalSizes() {
+            var zoom = mapObj.getZoom();
+            var triangleSize = calculateTriangleSize(zoom);
+
+            signalTriangles.forEach(function(polygon, signalId) {
+                // Find signal data
+                var signal = signalData.find(function(s) { return s.id === signalId; });
+                if (!signal) return;
+
+                // Recalculate vertices
+                var vertices = calculateTriangleVertices(
+                    signal.lat,
+                    signal.lon,
+                    signal.rotation,
+                    triangleSize
+                );
+
+                // Update polygon
+                polygon.setLatLngs(vertices);
+            });
+        }
+
+        // Create initial triangles
+        var initialZoom = mapObj.getZoom();
+        createSignalTriangles(initialZoom);
+
+        // Update on zoom change
+        mapObj.on('zoomend', updateSignalSizes);
+
+        console.log('Dynamic signal rendering initialized:', signalData.length, 'signals');
+
+    }, 600);  // Wait slightly longer than other initialization
+})();
+</script>
+"""
+
+        m.get_root().html.add_child(folium.Element(signal_rendering_script))
 
     # Save map
     signal_suffix = '_with_signals' if args.signal_db else ''
