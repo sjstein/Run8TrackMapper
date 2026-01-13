@@ -19,6 +19,7 @@ import sys
 import csv
 import argparse
 from explore_trackdb import TrackDatabase
+from explore_signalHeadDb import SignalDatabase
 
 # Constants
 METERS_PER_DEGREE_LAT = 111320.0
@@ -334,6 +335,60 @@ def interpolate_curve_geographic(start_latlon, end_latlon, radius, arc_length, c
 
     return curve_points_latlon
 
+def create_signal_marker(lat, lon, rotation_y, is_absolute, signal_info, popup_html, layer):
+    """Create a directional signal marker using triangle that scales with zoom
+
+    Args:
+        lat, lon: Geographic coordinates
+        rotation_y: Rotation in degrees (0 = North, 90 = East, etc.)
+        is_absolute: Boolean - True for absolute signals (different color)
+        signal_info: String with signal details for tooltip
+        popup_html: HTML content for popup
+        layer: Folium layer to add markers to
+    """
+    # Color based on signal type
+    if is_absolute:
+        fill_color = '#FF6B35'  # Orange for absolute signals
+        border_color = '#8B0000'  # Dark red border
+    else:
+        fill_color = '#FFD700'  # Gold for Intermediate signals
+        border_color = '#800080'  # Purple border
+
+    # Create triangle using geographic coordinates (scales with zoom)
+    # Triangle size in degrees (approximately 15 meters)
+    triangle_size = 0.00023
+
+    # Convert rotation to radians and flip 180 degrees
+    rotation_rad = math.radians(rotation_y) + math.pi
+
+    # Calculate triangle vertices (pointing in direction of rotation_y)
+    # Vertex 1: tip of triangle (pointing direction)
+    v1_lat = lat + triangle_size * math.cos(rotation_rad)
+    v1_lon = lon + triangle_size * math.sin(rotation_rad) / math.cos(math.radians(lat))
+
+    # Vertices 2 and 3: base of triangle (perpendicular to pointing direction)
+    base_angle_1 = rotation_rad + 2.5  # ~143 degrees offset
+    base_angle_2 = rotation_rad - 2.5  # ~-143 degrees offset
+    base_distance = triangle_size * 0.6
+
+    v2_lat = lat + base_distance * math.cos(base_angle_1)
+    v2_lon = lon + base_distance * math.sin(base_angle_1) / math.cos(math.radians(lat))
+
+    v3_lat = lat + base_distance * math.cos(base_angle_2)
+    v3_lon = lon + base_distance * math.sin(base_angle_2) / math.cos(math.radians(lat))
+
+    # Draw triangle as a polygon
+    triangle = folium.Polygon(
+        locations=[(v1_lat, v1_lon), (v2_lat, v2_lon), (v3_lat, v3_lon)],
+        color=border_color,
+        fillColor=fill_color,
+        fillOpacity=0.9,
+        weight=2,
+        popup=folium.Popup(popup_html, max_width=300),
+        tooltip=signal_info
+    )
+    triangle.add_to(layer)
+
 def is_switch(section):
     """Check if a section is a switch (has multiple unique paths)"""
     if len(section.nodes) <= 2:
@@ -570,6 +625,8 @@ Examples:
                         help='Starting track section number (must be a turnout)')
     parser.add_argument('depth', type=int,
                         help='Number of switch levels to traverse (1, 2, 3, etc.)')
+    parser.add_argument('--signal-db', default=None,
+                        help='Optional: Signal database file (.r8) to visualize signals')
 
     args = parser.parse_args()
 
@@ -585,6 +642,17 @@ Examples:
     db = TrackDatabase(args.track_database)
 
     section_map = {sec.index: sec for sec in db.sections}
+
+    # Load signal database if provided
+    signal_db = None
+    if args.signal_db:
+        print(f'Loading signal database: {args.signal_db}')
+        try:
+            signal_db = SignalDatabase(args.signal_db)
+            print(f'Loaded {len(signal_db.signal_heads)} signal heads')
+        except Exception as e:
+            print(f'WARNING: Failed to load signal database: {e}')
+            signal_db = None
 
     # Validate starting section exists
     if args.start_section not in section_map:
@@ -661,6 +729,7 @@ Examples:
         name='Satellite',
         overlay=False,
         control=True,
+        show=False,  # Don't show by default - OpenStreetMap will be default
         max_zoom=22,  # Allow deeper zoom
         max_native_zoom=19  # Tiles available up to zoom 19, but allow scaling beyond
     ).add_to(m)
@@ -796,6 +865,102 @@ Examples:
 
     tile_layer.add_to(m)
 
+    # ===== Plot Signals =====
+    if signal_db:
+        print('Adding signals to map...')
+        signals_layer = folium.FeatureGroup(name='Signals', show=True)
+
+        signals_plotted = 0
+        signals_skipped = 0
+
+        for signal in signal_db.signal_heads:
+            signal_tile = (signal.tile_xz[0], signal.tile_xz[1])
+
+            # Filter: Only show signals on visualized tiles
+            if signal_tile not in tile_geo_bounds:
+                signals_skipped += 1
+                continue
+
+            # Convert signal position to lat/lon
+            try:
+                sig_lat, sig_lon = convert_run8_to_latlon(
+                    signal.position[0],  # x coordinate
+                    signal.position[2],  # z coordinate (position[1] is y/height)
+                    tile_geo_bounds[signal_tile]
+                )
+            except Exception as e:
+                print(f'  Warning: Failed to convert signal {signal.signal_index} coords: {e}')
+                signals_skipped += 1
+                continue
+
+            # Build popup HTML with route summary
+            routes_html = ""
+            if signal.routes:
+                routes_html = "<br><b>Routes:</b><br>"
+                for i, route in enumerate(signal.routes[:5]):  # Limit to first 5
+                    routes_html += (f"  {i+1}. {route.route_name} <br> MPH :{route.route_max_mph}<br>"
+                                    f" Version: {route.version}<br> Diverging: {route.is_diverging}<br>"
+                                    f" Speed class: {route.speed_class}<br>"
+                                    f" Block Detectors: {route.block_detectors}<br>"
+                                    f" Prev Signals: {route.prev_signal_indices}<br>"
+                                    f" Switch connectors: {route.switch_connectors}<br>")
+                if len(signal.routes) > 5:
+                    routes_html += f"  ... and {len(signal.routes) - 5} more<br>"
+                routes_html += "<i>(Use explore_signalHeadDb.py for full details)</i>"
+            else:
+                routes_html = "<br><i>No routes defined</i>"
+
+            popup_html = f"""
+            <b>Signal {signal.signal_index}</b><br>
+            Model: {signal.model_name}<br>
+            Type: {'Absolute' if signal.is_absolute else 'Intermediate'}<br>
+            Dwarf: {'Yes' if signal.is_dwarf else 'No'}<br>
+            Switch ind: {'Yes' if signal.is_switch_indicator else 'No'}<br>
+            Advance Diverging: {'Yes' if signal.is_advance_diverging else 'No'}<br>
+            {routes_html}
+            """
+
+            # Tooltip (hover text)
+            tooltip_text = f"Signal {signal.signal_index}: {signal.model_name}"
+
+            # Create and add directional marker (circle with direction bar)
+            create_signal_marker(
+                sig_lat, sig_lon,
+                signal.rotation_degrees_y,
+                signal.is_absolute,
+                tooltip_text,
+                popup_html,
+                signals_layer
+            )
+            signals_plotted += 1
+
+        signals_layer.add_to(m)
+
+        # Add signal legend
+        legend_html = '''
+        <div style="position: fixed;
+                    bottom: 150px; right: 10px; width: 180px; height: 110px;
+                    background-color: white; border:2px solid grey; z-index:9999;
+                    font-size:11px; padding: 8px; border-radius: 4px;">
+        <div style="margin-bottom: 5px; font-weight: bold;">Signal Types</div>
+        <div style="margin: 3px 0;">
+            <span style="color: #FF6B35;">▲</span> Absolute Signal
+        </div>
+        <div style="margin: 3px 0;">
+            <span style="color: #FFD700;">▲</span> Intermediate Signal
+        </div>
+        <div style="margin-top: 8px; font-size: 10px; color: #666;">
+            Triangle shows signal facing direction
+        </div>
+        </div>
+        '''
+        m.get_root().html.add_child(folium.Element(legend_html))
+
+        print(f'  Plotted {signals_plotted} signals on map')
+        if signals_skipped > 0:
+            print(f'  Skipped {signals_skipped} signals (not on visualized tiles)')
+        print()
+
     # Draw each section
     # Color coding: red for start, blue for terminal switches, green for paths
     colors = {args.start_section: 'red'}  # Starting switch in red
@@ -874,23 +1039,46 @@ Examples:
             else:
                 points = [(start_lat, start_lon), (end_lat, end_lon)]
 
+            # Calculate length
+            if is_curved:
+                # Use arc length for curved sections
+                length_meters = node.arcLen_meters
+            else:
+                # Calculate straight-line distance for straight sections
+                dx = node.end_position[0] - node.position[0]
+                dy = node.end_position[1] - node.position[1]
+                dz = node.end_position[2] - node.position[2]
+                length_meters = math.sqrt(dx*dx + dy*dy + dz*dz)
+
+            # Convert to feet
+            length_feet = length_meters * 3.28084
+
             # Draw path
             weight = 5 if sec_idx in colors else 3
 
-            # Determine label based on section type
+            # Determine label based on section type with length
+            section_type = ""
             if sec_idx == args.start_section:
-                label = f'Section {sec_idx} (START)'
+                section_type = " (START)"
             elif is_switch(section):
-                label = f'Section {sec_idx} (SWITCH)'
-            else:
-                label = f'Section {sec_idx}'
+                section_type = " (SWITCH)"
+
+            # Create detailed popup
+            popup_html = f"""
+            <b>Section {sec_idx}{section_type}</b><br>
+            Length: {length_feet:.1f} ft ({length_meters:.1f} m)<br>
+            Nodes: {len(section.nodes)}<br>
+            Type: {'Curved' if is_curved else 'Straight'}<br>
+            {'Radius: ' + f'{node.radius_meters:.1f} m<br>' if is_curved else ''}
+            Track Type: {section.track_type}
+            """
 
             folium.PolyLine(
                 locations=points,
                 color=color,
                 weight=weight,
                 opacity=0.8,
-                popup=label,
+                popup=folium.Popup(popup_html, max_width=250),
                 tooltip=f'Section {sec_idx}'
             ).add_to(m)
 
@@ -981,7 +1169,8 @@ Examples:
     m.get_root().html.add_child(folium.Element(zoom_control_script))
 
     # Save map
-    output_file = f'{args.track_database.split('.')[0]}_{args.start_section}_depth{args.depth}.html'
+    signal_suffix = '_with_signals' if args.signal_db else ''
+    output_file = f'{args.track_database.split(".")[0]}_{args.start_section}_depth{args.depth}{signal_suffix}.html'
     m.save(output_file)
     print(f'Map saved to: {output_file}')
     print()
