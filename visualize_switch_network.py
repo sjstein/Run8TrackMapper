@@ -20,6 +20,7 @@ import csv
 import argparse
 from explore_trackdb import TrackDatabase
 from explore_signalHeadDb import SignalDatabase
+from r8lib import IndustryFile, Industry
 
 # Constants
 METERS_PER_DEGREE_LAT = 111320.0
@@ -627,8 +628,17 @@ Examples:
                         help='Number of switch levels to traverse (1, 2, 3, etc.)')
     parser.add_argument('--signal-db', default=None,
                         help='Optional: Signal database file (.r8) to visualize signals')
+    parser.add_argument('--industry-db', default=None,
+                        help='Optional: Industry database file (.ind) to visualize industry tracks')
+    parser.add_argument('--route-prefix', type=int, default=None,
+                        help='Required with --industry-db: Route prefix to filter industry tracks')
 
     args = parser.parse_args()
+
+    # Validate --route-prefix is provided if --industry-db is used
+    if args.industry_db and args.route_prefix is None:
+        print('ERROR: --route-prefix is required when using --industry-db')
+        return 1
 
     print('='*80)
     print('SWITCH NETWORK VISUALIZER')
@@ -653,6 +663,50 @@ Examples:
         except Exception as e:
             print(f'WARNING: Failed to load signal database: {e}')
             signal_db = None
+
+    # Load industry database if provided
+    industry_db = None
+    industry_sections_map = {}  # Maps section_id -> list of industries using that section
+
+    if args.industry_db:
+        print(f'Loading industry database: {args.industry_db}')
+        try:
+            with open(args.industry_db, 'rb') as f:
+                mem_map = f.read()
+
+            # Parse industry file
+            industry_file = IndustryFile()
+            ptr = 0
+            industry_file.unk1 = mem_map[ptr:ptr + 4]
+            ptr += 4
+            industry_file.num_rec = int.from_bytes(mem_map[ptr:ptr + 4], 'little')
+            ptr += 4
+
+            for i in range(industry_file.num_rec):
+                industry = Industry(mem_map, ptr)
+                industry_file.industries.append(industry)
+                ptr += len(industry)
+
+                # Build section mapping - filter by route prefix
+                if hasattr(industry, 'track') and industry.number_of_tracks > 0:
+                    for track in industry.track:
+                        # Only include tracks matching the specified route prefix
+                        if track.route_prefix == args.route_prefix:
+                            section_id = track.track_section
+                            if section_id not in industry_sections_map:
+                                industry_sections_map[section_id] = []
+                            industry_sections_map[section_id].append(industry)
+
+            industry_db = industry_file
+            print(f'Loaded {industry_file.num_rec} industries')
+            print(f'Filtered to route prefix {args.route_prefix}')
+            print(f'Tracking {len(industry_sections_map)} track sections with matching industries')
+
+        except Exception as e:
+            print(f'WARNING: Failed to load industry database: {e}')
+            import traceback
+            traceback.print_exc()
+            industry_db = None
 
     # Validate starting section exists
     if args.start_section not in section_map:
@@ -865,11 +919,14 @@ Examples:
 
     tile_layer.add_to(m)
 
+    # ===== Create Industries Layer =====
+    industries_layer = folium.FeatureGroup(name='Industries', show=False)
+
     # ===== Plot Signals =====
     signal_metadata = []  # Collect signal data for JavaScript rendering
     if signal_db:
         print('Collecting signal data for dynamic rendering...')
-        signals_layer = folium.FeatureGroup(name='Signals', show=True)
+        signals_layer = folium.FeatureGroup(name='Signals', show=False)
 
         signals_plotted = 0
         signals_skipped = 0
@@ -941,12 +998,12 @@ Examples:
 
         signals_layer.add_to(m)
 
-        # Add signal legend
+        # Add signal legend (with ID for visibility control)
         legend_html = '''
-        <div style="position: fixed;
+        <div id="signal-legend" style="position: fixed;
                     bottom: 150px; right: 10px; width: 180px; height: 110px;
                     background-color: white; border:2px solid grey; z-index:9999;
-                    font-size:11px; padding: 8px; border-radius: 4px;">
+                    font-size:11px; padding: 8px; border-radius: 4px; display: none;">
         <div style="margin-bottom: 5px; font-weight: bold;">Signal Types</div>
         <div style="margin: 3px 0;">
             <span style="color: #FF6B35;">▲</span> Absolute Signal
@@ -984,9 +1041,33 @@ Examples:
     # Track num_segments errors for summary
     section_errors = []
 
+    # Build reverse mapping: industry -> list of section_ids
+    # This allows us to find the center section for multi-section industries
+    industry_to_sections = {}
+    for sec_idx, industries in industry_sections_map.items():
+        for industry in industries:
+            if industry not in industry_to_sections:
+                industry_to_sections[industry] = []
+            industry_to_sections[industry].append(sec_idx)
+
+    # Determine which section should receive the label for each industry
+    # For industries with multiple sections, choose the middle one
+    industry_label_sections = {}
+    for industry, section_ids in industry_to_sections.items():
+        if industry.trk_sym:  # Only label industries with symbols
+            sorted_sections = sorted(section_ids)
+            middle_idx = len(sorted_sections) // 2
+            industry_label_sections[sorted_sections[middle_idx]] = industry
+
     for sec_idx in sorted(all_sections):
         section = section_map[sec_idx]
-        color = colors.get(sec_idx, 'green')  # Switches in red/blue, paths in green
+
+        # Determine color: industry tracks first, then switches, then regular
+        is_industry_track = sec_idx in industry_sections_map
+        if is_industry_track:
+            color = 'purple'  # Industry track
+        else:
+            color = colors.get(sec_idx, 'green')  # Switches in red/blue, paths in green
 
         # Select nodes to plot based on section type
         section_is_switch = is_switch(section)
@@ -996,6 +1077,9 @@ Examples:
         if error_msg:
             section_errors.append(error_msg)
             print(f'  WARNING: {error_msg}')
+
+        # Collect all points from all nodes in this section for label placement
+        all_section_points = []
 
         # Draw the selected nodes
         for node in nodes_to_plot:
@@ -1068,6 +1152,17 @@ Examples:
             elif is_switch(section):
                 section_type = " (SWITCH)"
 
+            # Build industry section details
+            industry_html = ""
+            if sec_idx in industry_sections_map:
+                industry_html = "<br><b>Industries:</b><br>"
+                for industry in industry_sections_map[sec_idx]:
+                    industry_html += f"<b>• {industry.name}</b><br>"
+                    if industry.local_name and industry.local_name != industry.name:
+                        industry_html += f"  Local: {industry.local_name}<br>"
+                    if industry.trk_sym:
+                        industry_html += f"  Symbol: {industry.trk_sym}<br>"
+
             # Create detailed popup
             popup_html = f"""
             <b>Section {sec_idx}{section_type}</b><br>
@@ -1076,16 +1171,57 @@ Examples:
             Type: {'Curved' if is_curved else 'Straight'}<br>
             {'Radius: ' + f'{node.radius_meters:.1f} m<br>' if is_curved else ''}
             Track Type: {section.track_type}
+            {industry_html}
             """
 
-            folium.PolyLine(
-                locations=points,
-                color=color,
-                weight=weight,
-                opacity=0.8,
-                popup=folium.Popup(popup_html, max_width=250),
-                tooltip=f'Section {sec_idx}'
-            ).add_to(m)
+            # Build tooltip with industry information
+            tooltip_text = f'Section {sec_idx}'
+            if sec_idx in industry_sections_map:
+                industries_on_section = industry_sections_map[sec_idx]
+                tooltip_text += ' - INDUSTRY'
+                for industry in industries_on_section[:3]:  # Limit to first 3
+                    tooltip_text += f'\n{industry.name}'
+                    if industry.trk_sym:
+                        tooltip_text += f' ({industry.trk_sym})'
+                if len(industries_on_section) > 3:
+                    tooltip_text += f'\n... and {len(industries_on_section) - 3} more'
+
+            # Collect points for label placement (if this is a label section)
+            if sec_idx in industry_label_sections:
+                all_section_points.extend(points)
+
+            # For industry tracks, add to both layers (green on main, purple on industries layer)
+            # For regular tracks, add only to main map
+            if is_industry_track:
+                # Add green version to main map (always visible)
+                folium.PolyLine(
+                    locations=points,
+                    color='green',  # Always green on main map
+                    weight=weight,
+                    opacity=0.8,
+                    popup=folium.Popup(popup_html, max_width=250),
+                    tooltip=tooltip_text
+                ).add_to(m)
+
+                # Add purple version to industries layer (toggleable)
+                folium.PolyLine(
+                    locations=points,
+                    color='purple',
+                    weight=weight,
+                    opacity=0.8,
+                    popup=folium.Popup(popup_html, max_width=250),
+                    tooltip=tooltip_text
+                ).add_to(industries_layer)
+            else:
+                # Regular track - add to main map only
+                folium.PolyLine(
+                    locations=points,
+                    color=color,
+                    weight=weight,
+                    opacity=0.8,
+                    popup=folium.Popup(popup_html, max_width=250),
+                    tooltip=tooltip_text
+                ).add_to(m)
 
             # Add hash mark at end point (visible only at high zoom)
             # This creates a small perpendicular line to show section boundaries
@@ -1118,6 +1254,28 @@ Examples:
                     popup=f"Section {sec_idx} boundary"
                 ).add_to(m)
 
+        # After all nodes in this section are drawn, add industry label if needed
+        if sec_idx in industry_label_sections and len(all_section_points) > 0:
+            industry = industry_label_sections[sec_idx]
+            # Calculate geometric center of all points in this entire section
+            avg_lat = sum(p[0] for p in all_section_points) / len(all_section_points)
+            avg_lon = sum(p[1] for p in all_section_points) / len(all_section_points)
+
+            # Create a DivIcon marker with the industry symbol
+            folium.Marker(
+                location=[avg_lat, avg_lon],
+                icon=folium.DivIcon(html=f'''
+                    <div class="industry-label" style="
+                        font-size: 14px;
+                        font-weight: bold;
+                        color: purple;
+                        text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff;
+                        white-space: nowrap;
+                        text-align: center;
+                    ">{industry.trk_sym}</div>
+                ''')
+            ).add_to(industries_layer)
+
     # Print error summary
     if section_errors:
         print(f'\n{"="*80}')
@@ -1126,6 +1284,10 @@ Examples:
         for error in section_errors:
             print(f'  - {error}')
         print(f'{"="*80}\n')
+
+    # Add industries layer to map (if there are any industries)
+    if industry_db and industry_sections_map:
+        industries_layer.add_to(m)
 
     # Add layer control
     folium.LayerControl(collapsed=False).add_to(m)
@@ -1172,6 +1334,47 @@ Examples:
 """
 
     m.get_root().html.add_child(folium.Element(zoom_control_script))
+
+    # Add zoom-based scaling for industry labels
+    industry_label_script = """
+<script>
+(function() {
+    setTimeout(function() {
+        var mapName = '""" + m.get_name() + """';
+        var mapObj = window[mapName];
+
+        if (mapObj) {
+            // Function to update industry label font size based on zoom
+            function updateIndustryLabels() {
+                var zoom = mapObj.getZoom();
+                // Scale exponentially: base size 14px at zoom 16, scales with zoom
+                // Formula: size = baseSize * (scaleFactor ^ (zoom - baseZoom))
+                var baseSize = 14;
+                var baseZoom = 16;
+                var scaleFactor = 1.3;
+                var fontSize = baseSize * Math.pow(scaleFactor, zoom - baseZoom);
+
+                // Clamp between 8px and 40px
+                fontSize = Math.max(8, Math.min(40, fontSize));
+
+                var labels = document.querySelectorAll('.industry-label');
+                labels.forEach(function(label) {
+                    label.style.fontSize = fontSize + 'px';
+                });
+            }
+
+            // Update on zoom change
+            mapObj.on('zoomend', updateIndustryLabels);
+
+            // Initial update
+            updateIndustryLabels();
+        }
+    }, 500);
+})();
+</script>
+"""
+
+    m.get_root().html.add_child(folium.Element(industry_label_script))
 
     # Add Ctrl+Click selection functionality
     selection_script = """
@@ -1417,21 +1620,109 @@ Examples:
         // Map to store signal triangle polygons
         var signalTriangles = new Map();  // id -> L.Polygon
 
-        // Create a new layer group for signals if needed
-        // Folium FeatureGroups are harder to find, so we'll create our own
-        var signalsLayer = L.featureGroup();
-        signalsLayer.addTo(mapObj);
-
-        // Try to find existing Signals FeatureGroup and use it if possible
+        // Find the Folium-created Signals layer
+        var signalsLayer = null;
         var foundExistingLayer = false;
+
+        // Search for existing Signals layer
+        var allFeatureGroups = [];
         mapObj.eachLayer(function(layer) {
-            if (layer instanceof L.FeatureGroup && layer.options.name === 'Signals') {
-                signalsLayer = layer;
-                foundExistingLayer = true;
+            if (layer instanceof L.FeatureGroup) {
+                var layerInfo = {
+                    name: layer.options.name,
+                    overlay_name: layer.options.overlay_name,
+                    id: layer._leaflet_id
+                };
+                allFeatureGroups.push(layerInfo);
             }
         });
 
-        console.log('Using signals layer:', foundExistingLayer ? 'found existing' : 'created new');
+        // Try to find by name in options
+        mapObj.eachLayer(function(layer) {
+            if (layer instanceof L.FeatureGroup || layer instanceof L.LayerGroup) {
+                var name = layer.options.name || layer.options.overlay_name;
+                if (name === 'Signals') {
+                    signalsLayer = layer;
+                    foundExistingLayer = true;
+                }
+            }
+        });
+
+        // Try to find via layer control
+        if (!signalsLayer && mapObj._controls) {
+            for (var i in mapObj._controls) {
+                var control = mapObj._controls[i];
+                if (control instanceof L.Control.Layers) {
+                    if (control._layers) {
+                        for (var layerId in control._layers) {
+                            var layerObj = control._layers[layerId];
+                            if (layerObj.name === 'Signals') {
+                                signalsLayer = layerObj.layer;
+                                foundExistingLayer = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!signalsLayer && control._overlays) {
+                        for (var name in control._overlays) {
+                            if (name === 'Signals') {
+                                signalsLayer = control._overlays[name];
+                                foundExistingLayer = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (signalsLayer) break;
+            }
+        }
+
+        // DOM-based search: find the Signals checkbox for manual wiring
+        if (!signalsLayer) {
+            var layerControlDiv = document.querySelector('.leaflet-control-layers');
+            if (layerControlDiv) {
+                var checkboxes = layerControlDiv.querySelectorAll('input[type="checkbox"]');
+                checkboxes.forEach(function(checkbox) {
+                    var label = checkbox.nextSibling;
+                    var labelText = label ? label.textContent.trim() : '';
+                    if (labelText === 'Signals') {
+                        window.signalsCheckbox = checkbox;
+                    }
+                });
+            }
+        }
+
+        // If still not found, create our own layer and wire it to the checkbox
+        if (!signalsLayer) {
+            signalsLayer = L.featureGroup();
+
+            // Wire up the checkbox to control our layer
+            if (window.signalsCheckbox) {
+                // Set initial state to unchecked (hidden)
+                window.signalsCheckbox.checked = false;
+
+                // Get reference to signal legend
+                var signalLegend = document.getElementById('signal-legend');
+
+                // Add event listener to checkbox
+                window.signalsCheckbox.addEventListener('change', function() {
+                    if (this.checked) {
+                        mapObj.addLayer(signalsLayer);
+                        if (signalLegend) signalLegend.style.display = 'block';
+                    } else {
+                        mapObj.removeLayer(signalsLayer);
+                        if (signalLegend) signalLegend.style.display = 'none';
+                    }
+                });
+            } else {
+                // Fallback: add layer to map if no checkbox found
+                signalsLayer.addTo(mapObj);
+                var signalLegend = document.getElementById('signal-legend');
+                if (signalLegend) signalLegend.style.display = 'block';
+            }
+
+            foundExistingLayer = false;
+        }
 
         // Calculate triangle size based on zoom level (inverse scaling)
         function calculateTriangleSize(zoom) {
@@ -1532,9 +1823,7 @@ Examples:
         // Update on zoom change
         mapObj.on('zoomend', updateSignalSizes);
 
-        console.log('Dynamic signal rendering initialized:', signalData.length, 'signals');
-
-    }, 600);  // Wait slightly longer than other initialization
+    }, 1000);  // Wait longer for Folium layers to fully initialize
 })();
 </script>
 """
