@@ -798,26 +798,37 @@ Examples:
         lng_formatter="function(num) {return L.Util.formatNum(num, 6);}",
     ).add_to(m)
 
-    # Add scale bar (bottom left)
+# Add scale bar (bottom left)
     scale_script = """
 <script>
 (function() {
-    setTimeout(function() {
+    function addScaleControl() {
         var mapName = '""" + m.get_name() + """';
         var mapObj = window[mapName];
 
-        if (mapObj) {
-            L.control.scale({imperial: true, metric: true, position: 'bottomleft'}).addTo(mapObj);
+        if (mapObj && L && L.control && L.control.scale) {
+            try {
+                L.control.scale({imperial: true, metric: true, position: 'bottomleft'}).addTo(mapObj);
+            } catch (e) {
+                console.error("Error adding scale control:", e);
+                setTimeout(addScaleControl, 500);
+            }
         } else {
-            console.error("Map object not found for scale bar:", mapName);
+            setTimeout(addScaleControl, 200);
         }
-    }, 100);
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', addScaleControl);
+    } else {
+        addScaleControl();
+    }
 })();
 </script>
 """
     m.get_root().html.add_child(folium.Element(scale_script))
 
-    # Add background opacity control
+# Add background opacity control
     opacity_control_js = '''
 <div id="opacity-control" style="position: fixed;
             bottom: 80px; left: 10px; width: 200px;
@@ -833,45 +844,55 @@ Examples:
 
 <script>
 (function() {
-    // Wait for map to be ready
-    setTimeout(function() {
+    function initOpacityControl() {
         var mapName = "''' + m.get_name() + '''";
         var mapObj = window[mapName];
 
-        if (!mapObj) {
-            console.error("Map object not found:", mapName);
+        if (!mapObj || typeof mapObj.eachLayer !== 'function') {
+            setTimeout(initOpacityControl, 200);
             return;
         }
 
-        // Store references to all base tile layers
-        var baseLayers = [];
-        mapObj.eachLayer(function(layer) {
-            if (layer instanceof L.TileLayer) {
-                baseLayers.push(layer);
+        try {
+            // Store references to all base tile layers
+            var baseLayers = [];
+            mapObj.eachLayer(function(layer) {
+                if (layer instanceof L.TileLayer) {
+                    baseLayers.push(layer);
+                }
+            });
+
+            console.log("Found", baseLayers.length, "base layers");
+
+            // Function to update base layer opacity
+            function updateBaseLayerOpacity(opacity) {
+                var opacityValue = opacity / 100.0;
+
+                baseLayers.forEach(function(layer) {
+                    layer.setOpacity(opacityValue);
+                });
+
+                document.getElementById('opacity-value').textContent = opacity;
             }
-        });
 
-        console.log("Found", baseLayers.length, "base layers");
-
-        // Function to update base layer opacity
-        function updateBaseLayerOpacity(opacity) {
-            var opacityValue = opacity / 100.0;
-
-            baseLayers.forEach(function(layer) {
-                layer.setOpacity(opacityValue);
-            });
-
-            document.getElementById('opacity-value').textContent = opacity;
+            // Add event listener to slider
+            var slider = document.getElementById('opacity-slider');
+            if (slider) {
+                slider.addEventListener('input', function(e) {
+                    updateBaseLayerOpacity(e.target.value);
+                });
+            }
+        } catch (e) {
+            console.error("Error initializing opacity control:", e);
+            setTimeout(initOpacityControl, 500);
         }
-
-        // Add event listener to slider
-        var slider = document.getElementById('opacity-slider');
-        if (slider) {
-            slider.addEventListener('input', function(e) {
-                updateBaseLayerOpacity(e.target.value);
-            });
-        }
-    }, 500); // Wait 500ms for map to fully initialize
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initOpacityControl);
+    } else {
+        setTimeout(initOpacityControl, 500);
+    }
 })();
 </script>
 '''
@@ -1292,16 +1313,21 @@ Examples:
     # Add layer control
     folium.LayerControl(collapsed=False).add_to(m)
 
-    # Add zoom-based visibility for hash marks
+# Add zoom-based visibility for hash marks
     # Hash marks only appear at zoom level 19 and above
     zoom_control_script = """
 <script>
 (function() {
-    setTimeout(function() {
+    function initHashMarks() {
         var mapName = '""" + m.get_name() + """';
         var mapObj = window[mapName];
 
-        if (mapObj) {
+        if (!mapObj || typeof mapObj.on !== 'function' || typeof mapObj.eachLayer !== 'function') {
+            setTimeout(initHashMarks, 200);
+            return;
+        }
+
+        try {
             // Function to update hash mark visibility based on zoom
             function updateHashMarks() {
                 var zoom = mapObj.getZoom();
@@ -1327,23 +1353,37 @@ Examples:
 
             // Initial update
             updateHashMarks();
+        } catch (e) {
+            console.error("Error initializing hash marks:", e);
+            setTimeout(initHashMarks, 500);
         }
-    }, 500);
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initHashMarks);
+    } else {
+        setTimeout(initHashMarks, 500);
+    }
 })();
 </script>
 """
 
     m.get_root().html.add_child(folium.Element(zoom_control_script))
 
-    # Add zoom-based scaling for industry labels
+# Add zoom-based scaling for industry labels
     industry_label_script = """
 <script>
 (function() {
-    setTimeout(function() {
+    function initIndustryLabels() {
         var mapName = '""" + m.get_name() + """';
         var mapObj = window[mapName];
 
-        if (mapObj) {
+        if (!mapObj || typeof mapObj.on !== 'function') {
+            setTimeout(initIndustryLabels, 200);
+            return;
+        }
+
+        try {
             // Function to update industry label font size based on zoom
             function updateIndustryLabels() {
                 var zoom = mapObj.getZoom();
@@ -1368,26 +1408,37 @@ Examples:
 
             // Initial update
             updateIndustryLabels();
+        } catch (e) {
+            console.error("Error initializing industry labels:", e);
+            setTimeout(initIndustryLabels, 500);
         }
-    }, 500);
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initIndustryLabels);
+    } else {
+        setTimeout(initIndustryLabels, 500);
+    }
 })();
 </script>
 """
 
     m.get_root().html.add_child(folium.Element(industry_label_script))
 
-    # Add Ctrl+Click selection functionality
+# Add Ctrl+Click selection functionality
     selection_script = """
 <script>
 (function() {
-    setTimeout(function() {
+    function initTrackSelection() {
         var mapName = '""" + m.get_name() + """';
         var mapObj = window[mapName];
 
-        if (!mapObj) {
-            console.error('Map object not found');
+        if (!mapObj || typeof mapObj.eachLayer !== 'function') {
+            setTimeout(initTrackSelection, 200);
             return;
         }
+
+        try {
 
         // State management
         var selectedSections = new Map();
@@ -1588,9 +1639,19 @@ Examples:
             if (panel) panel.remove();
         }
 
-        console.log('Ctrl+Click selection functionality initialized');
+console.log('Ctrl+Click selection functionality initialized');
 
-    }, 500);  // Wait 500ms for map to fully initialize
+        } catch (e) {
+            console.error("Error initializing track selection:", e);
+            setTimeout(initTrackSelection, 500);
+        }
+    }
+    
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initTrackSelection);
+    } else {
+        setTimeout(initTrackSelection, 500);
+    }
 })();
 </script>
 """
@@ -1603,231 +1664,242 @@ Examples:
         signal_data_json = json.dumps(signal_metadata)
 
         signal_rendering_script = """
-<script>
-(function() {
-    setTimeout(function() {
-        var mapName = '""" + m.get_name() + """';
-        var mapObj = window[mapName];
-
-        if (!mapObj) {
-            console.error('Map object not found for signal rendering');
-            return;
-        }
-
-        // Signal metadata from Python
-        var signalData = """ + signal_data_json + """;
-
-        // Map to store signal triangle polygons
-        var signalTriangles = new Map();  // id -> L.Polygon
-
-        // Find the Folium-created Signals layer
-        var signalsLayer = null;
-        var foundExistingLayer = false;
-
-        // Search for existing Signals layer
-        var allFeatureGroups = [];
-        mapObj.eachLayer(function(layer) {
-            if (layer instanceof L.FeatureGroup) {
-                var layerInfo = {
-                    name: layer.options.name,
-                    overlay_name: layer.options.overlay_name,
-                    id: layer._leaflet_id
-                };
-                allFeatureGroups.push(layerInfo);
-            }
-        });
-
-        // Try to find by name in options
-        mapObj.eachLayer(function(layer) {
-            if (layer instanceof L.FeatureGroup || layer instanceof L.LayerGroup) {
-                var name = layer.options.name || layer.options.overlay_name;
-                if (name === 'Signals') {
-                    signalsLayer = layer;
-                    foundExistingLayer = true;
+        <script>
+        (function() {
+            function initSignalRendering() {
+                var mapName = '""" + m.get_name() + """';
+                var mapObj = window[mapName];
+        
+                if (!mapObj || typeof mapObj.eachLayer !== 'function') {
+                    setTimeout(initSignalRendering, 200);
+                    return;
                 }
-            }
-        });
-
-        // Try to find via layer control
-        if (!signalsLayer && mapObj._controls) {
-            for (var i in mapObj._controls) {
-                var control = mapObj._controls[i];
-                if (control instanceof L.Control.Layers) {
-                    if (control._layers) {
-                        for (var layerId in control._layers) {
-                            var layerObj = control._layers[layerId];
-                            if (layerObj.name === 'Signals') {
-                                signalsLayer = layerObj.layer;
-                                foundExistingLayer = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!signalsLayer && control._overlays) {
-                        for (var name in control._overlays) {
-                            if (name === 'Signals') {
-                                signalsLayer = control._overlays[name];
-                                foundExistingLayer = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-                if (signalsLayer) break;
-            }
-        }
-
-        // DOM-based search: find the Signals checkbox for manual wiring
-        if (!signalsLayer) {
-            var layerControlDiv = document.querySelector('.leaflet-control-layers');
-            if (layerControlDiv) {
-                var checkboxes = layerControlDiv.querySelectorAll('input[type="checkbox"]');
-                checkboxes.forEach(function(checkbox) {
-                    var label = checkbox.nextSibling;
-                    var labelText = label ? label.textContent.trim() : '';
-                    if (labelText === 'Signals') {
-                        window.signalsCheckbox = checkbox;
+        
+                try {
+        
+                // Signal metadata from Python
+                var signalData = """ + signal_data_json + """;
+        
+                // Map to store signal triangle polygons
+                var signalTriangles = new Map();  // id -> L.Polygon
+        
+                // Find the Folium-created Signals layer
+                var signalsLayer = null;
+                var foundExistingLayer = false;
+        
+                // Search for existing Signals layer
+                var allFeatureGroups = [];
+                mapObj.eachLayer(function(layer) {
+                    if (layer instanceof L.FeatureGroup) {
+                        var layerInfo = {
+                            name: layer.options.name,
+                            overlay_name: layer.options.overlay_name,
+                            id: layer._leaflet_id
+                        };
+                        allFeatureGroups.push(layerInfo);
                     }
                 });
-            }
-        }
-
-        // If still not found, create our own layer and wire it to the checkbox
-        if (!signalsLayer) {
-            signalsLayer = L.featureGroup();
-
-            // Wire up the checkbox to control our layer
-            if (window.signalsCheckbox) {
-                // Set initial state to unchecked (hidden)
-                window.signalsCheckbox.checked = false;
-
-                // Get reference to signal legend
-                var signalLegend = document.getElementById('signal-legend');
-
-                // Add event listener to checkbox
-                window.signalsCheckbox.addEventListener('change', function() {
-                    if (this.checked) {
-                        mapObj.addLayer(signalsLayer);
-                        if (signalLegend) signalLegend.style.display = 'block';
+        
+                // Try to find by name in options
+                mapObj.eachLayer(function(layer) {
+                    if (layer instanceof L.FeatureGroup || layer instanceof L.LayerGroup) {
+                        var name = layer.options.name || layer.options.overlay_name;
+                        if (name === 'Signals') {
+                            signalsLayer = layer;
+                            foundExistingLayer = true;
+                        }
+                    }
+                });
+        
+                // Try to find via layer control
+                if (!signalsLayer && mapObj._controls) {
+                    for (var i in mapObj._controls) {
+                        var control = mapObj._controls[i];
+                        if (control instanceof L.Control.Layers) {
+                            if (control._layers) {
+                                for (var layerId in control._layers) {
+                                    var layerObj = control._layers[layerId];
+                                    if (layerObj.name === 'Signals') {
+                                        signalsLayer = layerObj.layer;
+                                        foundExistingLayer = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!signalsLayer && control._overlays) {
+                                for (var name in control._overlays) {
+                                    if (name === 'Signals') {
+                                        signalsLayer = control._overlays[name];
+                                        foundExistingLayer = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (signalsLayer) break;
+                    }
+                }
+        
+                // DOM-based search: find the Signals checkbox for manual wiring
+                if (!signalsLayer) {
+                    var layerControlDiv = document.querySelector('.leaflet-control-layers');
+                    if (layerControlDiv) {
+                        var checkboxes = layerControlDiv.querySelectorAll('input[type="checkbox"]');
+                        checkboxes.forEach(function(checkbox) {
+                            var label = checkbox.nextSibling;
+                            var labelText = label ? label.textContent.trim() : '';
+                            if (labelText === 'Signals') {
+                                window.signalsCheckbox = checkbox;
+                            }
+                        });
+                    }
+                }
+        
+                // If still not found, create our own layer and wire it to the checkbox
+                if (!signalsLayer) {
+                    signalsLayer = L.featureGroup();
+        
+                    // Wire up the checkbox to control our layer
+                    if (window.signalsCheckbox) {
+                        // Set initial state to unchecked (hidden)
+                        window.signalsCheckbox.checked = false;
+        
+                        // Get reference to signal legend
+                        var signalLegend = document.getElementById('signal-legend');
+        
+                        // Add event listener to checkbox
+                        window.signalsCheckbox.addEventListener('change', function() {
+                            if (this.checked) {
+                                mapObj.addLayer(signalsLayer);
+                                if (signalLegend) signalLegend.style.display = 'block';
+                            } else {
+                                mapObj.removeLayer(signalsLayer);
+                                if (signalLegend) signalLegend.style.display = 'none';
+                            }
+                        });
                     } else {
-                        mapObj.removeLayer(signalsLayer);
-                        if (signalLegend) signalLegend.style.display = 'none';
+                        // Fallback: add layer to map if no checkbox found
+                        signalsLayer.addTo(mapObj);
+                        var signalLegend = document.getElementById('signal-legend');
+                        if (signalLegend) signalLegend.style.display = 'block';
                     }
-                });
-            } else {
-                // Fallback: add layer to map if no checkbox found
-                signalsLayer.addTo(mapObj);
-                var signalLegend = document.getElementById('signal-legend');
-                if (signalLegend) signalLegend.style.display = 'block';
-            }
-
-            foundExistingLayer = false;
-        }
-
-        // Calculate triangle size based on zoom level (inverse scaling)
-        function calculateTriangleSize(zoom) {
-            var baseSize = 0.00010;  // Base size at zoom 16
-            var scaleFactor = Math.pow(0.75, Math.max(0, zoom - 16));
-            return Math.max(0.00005, baseSize * scaleFactor);
-        }
-
-        // Calculate triangle vertices given center, rotation, and size
-        function calculateTriangleVertices(lat, lon, rotationDeg, triangleSize) {
-            // Convert rotation to radians and flip 180 degrees
-            var rotationRad = (rotationDeg * Math.PI / 180.0) + Math.PI;
-
-            // Vertex 1: tip of triangle (pointing direction)
-            var v1_lat = lat + triangleSize * Math.cos(rotationRad);
-            var v1_lon = lon + triangleSize * Math.sin(rotationRad) / Math.cos(lat * Math.PI / 180.0);
-
-            // Vertices 2 and 3: base of triangle (perpendicular to pointing direction)
-            var baseAngle1 = rotationRad + 2.5;
-            var baseAngle2 = rotationRad - 2.5;
-            var baseDistance = triangleSize * 0.6;
-
-            var v2_lat = lat + baseDistance * Math.cos(baseAngle1);
-            var v2_lon = lon + baseDistance * Math.sin(baseAngle1) / Math.cos(lat * Math.PI / 180.0);
-
-            var v3_lat = lat + baseDistance * Math.cos(baseAngle2);
-            var v3_lon = lon + baseDistance * Math.sin(baseAngle2) / Math.cos(lat * Math.PI / 180.0);
-
-            return [
-                [v1_lat, v1_lon],
-                [v2_lat, v2_lon],
-                [v3_lat, v3_lon]
-            ];
-        }
-
-        // Create all signal triangles
-        function createSignalTriangles(zoom) {
-            var triangleSize = calculateTriangleSize(zoom);
-
-            signalData.forEach(function(signal) {
-                // Determine colors based on signal type
-                var fillColor = signal.is_absolute ? '#FF6B35' : '#FFD700';
-                var borderColor = signal.is_absolute ? '#8B0000' : '#800080';
-
-                // Calculate vertices
-                var vertices = calculateTriangleVertices(
-                    signal.lat,
-                    signal.lon,
-                    signal.rotation,
-                    triangleSize
-                );
-
-                // Create polygon
-                var triangle = L.polygon(vertices, {
-                    color: borderColor,
-                    fillColor: fillColor,
-                    fillOpacity: 0.9,
-                    weight: 2
-                });
-
-                // Add popup and tooltip
-                triangle.bindPopup(signal.popup_html, {maxWidth: 300});
-                triangle.bindTooltip(signal.tooltip);
-
-                // Add to layer and store reference
-                triangle.addTo(signalsLayer);
-                signalTriangles.set(signal.id, triangle);
-            });
-        }
-
-        // Update signal triangle sizes based on zoom
-        function updateSignalSizes() {
-            var zoom = mapObj.getZoom();
-            var triangleSize = calculateTriangleSize(zoom);
-
-            signalTriangles.forEach(function(polygon, signalId) {
-                // Find signal data
-                var signal = signalData.find(function(s) { return s.id === signalId; });
-                if (!signal) return;
-
-                // Recalculate vertices
-                var vertices = calculateTriangleVertices(
-                    signal.lat,
-                    signal.lon,
-                    signal.rotation,
-                    triangleSize
-                );
-
-                // Update polygon
-                polygon.setLatLngs(vertices);
-            });
-        }
-
-        // Create initial triangles
-        var initialZoom = mapObj.getZoom();
-        createSignalTriangles(initialZoom);
-
+        
+                    foundExistingLayer = false;
+                }
+        
+                // Calculate triangle size based on zoom level (inverse scaling)
+                function calculateTriangleSize(zoom) {
+                    var baseSize = 0.00010;  // Base size at zoom 16
+                    var scaleFactor = Math.pow(0.75, Math.max(0, zoom - 16));
+                    return Math.max(0.00005, baseSize * scaleFactor);
+                }
+        
+                // Calculate triangle vertices given center, rotation, and size
+                function calculateTriangleVertices(lat, lon, rotationDeg, triangleSize) {
+                    // Convert rotation to radians and flip 180 degrees
+                    var rotationRad = (rotationDeg * Math.PI / 180.0) + Math.PI;
+        
+                    // Vertex 1: tip of triangle (pointing direction)
+                    var v1_lat = lat + triangleSize * Math.cos(rotationRad);
+                    var v1_lon = lon + triangleSize * Math.sin(rotationRad) / Math.cos(lat * Math.PI / 180.0);
+        
+                    // Vertices 2 and 3: base of triangle (perpendicular to pointing direction)
+                    var baseAngle1 = rotationRad + 2.5;
+                    var baseAngle2 = rotationRad - 2.5;
+                    var baseDistance = triangleSize * 0.6;
+        
+                    var v2_lat = lat + baseDistance * Math.cos(baseAngle1);
+                    var v2_lon = lon + baseDistance * Math.sin(baseAngle1) / Math.cos(lat * Math.PI / 180.0);
+        
+                    var v3_lat = lat + baseDistance * Math.cos(baseAngle2);
+                    var v3_lon = lon + baseDistance * Math.sin(baseAngle2) / Math.cos(lat * Math.PI / 180.0);
+        
+                    return [
+                        [v1_lat, v1_lon],
+                        [v2_lat, v2_lon],
+                        [v3_lat, v3_lon]
+                    ];
+                }
+        
+                // Create all signal triangles
+                function createSignalTriangles(zoom) {
+                    var triangleSize = calculateTriangleSize(zoom);
+        
+                    signalData.forEach(function(signal) {
+                        // Determine colors based on signal type
+                        var fillColor = signal.is_absolute ? '#FF6B35' : '#FFD700';
+                        var borderColor = signal.is_absolute ? '#8B0000' : '#800080';
+        
+                        // Calculate vertices
+                        var vertices = calculateTriangleVertices(
+                            signal.lat,
+                            signal.lon,
+                            signal.rotation,
+                            triangleSize
+                        );
+        
+                        // Create polygon
+                        var triangle = L.polygon(vertices, {
+                            color: borderColor,
+                            fillColor: fillColor,
+                            fillOpacity: 0.9,
+                            weight: 2
+                        });
+        
+                        // Add popup and tooltip
+                        triangle.bindPopup(signal.popup_html, {maxWidth: 300});
+                        triangle.bindTooltip(signal.tooltip);
+        
+                        // Add to layer and store reference
+                        triangle.addTo(signalsLayer);
+                        signalTriangles.set(signal.id, triangle);
+                    });
+                }
+        
+                // Update signal triangle sizes based on zoom
+                function updateSignalSizes() {
+                    var zoom = mapObj.getZoom();
+                    var triangleSize = calculateTriangleSize(zoom);
+        
+                    signalTriangles.forEach(function(polygon, signalId) {
+                        // Find signal data
+                        var signal = signalData.find(function(s) { return s.id === signalId; });
+                        if (!signal) return;
+        
+                        // Recalculate vertices
+                        var vertices = calculateTriangleVertices(
+                            signal.lat,
+                            signal.lon,
+                            signal.rotation,
+                            triangleSize
+                        );
+        
+                        // Update polygon
+                        polygon.setLatLngs(vertices);
+                    });
+                }
+        
+                // Create initial triangles
+                var initialZoom = mapObj.getZoom();
+                createSignalTriangles(initialZoom);
+        
         // Update on zoom change
-        mapObj.on('zoomend', updateSignalSizes);
-
-    }, 1000);  // Wait longer for Folium layers to fully initialize
-})();
-</script>
-"""
-
+                    mapObj.on('zoomend', updateSignalSizes);
+        
+                } catch (e) {
+                    console.error("Error initializing signal rendering:", e);
+                    setTimeout(initSignalRendering, 500);
+                }
+            }
+            
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', initSignalRendering);
+            } else {
+                setTimeout(initSignalRendering, 1000);
+            }
+        })();
+        </script>
+        """
         m.get_root().html.add_child(folium.Element(signal_rendering_script))
 
     # Save map
