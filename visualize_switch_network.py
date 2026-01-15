@@ -411,45 +411,74 @@ def calculate_spawn_position(spawn, section, tile_geo_bounds):
     # Get distance from unk4 (stored as 4 bytes, interpret as float)
     distance = struct.unpack('<f', spawn.unk4)[0]
 
-    # Get forward nodes (non-reverse paths)
-    forward_nodes = [n for n in section.nodes if not n.is_reverse_path]
-    if not forward_nodes:
+    # Find the canonical node (the one with num_segments > 0)
+    # This is the "real" node used for rendering; the other is just for traversal
+    canonical_node = None
+    reciprocal_node = None
+    for node in section.nodes:
+        if node.is_reverse_path:
+            continue
+        if node.num_segments > 0:
+            canonical_node = node
+        else:
+            reciprocal_node = node
+
+    if canonical_node is None:
+        # Fallback: just use first non-reverse node
+        forward_nodes = [n for n in section.nodes if not n.is_reverse_path]
+        if not forward_nodes:
+            return None
+        canonical_node = forward_nodes[0]
+        reciprocal_node = forward_nodes[1] if len(forward_nodes) > 1 else None
+
+    # Determine tiles for start and end positions
+    # The canonical node's position is on its tile
+    # The canonical node's end_position is on the reciprocal node's tile (for cross-tile sections)
+    canonical_tile = (canonical_node.tile_index[0], canonical_node.tile_index[1])
+    if reciprocal_node is not None:
+        reciprocal_tile = (reciprocal_node.tile_index[0], reciprocal_node.tile_index[1])
+    else:
+        reciprocal_tile = canonical_tile
+
+    # Check we have bounds for both tiles
+    if canonical_tile not in tile_geo_bounds or reciprocal_tile not in tile_geo_bounds:
         return None
 
-    # dir indicates which node to measure from (0 or 1)
-    node_idx = min(spawn.dir, len(forward_nodes) - 1)
-    node = forward_nodes[node_idx]
-
-    # Get tile bounds
-    tile = (node.tile_index[0], node.tile_index[1])
-    if tile not in tile_geo_bounds:
-        return None
-
-    # Get start and end positions
-    start_pos = node.position
-    end_pos = node.end_position
+    # Convert both endpoints to lat/lon using their respective tile bounds
+    # (This is how the track plotting code handles cross-tile sections)
+    start_lat, start_lon = convert_run8_to_latlon(
+        canonical_node.position[0], canonical_node.position[2],
+        tile_geo_bounds[canonical_tile]
+    )
+    end_lat, end_lon = convert_run8_to_latlon(
+        canonical_node.end_position[0], canonical_node.end_position[2],
+        tile_geo_bounds[reciprocal_tile]
+    )
 
     # Calculate total length of the track segment
-    if abs(node.radius_meters) > 0.1:
-        # Curved track - use arc length
-        total_length = node.arcLen_meters
-    else:
-        # Straight track - calculate distance
-        dx = end_pos[0] - start_pos[0]
-        dz = end_pos[2] - start_pos[2]
+    total_length = canonical_node.arcLen_meters
+    if total_length <= 0:
+        # Fallback: calculate from coordinates
+        dx = canonical_node.end_position[0] - canonical_node.position[0]
+        dz = canonical_node.end_position[2] - canonical_node.position[2]
         total_length = math.sqrt(dx*dx + dz*dz)
 
     # Calculate interpolation factor (clamp to 0-1)
     t = min(1.0, distance / total_length) if total_length > 0 else 0
 
-    # Interpolate position along the track
-    # Note: This is a linear interpolation which works well for straight tracks
-    # For curved tracks, this is an approximation
-    x = start_pos[0] + t * (end_pos[0] - start_pos[0])
-    z = start_pos[2] + t * (end_pos[2] - start_pos[2])
+    # dir indicates which END of the track to measure from:
+    # dir=0: measure from canonical_node.position (start of track)
+    # dir=1: measure from canonical_node.end_position (end of track), going backwards
+    if spawn.dir == 0:
+        # Interpolate from start toward end
+        lat = start_lat + t * (end_lat - start_lat)
+        lon = start_lon + t * (end_lon - start_lon)
+    else:
+        # Interpolate from end toward start (reverse direction)
+        lat = end_lat + t * (start_lat - end_lat)
+        lon = end_lon + t * (start_lon - end_lon)
 
-    # Convert to lat/lon
-    return convert_run8_to_latlon(x, z, tile_geo_bounds[tile])
+    return (lat, lon)
 
 def is_switch(section):
     """Check if a section is a switch (has multiple unique paths)"""
