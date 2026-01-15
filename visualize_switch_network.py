@@ -393,9 +393,20 @@ def create_signal_marker(lat, lon, rotation_y, is_absolute, signal_info, popup_h
 def get_spawn_type_name(type_num):
     """Convert spawn point type number to display name.
 
-    TODO: Fill in actual type mappings when available.
+    Returns the type name with the integer value in parentheses.
     """
-    return f"Type {type_num} ({type_num})"
+    type_names = {
+        0: "Spawn Point",
+        1: "Crew Change",
+        2: "Crew Change & Hold",
+        3: "Passenger",
+        4: "Passenger Crew Change",
+        5: "Passenger Crew Change & Hold",
+        6: "Relinquish",
+        7: "Passenger Relinquish"
+    }
+    name = type_names.get(type_num, "Unknown Type")
+    return f"{name} ({type_num})"
 
 def calculate_spawn_position(spawn, section, tile_geo_bounds):
     """Calculate lat/lon for a spawn point on a track section.
