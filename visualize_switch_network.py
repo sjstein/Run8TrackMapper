@@ -20,7 +20,7 @@ import csv
 import argparse
 from explore_trackdb import TrackDatabase
 from explore_signalHeadDb import SignalDatabase
-from r8lib import IndustryFile, Industry
+from r8lib import IndustryFile, Industry, SpawnFile, SpawnPoint
 
 # Constants
 METERS_PER_DEGREE_LAT = 111320.0
@@ -390,6 +390,96 @@ def create_signal_marker(lat, lon, rotation_y, is_absolute, signal_info, popup_h
     )
     triangle.add_to(layer)
 
+def get_spawn_type_name(type_num):
+    """Convert spawn point type number to display name.
+
+    TODO: Fill in actual type mappings when available.
+    """
+    return f"Type {type_num} ({type_num})"
+
+def calculate_spawn_position(spawn, section, tile_geo_bounds):
+    """Calculate lat/lon for a spawn point on a track section.
+
+    Args:
+        spawn: SpawnPoint object with track_id, dir, and unk4 (distance)
+        section: TrackSection object
+        tile_geo_bounds: Dict of tile coords -> geographic bounds
+
+    Returns:
+        Tuple (lat, lon) or None if position cannot be calculated
+    """
+    # Get distance from unk4 (stored as 4 bytes, interpret as float)
+    distance = struct.unpack('<f', spawn.unk4)[0]
+
+    # Find the canonical node (the one with num_segments > 0)
+    # This is the "real" node used for rendering; the other is just for traversal
+    canonical_node = None
+    reciprocal_node = None
+    for node in section.nodes:
+        if node.is_reverse_path:
+            continue
+        if node.num_segments > 0:
+            canonical_node = node
+        else:
+            reciprocal_node = node
+
+    if canonical_node is None:
+        # Fallback: just use first non-reverse node
+        forward_nodes = [n for n in section.nodes if not n.is_reverse_path]
+        if not forward_nodes:
+            return None
+        canonical_node = forward_nodes[0]
+        reciprocal_node = forward_nodes[1] if len(forward_nodes) > 1 else None
+
+    # Determine tiles for start and end positions
+    # The canonical node's position is on its tile
+    # The canonical node's end_position is on the reciprocal node's tile (for cross-tile sections)
+    canonical_tile = (canonical_node.tile_index[0], canonical_node.tile_index[1])
+    if reciprocal_node is not None:
+        reciprocal_tile = (reciprocal_node.tile_index[0], reciprocal_node.tile_index[1])
+    else:
+        reciprocal_tile = canonical_tile
+
+    # Check we have bounds for both tiles
+    if canonical_tile not in tile_geo_bounds or reciprocal_tile not in tile_geo_bounds:
+        return None
+
+    # Convert both endpoints to lat/lon using their respective tile bounds
+    # (This is how the track plotting code handles cross-tile sections)
+    start_lat, start_lon = convert_run8_to_latlon(
+        canonical_node.position[0], canonical_node.position[2],
+        tile_geo_bounds[canonical_tile]
+    )
+    end_lat, end_lon = convert_run8_to_latlon(
+        canonical_node.end_position[0], canonical_node.end_position[2],
+        tile_geo_bounds[reciprocal_tile]
+    )
+
+    # Calculate total length of the track segment
+    total_length = canonical_node.arcLen_meters
+    if total_length <= 0:
+        # Fallback: calculate from coordinates
+        dx = canonical_node.end_position[0] - canonical_node.position[0]
+        dz = canonical_node.end_position[2] - canonical_node.position[2]
+        total_length = math.sqrt(dx*dx + dz*dz)
+
+    # Calculate interpolation factor (clamp to 0-1)
+    t = min(1.0, distance / total_length) if total_length > 0 else 0
+
+    # dir indicates which END of the track to measure from:
+    # dir=0: measure from canonical_node.position (start of track)
+    # dir=1: measure from canonical_node.end_position (end of track), going backwards
+    if spawn.dir == 0:
+        # Interpolate from start toward end
+        lat = start_lat + t * (end_lat - start_lat)
+        lon = start_lon + t * (end_lon - start_lon)
+    else:
+        # Interpolate from end toward start (reverse direction)
+        lat = end_lat + t * (start_lat - end_lat)
+        lon = end_lon + t * (start_lon - end_lon)
+
+    return (lat, lon)
+
 def is_switch(section):
     """Check if a section is a switch (has multiple unique paths)"""
     if len(section.nodes) <= 2:
@@ -631,13 +721,19 @@ Examples:
     parser.add_argument('--industry-db', default=None,
                         help='Optional: Industry database file (.ind) to visualize industry tracks')
     parser.add_argument('--route-prefix', type=int, default=None,
-                        help='Required with --industry-db: Route prefix to filter industry tracks')
+                        help='Required with --industry-db or --ai-locations: Route prefix to filter tracks')
+    parser.add_argument('--ai-locations', default=None,
+                        help='Optional: AI special locations file (.r8) to visualize spawn points')
 
     args = parser.parse_args()
 
-    # Validate --route-prefix is provided if --industry-db is used
+    # Validate --route-prefix is provided if --industry-db or --ai-locations is used
     if args.industry_db and args.route_prefix is None:
         print('ERROR: --route-prefix is required when using --industry-db')
+        return 1
+
+    if args.ai_locations and args.route_prefix is None:
+        print('ERROR: --route-prefix is required when using --ai-locations')
         return 1
 
     print('='*80)
@@ -707,6 +803,46 @@ Examples:
             import traceback
             traceback.print_exc()
             industry_db = None
+
+    # Load AI special locations if provided
+    spawn_db = None
+    spawn_sections_map = {}  # Maps track_id -> list of spawn points
+
+    if args.ai_locations:
+        print(f'Loading AI special locations: {args.ai_locations}')
+        try:
+            with open(args.ai_locations, 'rb') as f:
+                mem_map = f.read()
+
+            # Parse spawn file
+            spawn_file = SpawnFile()
+            ptr = 0
+            spawn_file.unk1 = mem_map[ptr:ptr + 4]
+            ptr += 4
+            spawn_file.num_rec = int.from_bytes(mem_map[ptr:ptr + 4], 'little')
+            ptr += 4
+
+            for i in range(spawn_file.num_rec):
+                spawn = SpawnPoint(mem_map, ptr)
+                spawn_file.spawn_points.append(spawn)
+                ptr += len(spawn)
+
+                # Filter by route prefix and build mapping
+                if spawn.route_prefix == args.route_prefix:
+                    track_id = spawn.track_id
+                    if track_id not in spawn_sections_map:
+                        spawn_sections_map[track_id] = []
+                    spawn_sections_map[track_id].append(spawn)
+
+            spawn_db = spawn_file
+            print(f'Loaded {spawn_file.num_rec} AI special locations')
+            print(f'Filtered to route prefix {args.route_prefix}: {len(spawn_sections_map)} track sections with spawn points')
+
+        except Exception as e:
+            print(f'WARNING: Failed to load AI special locations: {e}')
+            import traceback
+            traceback.print_exc()
+            spawn_db = None
 
     # Validate starting section exists
     if args.start_section not in section_map:
@@ -943,6 +1079,9 @@ Examples:
     # ===== Create Industries Layer =====
     industries_layer = folium.FeatureGroup(name='Industries', show=False)
 
+    # ===== Create AI Locations Layer =====
+    ai_locations_layer = folium.FeatureGroup(name='AI Locations', show=False)
+
     # ===== Plot Signals =====
     signal_metadata = []  # Collect signal data for JavaScript rendering
     if signal_db:
@@ -981,7 +1120,7 @@ Examples:
                                     f" Version: {route.version}<br> Diverging: {route.is_diverging}<br>"
                                     f" Speed class: {route.route_max_mph}<br>"
                                     f" Block Detectors: {route.block_detector_indices}<br>"
-                                    f" Prev Signals: {route.prev_signal_indices}<br>")
+                                    f" Adjacent Signals: {route.prev_signal_indices}<br>")
                     if route.switch_connectors:
                         routes_html += f" Switch connectors:   {len(route.switch_connectors)}<br>"
                         for sc in route.switch_connectors:
@@ -1309,6 +1448,61 @@ Examples:
     # Add industries layer to map (if there are any industries)
     if industry_db and industry_sections_map:
         industries_layer.add_to(m)
+
+    # ===== Plot AI Spawn Locations =====
+    if spawn_db and spawn_sections_map:
+        print('Plotting AI spawn locations...')
+        spawns_plotted = 0
+        spawns_skipped = 0
+
+        for track_id, spawns in spawn_sections_map.items():
+            # Only plot spawn points on tracks that are in our visualization
+            if track_id not in all_sections:
+                spawns_skipped += len(spawns)
+                continue
+
+            section = section_map[track_id]
+
+            for spawn in spawns:
+                pos = calculate_spawn_position(spawn, section, tile_geo_bounds)
+                if pos is None:
+                    spawns_skipped += 1
+                    continue
+
+                lat, lon = pos
+
+                # Format time as HH:MM
+                hours = spawn.time // 60
+                minutes = spawn.time % 60
+                time_str = f"{hours:02d}:{minutes:02d}"
+
+                # Get type name
+                type_name = get_spawn_type_name(spawn.type)
+
+                # Create popup content
+                popup_html = f"""
+                <b>{spawn.name}</b><br>
+                Type: {type_name}<br>
+                Direction: {spawn.dir}<br>
+                Time: {time_str}
+                """
+
+                # Create marker with yellow star emoji
+                folium.Marker(
+                    location=[lat, lon],
+                    icon=folium.DivIcon(html='''
+                        <div style="font-size: 20px; text-align: center;">&#11088;</div>
+                    '''),
+                    popup=folium.Popup(popup_html, max_width=200),
+                    tooltip=spawn.name
+                ).add_to(ai_locations_layer)
+
+                spawns_plotted += 1
+
+        ai_locations_layer.add_to(m)
+        print(f'  Plotted {spawns_plotted} AI spawn locations')
+        if spawns_skipped > 0:
+            print(f'  Skipped {spawns_skipped} locations (not on visualized tracks or missing tile data)')
 
     # Add layer control
     folium.LayerControl(collapsed=False).add_to(m)
@@ -1904,7 +2098,8 @@ console.log('Ctrl+Click selection functionality initialized');
 
     # Save map
     signal_suffix = '_with_signals' if args.signal_db else ''
-    output_file = f'{args.track_database.split(".")[0]}_{args.start_section}_depth{args.depth}{signal_suffix}.html'
+    ai_suffix = '_with_ai' if args.ai_locations else ''
+    output_file = f'{args.track_database.split(".")[0]}_{args.start_section}_depth{args.depth}{signal_suffix}{ai_suffix}.html'
     m.save(output_file)
     print(f'Map saved to: {output_file}')
     print()
