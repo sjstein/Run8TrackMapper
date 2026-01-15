@@ -1120,7 +1120,7 @@ Examples:
                                     f" Version: {route.version}<br> Diverging: {route.is_diverging}<br>"
                                     f" Speed class: {route.route_max_mph}<br>"
                                     f" Block Detectors: {route.block_detector_indices}<br>"
-                                    f" Prev Signals: {route.prev_signal_indices}<br>")
+                                    f" Adjacent Signals: {route.prev_signal_indices}<br>")
                     if route.switch_connectors:
                         routes_html += f" Switch connectors:   {len(route.switch_connectors)}<br>"
                         for sc in route.switch_connectors:
