@@ -1045,6 +1045,121 @@ Examples:
 '''
     m.get_root().html.add_child(folium.Element(opacity_control_js))
 
+    # Add search button and dialog
+    search_ui_html = '''
+<style>
+#search-btn {
+    position: fixed;
+    top: 10px;
+    left: 60px;
+    width: 36px;
+    height: 36px;
+    background-color: white;
+    border: 2px solid rgba(0,0,0,0.2);
+    border-radius: 4px;
+    cursor: pointer;
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+}
+#search-btn:hover {
+    background-color: #f4f4f4;
+}
+#search-dialog {
+    display: none;
+    position: fixed;
+    top: 50px;
+    left: 60px;
+    width: 280px;
+    background-color: white;
+    border: 2px solid #333;
+    border-radius: 4px;
+    padding: 15px;
+    z-index: 10000;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+}
+#search-dialog h3 {
+    margin: 0 0 12px 0;
+    font-size: 15px;
+}
+#search-input {
+    width: 100%;
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 3px;
+    font-size: 13px;
+    box-sizing: border-box;
+    margin-bottom: 12px;
+}
+.search-radio-group {
+    margin-bottom: 12px;
+}
+.search-radio-group label {
+    display: block;
+    margin: 6px 0;
+    cursor: pointer;
+}
+.search-radio-group input[type="radio"] {
+    margin-right: 8px;
+}
+.search-buttons {
+    display: flex;
+    gap: 10px;
+}
+.search-buttons button {
+    flex: 1;
+    padding: 8px;
+    border: none;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: bold;
+}
+#search-submit {
+    background-color: #007bff;
+    color: white;
+}
+#search-submit:hover {
+    background-color: #0056b3;
+}
+#search-cancel {
+    background-color: #6c757d;
+    color: white;
+}
+#search-cancel:hover {
+    background-color: #545b62;
+}
+#search-error {
+    color: #dc3545;
+    font-size: 12px;
+    margin-top: 8px;
+    display: none;
+}
+</style>
+
+<button id="search-btn" title="Search">&#128269;</button>
+
+<div id="search-dialog">
+    <h3>Search Map</h3>
+    <input type="text" id="search-input" placeholder="Enter search value...">
+    <div class="search-radio-group">
+        <label><input type="radio" name="search-type" value="section" checked> Track Section Number</label>
+        <label><input type="radio" name="search-type" value="signal"> Signal Head Number</label>
+        <label><input type="radio" name="search-type" value="industry"> Industry Tag</label>
+    </div>
+    <div class="search-buttons">
+        <button id="search-submit">Search</button>
+        <button id="search-cancel">Cancel</button>
+    </div>
+    <div id="search-error"></div>
+</div>
+'''
+    m.get_root().html.add_child(folium.Element(search_ui_html))
+
     # Draw tile boundaries (in a toggleable layer)
     tile_layer = folium.FeatureGroup(name='Tile Boundaries', show=False)
 
@@ -1087,8 +1202,81 @@ Examples:
 
     tile_layer.add_to(m)
 
+    # Add tile legend (hidden by default, shown when Tile Boundaries layer is visible)
+    tile_legend_html = '''
+    <div id="tile-legend" style="position: fixed;
+                bottom: 270px; right: 10px; width: 180px;
+                background-color: white; border:2px solid grey; z-index:9999;
+                font-size:11px; padding: 8px; border-radius: 4px; display: none;">
+    <div style="margin-bottom: 5px; font-weight: bold;">Tile Boundaries</div>
+    <div style="margin: 3px 0;">
+        <span style="display: inline-block; width: 14px; height: 14px; border: 2px solid black; vertical-align: middle; margin-right: 5px;"></span> Normal Tile
+    </div>
+    <div style="margin: 3px 0;">
+        <span style="display: inline-block; width: 14px; height: 14px; border: 2px solid red; vertical-align: middle; margin-right: 5px;"></span> Re-aligned Tile
+    </div>
+    </div>
+    '''
+    m.get_root().html.add_child(folium.Element(tile_legend_html))
+
+    # JavaScript to toggle tile legend visibility with Tile Boundaries layer
+    tile_legend_script = """
+<script>
+(function() {
+    function initTileLegend() {
+        var tileLegend = document.getElementById('tile-legend');
+        if (!tileLegend) {
+            setTimeout(initTileLegend, 200);
+            return;
+        }
+
+        // Find the Tile Boundaries checkbox in the layer control
+        var layerControlDiv = document.querySelector('.leaflet-control-layers');
+        if (!layerControlDiv) {
+            setTimeout(initTileLegend, 200);
+            return;
+        }
+
+        var checkboxes = layerControlDiv.querySelectorAll('input[type="checkbox"]');
+        var tileCheckbox = null;
+
+        checkboxes.forEach(function(checkbox) {
+            var label = checkbox.nextSibling;
+            var labelText = label ? label.textContent.trim() : '';
+            if (labelText === 'Tile Boundaries') {
+                tileCheckbox = checkbox;
+            }
+        });
+
+        if (!tileCheckbox) {
+            setTimeout(initTileLegend, 200);
+            return;
+        }
+
+        // Set initial state based on checkbox
+        tileLegend.style.display = tileCheckbox.checked ? 'block' : 'none';
+
+        // Add event listener to toggle legend visibility
+        tileCheckbox.addEventListener('change', function() {
+            tileLegend.style.display = this.checked ? 'block' : 'none';
+        });
+
+        console.log('Tile legend initialized');
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initTileLegend);
+    } else {
+        setTimeout(initTileLegend, 500);
+    }
+})();
+</script>
+"""
+    m.get_root().html.add_child(folium.Element(tile_legend_script))
+
     # ===== Create Industries Layer =====
     industries_layer = folium.FeatureGroup(name='Industries', show=False)
+    industry_metadata = []  # Collect industry data for search functionality
 
     # ===== Create AI Locations Layer =====
     ai_locations_layer = folium.FeatureGroup(name='AI Locations', show=False)
@@ -1431,6 +1619,14 @@ Examples:
             # Calculate geometric center of all points in this entire section
             avg_lat = sum(p[0] for p in all_section_points) / len(all_section_points)
             avg_lon = sum(p[1] for p in all_section_points) / len(all_section_points)
+
+            # Collect industry metadata for search functionality
+            industry_metadata.append({
+                'tag': industry.trk_sym,
+                'name': industry.name,
+                'lat': avg_lat,
+                'lon': avg_lon
+            })
 
             # Create a DivIcon marker with the industry symbol
             folium.Marker(
@@ -2106,6 +2302,203 @@ console.log('Ctrl+Click selection functionality initialized');
         </script>
         """
         m.get_root().html.add_child(folium.Element(signal_rendering_script))
+
+    # Add search functionality script
+    import json
+    signal_data_for_search = json.dumps(signal_metadata) if signal_metadata else '[]'
+    industry_data_for_search = json.dumps(industry_metadata) if industry_metadata else '[]'
+
+    search_script = """
+<script>
+(function() {
+    function initSearch() {
+        var mapName = '""" + m.get_name() + """';
+        var mapObj = window[mapName];
+
+        if (!mapObj || typeof mapObj.eachLayer !== 'function') {
+            setTimeout(initSearch, 200);
+            return;
+        }
+
+        try {
+            // Data from Python
+            var signalData = """ + signal_data_for_search + """;
+            var industryData = """ + industry_data_for_search + """;
+
+            // Build section position map from polylines
+            var sectionPositions = new Map();
+            mapObj.eachLayer(function(layer) {
+                if (layer instanceof L.Polyline && !(layer instanceof L.Polygon)) {
+                    var popup = layer.getPopup();
+                    if (!popup) return;
+
+                    var popupContent = popup.getContent();
+                    var popupHtml = '';
+                    if (typeof popupContent === 'string') {
+                        popupHtml = popupContent;
+                    } else if (popupContent && popupContent.innerHTML !== undefined) {
+                        popupHtml = popupContent.innerHTML;
+                    }
+
+                    if (popupHtml.includes('boundary')) return;
+
+                    var match = popupHtml.match(/<b>Section (\\d+)/);
+                    if (match) {
+                        var secId = parseInt(match[1]);
+                        var bounds = layer.getBounds();
+                        var center = bounds.getCenter();
+                        sectionPositions.set(secId, {
+                            lat: center.lat,
+                            lon: center.lng,
+                            layer: layer
+                        });
+                    }
+                }
+            });
+
+            console.log('Search initialized: ' + sectionPositions.size + ' sections, ' +
+                        signalData.length + ' signals, ' + industryData.length + ' industries');
+
+            // UI elements
+            var searchBtn = document.getElementById('search-btn');
+            var searchDialog = document.getElementById('search-dialog');
+            var searchInput = document.getElementById('search-input');
+            var searchSubmit = document.getElementById('search-submit');
+            var searchCancel = document.getElementById('search-cancel');
+            var searchError = document.getElementById('search-error');
+
+            // Show/hide dialog
+            searchBtn.addEventListener('click', function() {
+                searchDialog.style.display = searchDialog.style.display === 'none' ? 'block' : 'none';
+                if (searchDialog.style.display === 'block') {
+                    searchInput.focus();
+                    searchInput.select();
+                }
+            });
+
+            searchCancel.addEventListener('click', function() {
+                searchDialog.style.display = 'none';
+                searchError.style.display = 'none';
+            });
+
+            // Handle Enter key
+            searchInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    doSearch();
+                }
+            });
+
+            searchSubmit.addEventListener('click', doSearch);
+
+            // Highlight state
+            var highlightedLayer = null;
+            var originalStyle = null;
+
+            function clearHighlight() {
+                if (highlightedLayer && originalStyle) {
+                    highlightedLayer.setStyle(originalStyle);
+                    highlightedLayer = null;
+                    originalStyle = null;
+                }
+            }
+
+            function doSearch() {
+                var query = searchInput.value.trim();
+                var searchType = document.querySelector('input[name="search-type"]:checked').value;
+
+                searchError.style.display = 'none';
+                clearHighlight();
+
+                if (!query) {
+                    searchError.textContent = 'Please enter a search value';
+                    searchError.style.display = 'block';
+                    return;
+                }
+
+                var result = null;
+
+                if (searchType === 'section') {
+                    var secNum = parseInt(query);
+                    if (isNaN(secNum)) {
+                        searchError.textContent = 'Please enter a valid section number';
+                        searchError.style.display = 'block';
+                        return;
+                    }
+                    if (sectionPositions.has(secNum)) {
+                        var sec = sectionPositions.get(secNum);
+                        result = { lat: sec.lat, lon: sec.lon, layer: sec.layer, name: 'Section ' + secNum };
+                    }
+                } else if (searchType === 'signal') {
+                    var sigNum = parseInt(query);
+                    if (isNaN(sigNum)) {
+                        searchError.textContent = 'Please enter a valid signal number';
+                        searchError.style.display = 'block';
+                        return;
+                    }
+                    var signal = signalData.find(function(s) { return s.id === sigNum; });
+                    if (signal) {
+                        result = { lat: signal.lat, lon: signal.lon, name: 'Signal ' + sigNum };
+                    }
+                } else if (searchType === 'industry') {
+                    var queryUpper = query.toUpperCase();
+                    var industry = industryData.find(function(ind) {
+                        return ind.tag && ind.tag.toUpperCase() === queryUpper;
+                    });
+                    if (industry) {
+                        result = { lat: industry.lat, lon: industry.lon, name: industry.tag + ' (' + industry.name + ')' };
+                    }
+                }
+
+                if (result) {
+                    // Pan to location and zoom in
+                    mapObj.setView([result.lat, result.lon], 18);
+
+                    // Highlight the found item if it has a layer (sections)
+                    if (result.layer) {
+                        originalStyle = {
+                            color: result.layer.options.color,
+                            weight: result.layer.options.weight,
+                            opacity: result.layer.options.opacity
+                        };
+                        result.layer.setStyle({
+                            color: '#FF00FF',
+                            weight: 8,
+                            opacity: 1.0
+                        });
+                        highlightedLayer = result.layer;
+
+                        // Open the popup
+                        result.layer.openPopup();
+                    }
+
+                    // Hide dialog
+                    searchDialog.style.display = 'none';
+
+                    console.log('Found: ' + result.name + ' at ' + result.lat.toFixed(6) + ', ' + result.lon.toFixed(6));
+                } else {
+                    searchError.textContent = 'Not found: ' + query;
+                    searchError.style.display = 'block';
+                }
+            }
+
+            // Clear highlight on map click
+            mapObj.on('click', clearHighlight);
+
+        } catch (e) {
+            console.error("Error initializing search:", e);
+            setTimeout(initSearch, 500);
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initSearch);
+    } else {
+        setTimeout(initSearch, 1500);
+    }
+})();
+</script>
+"""
+    m.get_root().html.add_child(folium.Element(search_script))
 
     # Save map
     signal_suffix = '_with_signals' if args.signal_db else ''
