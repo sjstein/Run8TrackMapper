@@ -945,38 +945,8 @@ Examples:
         lng_formatter="function(num) {return L.Util.formatNum(num, 6);}",
     ).add_to(m)
 
-# Add scale bar (bottom left)
-    scale_script = """
-<script>
-(function() {
-    function addScaleControl() {
-        var mapName = '""" + m.get_name() + """';
-        var mapObj = window[mapName];
-
-        if (mapObj && L && L.control && L.control.scale) {
-            try {
-                L.control.scale({imperial: true, metric: true, position: 'bottomleft'}).addTo(mapObj);
-            } catch (e) {
-                console.error("Error adding scale control:", e);
-                setTimeout(addScaleControl, 500);
-            }
-        } else {
-            setTimeout(addScaleControl, 200);
-        }
-    }
-    
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', addScaleControl);
-    } else {
-        addScaleControl();
-    }
-})();
-</script>
-"""
-    m.get_root().html.add_child(folium.Element(scale_script))
-
-# Add background opacity control
-    opacity_control_js = '''
+# Add background opacity control (HTML only - script moved to unified init)
+    opacity_control_html = '''
 <div id="opacity-control" style="position: fixed;
             bottom: 80px; left: 10px; width: 200px;
             background-color: white; border:2px solid grey; z-index:9999;
@@ -988,62 +958,8 @@ Examples:
     <span id="opacity-value">100</span>%
 </div>
 </div>
-
-<script>
-(function() {
-    function initOpacityControl() {
-        var mapName = "''' + m.get_name() + '''";
-        var mapObj = window[mapName];
-
-        if (!mapObj || typeof mapObj.eachLayer !== 'function') {
-            setTimeout(initOpacityControl, 200);
-            return;
-        }
-
-        try {
-            // Store references to all base tile layers
-            var baseLayers = [];
-            mapObj.eachLayer(function(layer) {
-                if (layer instanceof L.TileLayer) {
-                    baseLayers.push(layer);
-                }
-            });
-
-            console.log("Found", baseLayers.length, "base layers");
-
-            // Function to update base layer opacity
-            function updateBaseLayerOpacity(opacity) {
-                var opacityValue = opacity / 100.0;
-
-                baseLayers.forEach(function(layer) {
-                    layer.setOpacity(opacityValue);
-                });
-
-                document.getElementById('opacity-value').textContent = opacity;
-            }
-
-            // Add event listener to slider
-            var slider = document.getElementById('opacity-slider');
-            if (slider) {
-                slider.addEventListener('input', function(e) {
-                    updateBaseLayerOpacity(e.target.value);
-                });
-            }
-        } catch (e) {
-            console.error("Error initializing opacity control:", e);
-            setTimeout(initOpacityControl, 500);
-        }
-    }
-    
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initOpacityControl);
-    } else {
-        setTimeout(initOpacityControl, 500);
-    }
-})();
-</script>
 '''
-    m.get_root().html.add_child(folium.Element(opacity_control_js))
+    m.get_root().html.add_child(folium.Element(opacity_control_html))
 
     # Add search button and dialog
     search_ui_html = '''
@@ -1218,61 +1134,6 @@ Examples:
     </div>
     '''
     m.get_root().html.add_child(folium.Element(tile_legend_html))
-
-    # JavaScript to toggle tile legend visibility with Tile Boundaries layer
-    tile_legend_script = """
-<script>
-(function() {
-    function initTileLegend() {
-        var tileLegend = document.getElementById('tile-legend');
-        if (!tileLegend) {
-            setTimeout(initTileLegend, 200);
-            return;
-        }
-
-        // Find the Tile Boundaries checkbox in the layer control
-        var layerControlDiv = document.querySelector('.leaflet-control-layers');
-        if (!layerControlDiv) {
-            setTimeout(initTileLegend, 200);
-            return;
-        }
-
-        var checkboxes = layerControlDiv.querySelectorAll('input[type="checkbox"]');
-        var tileCheckbox = null;
-
-        checkboxes.forEach(function(checkbox) {
-            var label = checkbox.nextSibling;
-            var labelText = label ? label.textContent.trim() : '';
-            if (labelText === 'Tile Boundaries') {
-                tileCheckbox = checkbox;
-            }
-        });
-
-        if (!tileCheckbox) {
-            setTimeout(initTileLegend, 200);
-            return;
-        }
-
-        // Set initial state based on checkbox
-        tileLegend.style.display = tileCheckbox.checked ? 'block' : 'none';
-
-        // Add event listener to toggle legend visibility
-        tileCheckbox.addEventListener('change', function() {
-            tileLegend.style.display = this.checked ? 'block' : 'none';
-        });
-
-        console.log('Tile legend initialized');
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initTileLegend);
-    } else {
-        setTimeout(initTileLegend, 500);
-    }
-})();
-</script>
-"""
-    m.get_root().html.add_child(folium.Element(tile_legend_script))
 
     # ===== Create Industries Layer =====
     industries_layer = folium.FeatureGroup(name='Industries', show=False)
@@ -1807,136 +1668,229 @@ Examples:
     # Add layer control
     folium.LayerControl(collapsed=False).add_to(m)
 
-# Add zoom-based visibility for hash marks
-    # Hash marks only appear at zoom level 19 and above
-    zoom_control_script = """
+# Add global map data and unified initialization script
+    import json
+
+    # Determine if we have signal data to render
+    has_signals = bool(signal_db and signal_metadata)
+
+    unified_script = """
 <script>
+// Global map data - embedded once, used by all features
+window.mapData = {
+    signals: """ + json.dumps(signal_metadata) + """,
+    industries: """ + json.dumps(industry_metadata) + """,
+    sections: """ + json.dumps(section_metadata) + """,
+    hasSignals: """ + ('true' if has_signals else 'false') + """
+};
+
+// Shared layer references - populated once during init
+window.mapFeatures = {
+    boundaryPolylines: [],
+    sectionPolylines: new Map(),
+    signalsLayer: null,
+    tileLayers: [],  // All base tile layers
+    initialized: false
+};
+
 (function() {
-    function initHashMarks() {
+    function initMapFeatures() {
         var mapName = '""" + m.get_name() + """';
         var mapObj = window[mapName];
 
-        if (!mapObj || typeof mapObj.on !== 'function' || typeof mapObj.eachLayer !== 'function') {
-            setTimeout(initHashMarks, 200);
+        if (!mapObj || typeof mapObj.eachLayer !== 'function' || typeof mapObj.on !== 'function') {
+            setTimeout(initMapFeatures, 200);
             return;
         }
 
         try {
-            // Function to update hash mark visibility based on zoom
-            function updateHashMarks() {
-                var zoom = mapObj.getZoom();
-                var minZoom = 19;  // Hash marks appear at zoom 19+
+            console.log('Initializing map features...');
 
-                mapObj.eachLayer(function(layer) {
-                    if (layer instanceof L.Polyline && layer.options.popup) {
-                        var popup = layer.options.popup;
-                        if (typeof popup === 'string' && popup.includes('boundary')) {
-                            // This is a hash mark
-                            if (zoom >= minZoom) {
-                                layer.setStyle({opacity: 0.8});
-                            } else {
-                                layer.setStyle({opacity: 0});
+            // ========== SINGLE LAYER ITERATION ==========
+            // Categorize all layers in one pass
+            mapObj.eachLayer(function(layer) {
+                // Check for tile layer (for opacity control)
+                if (layer instanceof L.TileLayer) {
+                    window.mapFeatures.tileLayers.push(layer);
+                }
+
+                // Check for polylines (track sections and boundaries)
+                if (layer instanceof L.Polyline && !(layer instanceof L.Polygon)) {
+                    var popup = layer.getPopup();
+                    if (!popup) return;
+
+                    var popupContent = popup.getContent();
+                    var popupHtml = '';
+                    if (typeof popupContent === 'string') {
+                        popupHtml = popupContent;
+                    } else if (popupContent && popupContent.innerHTML !== undefined) {
+                        popupHtml = popupContent.innerHTML;
+                    }
+
+                    if (popupHtml.includes('boundary')) {
+                        // This is a boundary/hash mark polyline
+                        window.mapFeatures.boundaryPolylines.push(layer);
+                    } else {
+                        // This is a track section polyline
+                        var match = popupHtml.match(/<b>Section (\\d+)/);
+                        if (match) {
+                            var secId = parseInt(match[1]);
+                            window.mapFeatures.sectionPolylines.set(secId, layer);
+                        }
+                    }
+                }
+
+                // Check for signals layer
+                if (layer instanceof L.FeatureGroup || layer instanceof L.LayerGroup) {
+                    var name = layer.options.name || layer.options.overlay_name;
+                    if (name === 'Signals') {
+                        window.mapFeatures.signalsLayer = layer;
+                    }
+                }
+            });
+
+            // If signals layer not found via options, try layer control
+            if (!window.mapFeatures.signalsLayer && mapObj._controls) {
+                for (var i in mapObj._controls) {
+                    var control = mapObj._controls[i];
+                    if (control instanceof L.Control.Layers) {
+                        if (control._layers) {
+                            for (var layerId in control._layers) {
+                                var layerObj = control._layers[layerId];
+                                if (layerObj.name === 'Signals') {
+                                    window.mapFeatures.signalsLayer = layerObj.layer;
+                                    break;
+                                }
                             }
                         }
                     }
-                });
+                    if (window.mapFeatures.signalsLayer) break;
+                }
             }
 
-            // Update on zoom change
-            mapObj.on('zoomend', updateHashMarks);
+            window.mapFeatures.initialized = true;
+            console.log('Layer categorization complete:',
+                window.mapFeatures.boundaryPolylines.length, 'boundaries,',
+                window.mapFeatures.sectionPolylines.size, 'sections');
 
-            // Initial update
-            updateHashMarks();
-        } catch (e) {
-            console.error("Error initializing hash marks:", e);
-            setTimeout(initHashMarks, 500);
-        }
-    }
-    
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initHashMarks);
-    } else {
-        setTimeout(initHashMarks, 500);
-    }
-})();
-</script>
-"""
-
-    m.get_root().html.add_child(folium.Element(zoom_control_script))
-
-# Add zoom-based scaling for industry labels
-    industry_label_script = """
-<script>
-(function() {
-    function initIndustryLabels() {
-        var mapName = '""" + m.get_name() + """';
-        var mapObj = window[mapName];
-
-        if (!mapObj || typeof mapObj.on !== 'function') {
-            setTimeout(initIndustryLabels, 200);
-            return;
-        }
-
-        try {
-            // Function to update industry label font size based on zoom
-            function updateIndustryLabels() {
-                var zoom = mapObj.getZoom();
-                // Scale exponentially: base size 14px at zoom 16, scales with zoom
-                // Formula: size = baseSize * (scaleFactor ^ (zoom - baseZoom))
-                var baseSize = 14;
-                var baseZoom = 16;
-                var scaleFactor = 1.3;
-                var fontSize = baseSize * Math.pow(scaleFactor, zoom - baseZoom);
-
-                // Clamp between 8px and 40px
-                fontSize = Math.max(8, Math.min(40, fontSize));
-
-                var labels = document.querySelectorAll('.industry-label');
-                labels.forEach(function(label) {
-                    label.style.fontSize = fontSize + 'px';
-                });
+            // ========== INITIALIZE ALL FEATURES ==========
+            initOpacityControl(mapObj);
+            initTileLegend(mapObj);
+            initHashMarks(mapObj);
+            initIndustryLabels(mapObj);
+            initTrackSelection(mapObj);
+            initSearch(mapObj);
+            if (window.mapData.hasSignals) {
+                initSignalRendering(mapObj);
             }
 
-            // Update on zoom change
-            mapObj.on('zoomend', updateIndustryLabels);
+            console.log('All map features initialized');
 
-            // Initial update
-            updateIndustryLabels();
         } catch (e) {
-            console.error("Error initializing industry labels:", e);
-            setTimeout(initIndustryLabels, 500);
+            console.error("Error initializing map features:", e);
+            setTimeout(initMapFeatures, 500);
         }
     }
-    
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initIndustryLabels);
-    } else {
-        setTimeout(initIndustryLabels, 500);
-    }
-})();
-</script>
-"""
 
-    m.get_root().html.add_child(folium.Element(industry_label_script))
+    // ========== OPACITY CONTROL ==========
+    function initOpacityControl(mapObj) {
+        var slider = document.getElementById('opacity-slider');
+        var valueDisplay = document.getElementById('opacity-value');
 
-# Add Ctrl+Click selection functionality
-    selection_script = """
-<script>
-(function() {
-    function initTrackSelection() {
-        var mapName = '""" + m.get_name() + """';
-        var mapObj = window[mapName];
+        if (!slider) return;
 
-        if (!mapObj || typeof mapObj.eachLayer !== 'function') {
-            setTimeout(initTrackSelection, 200);
-            return;
+        // Track current opacity value
+        var currentOpacity = 1.0;
+
+        // Function to apply opacity to all current tile layers
+        function applyOpacity() {
+            mapObj.eachLayer(function(layer) {
+                if (layer instanceof L.TileLayer) {
+                    layer.setOpacity(currentOpacity);
+                }
+            });
         }
 
-        try {
+        // Update opacity when slider changes
+        slider.addEventListener('input', function() {
+            currentOpacity = this.value / 100;
+            applyOpacity();
+            if (valueDisplay) valueDisplay.textContent = this.value;
+        });
 
-        // State management
+        // Re-apply opacity when base layer changes
+        mapObj.on('baselayerchange', function() {
+            applyOpacity();
+        });
+    }
+
+    // ========== TILE LEGEND TOGGLE ==========
+    function initTileLegend(mapObj) {
+        var tileLegend = document.getElementById('tile-legend');
+        if (!tileLegend) return;
+
+        // Find the Tile Boundaries checkbox in layer control
+        var layerControlDiv = document.querySelector('.leaflet-control-layers');
+        if (!layerControlDiv) return;
+
+        var checkboxes = layerControlDiv.querySelectorAll('input[type="checkbox"]');
+        checkboxes.forEach(function(checkbox) {
+            var label = checkbox.nextSibling;
+            var labelText = label ? label.textContent.trim() : '';
+            if (labelText === 'Tile Boundaries') {
+                checkbox.addEventListener('change', function() {
+                    tileLegend.style.display = this.checked ? 'block' : 'none';
+                });
+            }
+        });
+    }
+
+    // ========== HASH MARKS VISIBILITY ==========
+    function initHashMarks(mapObj) {
+        var boundaryPolylines = window.mapFeatures.boundaryPolylines;
+        if (boundaryPolylines.length === 0) return;
+
+        function updateHashMarks() {
+            var zoom = mapObj.getZoom();
+            var minZoom = 19;  // Hash marks appear at zoom 19+
+
+            boundaryPolylines.forEach(function(layer) {
+                if (zoom >= minZoom) {
+                    layer.setStyle({opacity: 0.8});
+                } else {
+                    layer.setStyle({opacity: 0});
+                }
+            });
+        }
+
+        mapObj.on('zoomend', updateHashMarks);
+        updateHashMarks();
+    }
+
+    // ========== INDUSTRY LABELS SCALING ==========
+    function initIndustryLabels(mapObj) {
+        function updateIndustryLabels() {
+            var zoom = mapObj.getZoom();
+            var baseSize = 14;
+            var baseZoom = 16;
+            var scaleFactor = 1.3;
+            var fontSize = baseSize * Math.pow(scaleFactor, zoom - baseZoom);
+            fontSize = Math.max(8, Math.min(40, fontSize));
+
+            var labels = document.querySelectorAll('.industry-label');
+            labels.forEach(function(label) {
+                label.style.fontSize = fontSize + 'px';
+            });
+        }
+
+        mapObj.on('zoomend', updateIndustryLabels);
+        updateIndustryLabels();
+    }
+
+    // ========== TRACK SELECTION (Ctrl+Click) ==========
+    function initTrackSelection(mapObj) {
         var selectedSections = new Map();
-        var sectionPolylines = new Map();
+        var sectionPolylines = window.mapFeatures.sectionPolylines;
 
         // Build section lengths map from pre-computed data
         var sectionLengths = new Map();
@@ -1948,53 +1902,16 @@ Examples:
             });
         });
 
-        // Extract section ID from popup HTML (still needed to match polylines to sections)
-        function extractSectionId(popupHtml) {
-            var match = popupHtml.match(/<b>Section (\\d+)/);
-            return match ? parseInt(match[1]) : null;
-        }
-
-        // Build polyline map (still need to iterate layers to get polyline references for highlighting)
-        mapObj.eachLayer(function(layer) {
-            if (layer instanceof L.Polyline && !(layer instanceof L.Polygon)) {
-                var popup = layer.getPopup();
-                if (!popup) return;
-
-                var popupContent = popup.getContent();
-                var popupHtml = '';
-                if (typeof popupContent === 'string') {
-                    popupHtml = popupContent;
-                } else if (popupContent && popupContent.innerHTML !== undefined) {
-                    popupHtml = popupContent.innerHTML;
-                }
-
-                if (popupHtml.includes('boundary')) return;
-
-                var secId = extractSectionId(popupHtml);
-                if (secId !== null) {
-                    sectionPolylines.set(secId, layer);
-                }
-            }
-        });
-
         console.log('Selection initialized:', sectionPolylines.size, 'sections with', sectionLengths.size, 'length records');
 
         // Attach click handlers
         var handlersAttached = 0;
         sectionPolylines.forEach(function(layer, secId) {
             layer.on('click', function(e) {
-                console.log('Click detected on section', secId, 'Ctrl key:', e.originalEvent ? e.originalEvent.ctrlKey : 'no originalEvent');
-
                 if (e.originalEvent && e.originalEvent.ctrlKey) {
-                    // Use Leaflet's proper event stopping
                     L.DomEvent.stop(e);
-
-                    // Close any open popup
                     mapObj.closePopup();
-
                     toggleSection(secId);
-
-                    console.log('Ctrl+Click processed for section', secId);
                     return false;
                 }
             });
@@ -2002,18 +1919,15 @@ Examples:
         });
         console.log('Attached click handlers to', handlersAttached, 'sections');
 
-        // Toggle section selection
         function toggleSection(secId) {
             var layer = sectionPolylines.get(secId);
             if (!layer) return;
 
             if (selectedSections.has(secId)) {
-                // Deselect
                 var original = selectedSections.get(secId);
                 layer.setStyle(original);
                 selectedSections.delete(secId);
             } else {
-                // Select
                 var original = {
                     color: layer.options.color,
                     weight: layer.options.weight,
@@ -2026,11 +1940,9 @@ Examples:
                     opacity: 1.0
                 });
             }
-
             updateTotals();
         }
 
-        // Calculate and display totals
         function updateTotals() {
             var totalMeters = 0;
             var totalFeet = 0;
@@ -2047,7 +1959,6 @@ Examples:
             updateSummaryPanel(sections, totalMeters, totalFeet);
         }
 
-        // Create/update summary panel
         function updateSummaryPanel(sections, totalMeters, totalFeet) {
             var panelId = 'track-selection-summary';
             var panel = document.getElementById(panelId);
@@ -2071,10 +1982,8 @@ Examples:
 
             var html = '<div style="font-weight: bold; margin-bottom: 10px; font-size: 14px;">' +
                 'Selected Track Sections</div>';
-
             html += '<div style="margin-bottom: 10px;">' +
                 '<strong>Sections:</strong> ' + sections.join(', ') + '</div>';
-
             html += '<div style="margin-bottom: 10px; padding: 8px; ' +
                 'background-color: #f0f0f0; border-radius: 3px;">' +
                 '<strong>Total Length:</strong><br>' +
@@ -2084,7 +1993,6 @@ Examples:
                 '  <span style="font-size: 14px; font-weight: bold;">' +
                 totalMeters.toFixed(1) + '</span> meters' +
                 '</div></div>';
-
             html += '<button id="clear-selection-btn" ' +
                 'style="width: 100%; padding: 8px; cursor: pointer; ' +
                 'background-color: #dc3545; color: white; border: none; ' +
@@ -2098,7 +2006,6 @@ Examples:
             };
         }
 
-        // Clear all selections
         function clearAllSelections() {
             selectedSections.forEach(function(original, secId) {
                 var layer = sectionPolylines.get(secId);
@@ -2110,505 +2017,305 @@ Examples:
             if (panel) panel.remove();
         }
 
-console.log('Ctrl+Click selection functionality initialized');
+        console.log('Ctrl+Click selection functionality initialized');
+    }
 
-        } catch (e) {
-            console.error("Error initializing track selection:", e);
-            setTimeout(initTrackSelection, 500);
+    // ========== SEARCH FUNCTIONALITY ==========
+    function initSearch(mapObj) {
+        var signalData = window.mapData.signals || [];
+        var industryData = window.mapData.industries || [];
+        var sectionData = window.mapData.sections || [];
+        var sectionPolylines = window.mapFeatures.sectionPolylines;
+
+        // Build section position map from pre-computed data
+        var sectionPositions = new Map();
+        sectionData.forEach(function(sec) {
+            sectionPositions.set(sec.id, {
+                lat: sec.lat,
+                lon: sec.lon,
+                layer: sectionPolylines.get(sec.id) || null
+            });
+        });
+
+        console.log('Search initialized: ' + sectionPositions.size + ' sections, ' +
+                    signalData.length + ' signals, ' + industryData.length + ' industries');
+
+        // UI elements
+        var searchBtn = document.getElementById('search-btn');
+        var searchDialog = document.getElementById('search-dialog');
+        var searchInput = document.getElementById('search-input');
+        var searchSubmit = document.getElementById('search-submit');
+        var searchCancel = document.getElementById('search-cancel');
+        var searchError = document.getElementById('search-error');
+
+        if (!searchBtn || !searchDialog) return;
+
+        searchBtn.addEventListener('click', function() {
+            searchDialog.style.display = searchDialog.style.display === 'none' ? 'block' : 'none';
+            if (searchDialog.style.display === 'block') {
+                searchInput.focus();
+                searchInput.select();
+            }
+        });
+
+        searchCancel.addEventListener('click', function() {
+            searchDialog.style.display = 'none';
+            searchError.style.display = 'none';
+        });
+
+        searchInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                doSearch();
+            }
+        });
+
+        searchSubmit.addEventListener('click', doSearch);
+
+        var highlightedLayer = null;
+        var originalStyle = null;
+
+        function clearHighlight() {
+            if (highlightedLayer && originalStyle) {
+                highlightedLayer.setStyle(originalStyle);
+                highlightedLayer = null;
+                originalStyle = null;
+            }
         }
-    }
-    
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initTrackSelection);
-    } else {
-        setTimeout(initTrackSelection, 500);
-    }
-})();
-</script>
-"""
 
-    m.get_root().html.add_child(folium.Element(selection_script))
+        function doSearch() {
+            var query = searchInput.value.trim();
+            var searchType = document.querySelector('input[name="search-type"]:checked').value;
 
-    # Add global map data object (signals, industries, sections) - embedded once, used by multiple scripts
-    import json
-    global_data_script = """
-<script>
-window.mapData = {
-    signals: """ + json.dumps(signal_metadata) + """,
-    industries: """ + json.dumps(industry_metadata) + """,
-    sections: """ + json.dumps(section_metadata) + """
-};
-</script>
-"""
-    m.get_root().html.add_child(folium.Element(global_data_script))
+            searchError.style.display = 'none';
+            clearHighlight();
 
-    # Add dynamic signal rendering with zoom-dependent sizing
-    if signal_db and signal_metadata:
-        signal_rendering_script = """
-        <script>
-        (function() {
-            function initSignalRendering() {
-                var mapName = '""" + m.get_name() + """';
-                var mapObj = window[mapName];
+            if (!query) {
+                searchError.textContent = 'Please enter a search value';
+                searchError.style.display = 'block';
+                return;
+            }
 
-                if (!mapObj || typeof mapObj.eachLayer !== 'function') {
-                    setTimeout(initSignalRendering, 200);
+            var result = null;
+
+            if (searchType === 'section') {
+                var secNum = parseInt(query);
+                if (isNaN(secNum)) {
+                    searchError.textContent = 'Please enter a valid section number';
+                    searchError.style.display = 'block';
                     return;
                 }
-
-                try {
-
-                // Signal metadata from global data object
-                var signalData = window.mapData.signals;
-        
-                // Map to store signal triangle polygons
-                var signalTriangles = new Map();  // id -> L.Polygon
-        
-                // Find the Folium-created Signals layer
-                var signalsLayer = null;
-                var foundExistingLayer = false;
-        
-                // Search for existing Signals layer
-                var allFeatureGroups = [];
-                mapObj.eachLayer(function(layer) {
-                    if (layer instanceof L.FeatureGroup) {
-                        var layerInfo = {
-                            name: layer.options.name,
-                            overlay_name: layer.options.overlay_name,
-                            id: layer._leaflet_id
-                        };
-                        allFeatureGroups.push(layerInfo);
-                    }
+                if (sectionPositions.has(secNum)) {
+                    var sec = sectionPositions.get(secNum);
+                    result = { lat: sec.lat, lon: sec.lon, layer: sec.layer, name: 'Section ' + secNum };
+                }
+            } else if (searchType === 'signal') {
+                var sigNum = parseInt(query, 10);
+                if (isNaN(sigNum)) {
+                    searchError.textContent = 'Please enter a valid signal number';
+                    searchError.style.display = 'block';
+                    return;
+                }
+                var signal = signalData.find(function(s) {
+                    if (parseInt(s.id, 10) === sigNum) return true;
+                    if (s.all_ids && s.all_ids.indexOf(sigNum) !== -1) return true;
+                    return false;
                 });
-        
-                // Try to find by name in options
-                mapObj.eachLayer(function(layer) {
-                    if (layer instanceof L.FeatureGroup || layer instanceof L.LayerGroup) {
-                        var name = layer.options.name || layer.options.overlay_name;
-                        if (name === 'Signals') {
-                            signalsLayer = layer;
-                            foundExistingLayer = true;
-                        }
-                    }
+                if (signal) {
+                    result = { lat: signal.lat, lon: signal.lon, name: 'Signal ' + sigNum };
+                }
+            } else if (searchType === 'industry') {
+                var queryUpper = query.toUpperCase();
+                var industry = industryData.find(function(ind) {
+                    return ind.tag && ind.tag.toUpperCase() === queryUpper;
                 });
-        
-                // Try to find via layer control
-                if (!signalsLayer && mapObj._controls) {
-                    for (var i in mapObj._controls) {
-                        var control = mapObj._controls[i];
-                        if (control instanceof L.Control.Layers) {
-                            if (control._layers) {
-                                for (var layerId in control._layers) {
-                                    var layerObj = control._layers[layerId];
-                                    if (layerObj.name === 'Signals') {
-                                        signalsLayer = layerObj.layer;
-                                        foundExistingLayer = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (!signalsLayer && control._overlays) {
-                                for (var name in control._overlays) {
-                                    if (name === 'Signals') {
-                                        signalsLayer = control._overlays[name];
-                                        foundExistingLayer = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if (signalsLayer) break;
-                    }
-                }
-        
-                // DOM-based search: find the Signals checkbox for manual wiring
-                if (!signalsLayer) {
-                    var layerControlDiv = document.querySelector('.leaflet-control-layers');
-                    if (layerControlDiv) {
-                        var checkboxes = layerControlDiv.querySelectorAll('input[type="checkbox"]');
-                        checkboxes.forEach(function(checkbox) {
-                            var label = checkbox.nextSibling;
-                            var labelText = label ? label.textContent.trim() : '';
-                            if (labelText === 'Signals') {
-                                window.signalsCheckbox = checkbox;
-                            }
-                        });
-                    }
-                }
-        
-                // If still not found, create our own layer and wire it to the checkbox
-                if (!signalsLayer) {
-                    signalsLayer = L.featureGroup();
-        
-                    // Wire up the checkbox to control our layer
-                    if (window.signalsCheckbox) {
-                        // Set initial state to unchecked (hidden)
-                        window.signalsCheckbox.checked = false;
-        
-                        // Get reference to signal legend
-                        var signalLegend = document.getElementById('signal-legend');
-        
-                        // Add event listener to checkbox
-                        window.signalsCheckbox.addEventListener('change', function() {
-                            if (this.checked) {
-                                mapObj.addLayer(signalsLayer);
-                                if (signalLegend) signalLegend.style.display = 'block';
-                            } else {
-                                mapObj.removeLayer(signalsLayer);
-                                if (signalLegend) signalLegend.style.display = 'none';
-                            }
-                        });
-                    } else {
-                        // Fallback: add layer to map if no checkbox found
-                        signalsLayer.addTo(mapObj);
-                        var signalLegend = document.getElementById('signal-legend');
-                        if (signalLegend) signalLegend.style.display = 'block';
-                    }
-        
-                    foundExistingLayer = false;
-                }
-        
-                // Calculate triangle size based on zoom level (inverse scaling)
-                function calculateTriangleSize(zoom) {
-                    var baseSize = 0.00010;  // Base size at zoom 16
-                    var scaleFactor = Math.pow(0.75, Math.max(0, zoom - 16));
-                    return Math.max(0.00005, baseSize * scaleFactor);
-                }
-        
-                // Calculate triangle vertices given center, rotation, and size
-                function calculateTriangleVertices(lat, lon, rotationDeg, triangleSize) {
-                    // Convert rotation to radians and flip 180 degrees
-                    var rotationRad = (rotationDeg * Math.PI / 180.0) + Math.PI;
-        
-                    // Vertex 1: tip of triangle (pointing direction)
-                    var v1_lat = lat + triangleSize * Math.cos(rotationRad);
-                    var v1_lon = lon + triangleSize * Math.sin(rotationRad) / Math.cos(lat * Math.PI / 180.0);
-        
-                    // Vertices 2 and 3: base of triangle (perpendicular to pointing direction)
-                    var baseAngle1 = rotationRad + 2.5;
-                    var baseAngle2 = rotationRad - 2.5;
-                    var baseDistance = triangleSize * 0.6;
-        
-                    var v2_lat = lat + baseDistance * Math.cos(baseAngle1);
-                    var v2_lon = lon + baseDistance * Math.sin(baseAngle1) / Math.cos(lat * Math.PI / 180.0);
-        
-                    var v3_lat = lat + baseDistance * Math.cos(baseAngle2);
-                    var v3_lon = lon + baseDistance * Math.sin(baseAngle2) / Math.cos(lat * Math.PI / 180.0);
-        
-                    return [
-                        [v1_lat, v1_lon],
-                        [v2_lat, v2_lon],
-                        [v3_lat, v3_lon]
-                    ];
-                }
-        
-                // Create all signal triangles
-                function createSignalTriangles(zoom) {
-                    var triangleSize = calculateTriangleSize(zoom);
-
-                    signalData.forEach(function(signal) {
-                        // Determine colors based on signal type and stacking
-                        var fillColor = signal.is_absolute ? '#FF6B35' : '#FFD700';
-                        var borderColor;
-                        if (signal.is_stacked) {
-                            borderColor = '#87CEEB';  // Light blue for stacked signals
-                        } else {
-                            borderColor = '#000000';  // Black for single signals
-                        }
-
-                        // Calculate vertices
-                        var vertices = calculateTriangleVertices(
-                            signal.lat,
-                            signal.lon,
-                            signal.rotation,
-                            triangleSize
-                        );
-
-                        // Create polygon
-                        var triangle = L.polygon(vertices, {
-                            color: borderColor,
-                            fillColor: fillColor,
-                            fillOpacity: 0.9,
-                            weight: 2
-                        });
-
-                        // Store signal position for popup/tooltip anchoring
-                        triangle._signalLat = signal.lat;
-                        triangle._signalLon = signal.lon;
-
-                        // Add popup anchored to signal position (not polygon center)
-                        var popup = L.popup({maxWidth: 300})
-                            .setLatLng([signal.lat, signal.lon])
-                            .setContent(signal.popup_html);
-                        triangle.bindPopup(popup);
-
-                        // Add tooltip anchored to signal position
-                        triangle.bindTooltip(signal.tooltip, {
-                            permanent: false,
-                            direction: 'top',
-                            offset: [0, 0]
-                        });
-
-                        // Override tooltip position to use signal lat/lon
-                        triangle.on('mouseover', function(e) {
-                            this.openTooltip([signal.lat, signal.lon]);
-                        });
-        
-                        // Add to layer and store reference
-                        triangle.addTo(signalsLayer);
-                        signalTriangles.set(signal.id, triangle);
-                    });
-                }
-        
-                // Update signal triangle sizes based on zoom
-                function updateSignalSizes() {
-                    var zoom = mapObj.getZoom();
-                    var triangleSize = calculateTriangleSize(zoom);
-        
-                    signalTriangles.forEach(function(polygon, signalId) {
-                        // Find signal data
-                        var signal = signalData.find(function(s) { return s.id === signalId; });
-                        if (!signal) return;
-        
-                        // Recalculate vertices
-                        var vertices = calculateTriangleVertices(
-                            signal.lat,
-                            signal.lon,
-                            signal.rotation,
-                            triangleSize
-                        );
-        
-                        // Update polygon
-                        polygon.setLatLngs(vertices);
-                    });
-                }
-        
-                // Create initial triangles
-                var initialZoom = mapObj.getZoom();
-                createSignalTriangles(initialZoom);
-        
-        // Update on zoom change
-                    mapObj.on('zoomend', updateSignalSizes);
-        
-                } catch (e) {
-                    console.error("Error initializing signal rendering:", e);
-                    setTimeout(initSignalRendering, 500);
+                if (industry) {
+                    result = { lat: industry.lat, lon: industry.lon, name: industry.tag + ' (' + industry.name + ')' };
                 }
             }
-            
-            if (document.readyState === 'loading') {
-                document.addEventListener('DOMContentLoaded', initSignalRendering);
-            } else {
-                setTimeout(initSignalRendering, 1000);
-            }
-        })();
-        </script>
-        """
-        m.get_root().html.add_child(folium.Element(signal_rendering_script))
 
-    # Add search functionality script (uses window.mapData from global data script)
-    search_script = """
-<script>
-(function() {
-    function initSearch() {
-        var mapName = '""" + m.get_name() + """';
-        var mapObj = window[mapName];
+            if (result) {
+                mapObj.setView([result.lat, result.lon], 18);
 
-        if (!mapObj || typeof mapObj.eachLayer !== 'function') {
-            setTimeout(initSearch, 200);
-            return;
-        }
-
-        try {
-            // Data from global map data object
-            var signalData = window.mapData.signals || [];
-            var industryData = window.mapData.industries || [];
-            var sectionData = window.mapData.sections || [];
-
-            // Build section position map from pre-computed data
-            var sectionPositions = new Map();
-            sectionData.forEach(function(sec) {
-                sectionPositions.set(sec.id, {
-                    lat: sec.lat,
-                    lon: sec.lon,
-                    layer: null  // Will be populated below
-                });
-            });
-
-            // Find polyline layers for highlighting (still need layer references)
-            mapObj.eachLayer(function(layer) {
-                if (layer instanceof L.Polyline && !(layer instanceof L.Polygon)) {
-                    var popup = layer.getPopup();
-                    if (!popup) return;
-
-                    var popupContent = popup.getContent();
-                    var popupHtml = '';
-                    if (typeof popupContent === 'string') {
-                        popupHtml = popupContent;
-                    } else if (popupContent && popupContent.innerHTML !== undefined) {
-                        popupHtml = popupContent.innerHTML;
-                    }
-
-                    if (popupHtml.includes('boundary')) return;
-
-                    var match = popupHtml.match(/<b>Section (\\d+)/);
-                    if (match) {
-                        var secId = parseInt(match[1]);
-                        if (sectionPositions.has(secId)) {
-                            sectionPositions.get(secId).layer = layer;
-                        }
-                    }
+                if (result.layer) {
+                    originalStyle = {
+                        color: result.layer.options.color,
+                        weight: result.layer.options.weight,
+                        opacity: result.layer.options.opacity
+                    };
+                    result.layer.setStyle({
+                        color: '#FF00FF',
+                        weight: 8,
+                        opacity: 1.0
+                    });
+                    highlightedLayer = result.layer;
+                    result.layer.openPopup();
                 }
-            });
 
-            console.log('Search initialized: ' + sectionPositions.size + ' sections, ' +
-                        signalData.length + ' signals, ' + industryData.length + ' industries');
-
-            // UI elements
-            var searchBtn = document.getElementById('search-btn');
-            var searchDialog = document.getElementById('search-dialog');
-            var searchInput = document.getElementById('search-input');
-            var searchSubmit = document.getElementById('search-submit');
-            var searchCancel = document.getElementById('search-cancel');
-            var searchError = document.getElementById('search-error');
-
-            // Show/hide dialog
-            searchBtn.addEventListener('click', function() {
-                searchDialog.style.display = searchDialog.style.display === 'none' ? 'block' : 'none';
-                if (searchDialog.style.display === 'block') {
-                    searchInput.focus();
-                    searchInput.select();
-                }
-            });
-
-            searchCancel.addEventListener('click', function() {
                 searchDialog.style.display = 'none';
-                searchError.style.display = 'none';
-            });
-
-            // Handle Enter key
-            searchInput.addEventListener('keypress', function(e) {
-                if (e.key === 'Enter') {
-                    doSearch();
-                }
-            });
-
-            searchSubmit.addEventListener('click', doSearch);
-
-            // Highlight state
-            var highlightedLayer = null;
-            var originalStyle = null;
-
-            function clearHighlight() {
-                if (highlightedLayer && originalStyle) {
-                    highlightedLayer.setStyle(originalStyle);
-                    highlightedLayer = null;
-                    originalStyle = null;
-                }
+                console.log('Found: ' + result.name + ' at ' + result.lat.toFixed(6) + ', ' + result.lon.toFixed(6));
+            } else {
+                searchError.textContent = 'Not found: ' + query;
+                searchError.style.display = 'block';
             }
-
-            function doSearch() {
-                var query = searchInput.value.trim();
-                var searchType = document.querySelector('input[name="search-type"]:checked').value;
-
-                searchError.style.display = 'none';
-                clearHighlight();
-
-                if (!query) {
-                    searchError.textContent = 'Please enter a search value';
-                    searchError.style.display = 'block';
-                    return;
-                }
-
-                var result = null;
-
-                if (searchType === 'section') {
-                    var secNum = parseInt(query);
-                    if (isNaN(secNum)) {
-                        searchError.textContent = 'Please enter a valid section number';
-                        searchError.style.display = 'block';
-                        return;
-                    }
-                    if (sectionPositions.has(secNum)) {
-                        var sec = sectionPositions.get(secNum);
-                        result = { lat: sec.lat, lon: sec.lon, layer: sec.layer, name: 'Section ' + secNum };
-                    }
-                } else if (searchType === 'signal') {
-                    var sigNum = parseInt(query, 10);
-                    if (isNaN(sigNum)) {
-                        searchError.textContent = 'Please enter a valid signal number';
-                        searchError.style.display = 'block';
-                        return;
-                    }
-                    // Search by primary ID first, then check all_ids for stacked signals
-                    var signal = signalData.find(function(s) {
-                        if (parseInt(s.id, 10) === sigNum) return true;
-                        if (s.all_ids && s.all_ids.indexOf(sigNum) !== -1) return true;
-                        return false;
-                    });
-                    if (signal) {
-                        result = { lat: signal.lat, lon: signal.lon, name: 'Signal ' + sigNum };
-                    }
-                } else if (searchType === 'industry') {
-                    var queryUpper = query.toUpperCase();
-                    var industry = industryData.find(function(ind) {
-                        return ind.tag && ind.tag.toUpperCase() === queryUpper;
-                    });
-                    if (industry) {
-                        result = { lat: industry.lat, lon: industry.lon, name: industry.tag + ' (' + industry.name + ')' };
-                    }
-                }
-
-                if (result) {
-                    // Pan to location and zoom in
-                    mapObj.setView([result.lat, result.lon], 18);
-
-                    // Highlight the found item if it has a layer (sections)
-                    if (result.layer) {
-                        originalStyle = {
-                            color: result.layer.options.color,
-                            weight: result.layer.options.weight,
-                            opacity: result.layer.options.opacity
-                        };
-                        result.layer.setStyle({
-                            color: '#FF00FF',
-                            weight: 8,
-                            opacity: 1.0
-                        });
-                        highlightedLayer = result.layer;
-
-                        // Open the popup
-                        result.layer.openPopup();
-                    }
-
-                    // Hide dialog
-                    searchDialog.style.display = 'none';
-
-                    console.log('Found: ' + result.name + ' at ' + result.lat.toFixed(6) + ', ' + result.lon.toFixed(6));
-                } else {
-                    searchError.textContent = 'Not found: ' + query;
-                    searchError.style.display = 'block';
-                }
-            }
-
-            // Clear highlight on map click
-            mapObj.on('click', clearHighlight);
-
-        } catch (e) {
-            console.error("Error initializing search:", e);
-            setTimeout(initSearch, 500);
         }
+
+        mapObj.on('click', clearHighlight);
     }
 
+    // ========== SIGNAL RENDERING ==========
+    function initSignalRendering(mapObj) {
+        var signalData = window.mapData.signals;
+        if (!signalData || signalData.length === 0) return;
+
+        var signalTriangles = new Map();
+        var signalsLayer = window.mapFeatures.signalsLayer;
+
+        // If no existing signals layer, create one and wire to checkbox
+        if (!signalsLayer) {
+            signalsLayer = L.featureGroup();
+
+            // Find signals checkbox in layer control
+            var layerControlDiv = document.querySelector('.leaflet-control-layers');
+            if (layerControlDiv) {
+                var checkboxes = layerControlDiv.querySelectorAll('input[type="checkbox"]');
+                checkboxes.forEach(function(checkbox) {
+                    var label = checkbox.nextSibling;
+                    var labelText = label ? label.textContent.trim() : '';
+                    if (labelText === 'Signals') {
+                        window.signalsCheckbox = checkbox;
+                    }
+                });
+            }
+
+            if (window.signalsCheckbox) {
+                window.signalsCheckbox.checked = false;
+                var signalLegend = document.getElementById('signal-legend');
+
+                window.signalsCheckbox.addEventListener('change', function() {
+                    if (this.checked) {
+                        mapObj.addLayer(signalsLayer);
+                        if (signalLegend) signalLegend.style.display = 'block';
+                    } else {
+                        mapObj.removeLayer(signalsLayer);
+                        if (signalLegend) signalLegend.style.display = 'none';
+                    }
+                });
+            } else {
+                signalsLayer.addTo(mapObj);
+                var signalLegend = document.getElementById('signal-legend');
+                if (signalLegend) signalLegend.style.display = 'block';
+            }
+        }
+
+        function calculateTriangleSize(zoom) {
+            var baseSize = 0.00010;
+            var scaleFactor = Math.pow(0.75, Math.max(0, zoom - 16));
+            return Math.max(0.00005, baseSize * scaleFactor);
+        }
+
+        function calculateTriangleVertices(lat, lon, rotationDeg, triangleSize) {
+            var rotationRad = (rotationDeg * Math.PI / 180.0) + Math.PI;
+
+            var v1_lat = lat + triangleSize * Math.cos(rotationRad);
+            var v1_lon = lon + triangleSize * Math.sin(rotationRad) / Math.cos(lat * Math.PI / 180.0);
+
+            var baseAngle1 = rotationRad + 2.5;
+            var baseAngle2 = rotationRad - 2.5;
+            var baseDistance = triangleSize * 0.6;
+
+            var v2_lat = lat + baseDistance * Math.cos(baseAngle1);
+            var v2_lon = lon + baseDistance * Math.sin(baseAngle1) / Math.cos(lat * Math.PI / 180.0);
+
+            var v3_lat = lat + baseDistance * Math.cos(baseAngle2);
+            var v3_lon = lon + baseDistance * Math.sin(baseAngle2) / Math.cos(lat * Math.PI / 180.0);
+
+            return [
+                [v1_lat, v1_lon],
+                [v2_lat, v2_lon],
+                [v3_lat, v3_lon]
+            ];
+        }
+
+        function createSignalTriangles(zoom) {
+            var triangleSize = calculateTriangleSize(zoom);
+
+            signalData.forEach(function(signal) {
+                var fillColor = signal.is_absolute ? '#FF6B35' : '#FFD700';
+                var borderColor = signal.is_stacked ? '#87CEEB' : '#000000';
+
+                var vertices = calculateTriangleVertices(
+                    signal.lat,
+                    signal.lon,
+                    signal.rotation,
+                    triangleSize
+                );
+
+                var triangle = L.polygon(vertices, {
+                    color: borderColor,
+                    fillColor: fillColor,
+                    fillOpacity: 0.9,
+                    weight: 2
+                });
+
+                triangle._signalLat = signal.lat;
+                triangle._signalLon = signal.lon;
+
+                var popup = L.popup({maxWidth: 300})
+                    .setLatLng([signal.lat, signal.lon])
+                    .setContent(signal.popup_html);
+                triangle.bindPopup(popup);
+
+                triangle.bindTooltip(signal.tooltip, {
+                    permanent: false,
+                    direction: 'top',
+                    offset: [0, 0]
+                });
+
+                triangle.on('mouseover', function(e) {
+                    this.openTooltip([signal.lat, signal.lon]);
+                });
+
+                triangle.addTo(signalsLayer);
+                signalTriangles.set(signal.id, triangle);
+            });
+        }
+
+        function updateSignalSizes() {
+            var zoom = mapObj.getZoom();
+            var triangleSize = calculateTriangleSize(zoom);
+
+            signalTriangles.forEach(function(polygon, signalId) {
+                var signal = signalData.find(function(s) { return s.id === signalId; });
+                if (!signal) return;
+
+                var vertices = calculateTriangleVertices(
+                    signal.lat,
+                    signal.lon,
+                    signal.rotation,
+                    triangleSize
+                );
+
+                polygon.setLatLngs(vertices);
+            });
+        }
+
+        var initialZoom = mapObj.getZoom();
+        createSignalTriangles(initialZoom);
+        mapObj.on('zoomend', updateSignalSizes);
+
+        console.log('Signal rendering initialized:', signalData.length, 'signals');
+    }
+
+    // ========== START INITIALIZATION ==========
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initSearch);
+        document.addEventListener('DOMContentLoaded', initMapFeatures);
     } else {
-        setTimeout(initSearch, 1500);
+        setTimeout(initMapFeatures, 500);
     }
 })();
 </script>
 """
-    m.get_root().html.add_child(folium.Element(search_script))
+    m.get_root().html.add_child(folium.Element(unified_script))
 
     # Save map
     signal_suffix = '_with_signals' if args.signal_db else ''
