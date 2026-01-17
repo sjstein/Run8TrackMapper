@@ -3,10 +3,11 @@
 Visualize a turnout and follow its branches to the next switches
 
 Usage:
-  python visualize_switch_network.py <start_section> <depth>
+  python visualize_switch_network.py                    # Use config.ini in current directory
+  python visualize_switch_network.py --config my.ini   # Use specified config file
+  python visualize_switch_network.py --generate-config # Print sample config template
 
-Example:
-  python visualize_switch_network.py 66 2
+Configuration is read from an INI file. See --generate-config for format.
 """
 
 import folium
@@ -18,6 +19,8 @@ import os
 import sys
 import csv
 import argparse
+import configparser
+from pathlib import Path
 from explore_trackdb import TrackDatabase
 from explore_signalHeadDb import SignalDatabase
 from r8lib import IndustryFile, Industry, SpawnFile, SpawnPoint
@@ -31,6 +34,201 @@ LON_MIN = -130.0  # West coast (with margin)
 LON_MAX = -65.0   # East coast (with margin)
 LAT_MIN = 23.0    # Southern border (with margin)
 LAT_MAX = 50.0    # Northern border (with margin)
+
+
+# ============================================================================
+# Configuration File Handling
+# ============================================================================
+
+def generate_sample_config():
+    """Print a sample configuration file template."""
+    template = '''# Run8 Track Mapper Configuration
+# ================================
+# Copy this file to config.ini and customize for your visualization.
+
+[database]
+# Required: Track database filename (relative path from working directory or absolute path)
+track_database = track_databases/Mojave.r8
+
+# Required: Starting track section number (must be a turnout/switch)
+# Use explore_trackdb.py to find section numbers
+start_section = 5306
+
+# Required: Number of switch levels to traverse (minimum: 1)
+# Higher values = larger area visualized but slower generation
+depth = 10
+
+[optional_layers]
+# Optional: Signal database file (.r8) to visualize signals on the map
+# Leave empty or comment out to disable
+# signal_db = track_databases/SignalHeads_Mojave.r8
+
+# Optional: Industry database file (.ind) to visualize industry tracks
+# Requires [filtering] route_prefix to be set
+# Leave empty or comment out to disable
+# industry_db = track_databases/Industries_Mojave.ind
+
+# Optional: AI spawn locations file (.r8) to visualize spawn points
+# Requires [filtering] route_prefix to be set
+# Leave empty or comment out to disable
+# ai_locations = track_databases/AISpecialLocations.r8
+
+[filtering]
+# Required when industry_db or ai_locations is used
+# Route prefix integer to filter tracks (obtain from Run8 route editor)
+# Leave empty if not using industry_db or ai_locations
+# route_prefix = 1
+
+[output]
+# Optional: Custom output filename pattern
+# Available placeholders:
+#   {track_db} - Track database name without extension
+#   {section}  - Start section number
+#   {depth}    - Depth value
+# Default: {track_db}_{section}_depth{depth}.html
+# output_pattern = {track_db}_{section}_depth{depth}.html
+'''
+    print(template)
+
+
+def load_config(config_path=None):
+    """Load and validate configuration from INI file.
+
+    Args:
+        config_path: Path to config file. If None, uses 'config.ini' in cwd.
+
+    Returns:
+        dict: Validated configuration values
+
+    Raises:
+        SystemExit: On validation errors
+    """
+    # Determine config file location
+    if config_path is None:
+        config_path = Path.cwd() / 'config.ini'
+    else:
+        config_path = Path(config_path)
+
+    if not config_path.exists():
+        print(f'ERROR: Configuration file not found: {config_path}')
+        print()
+        print('Hint: Use --generate-config to create a sample configuration file:')
+        print('  python visualize_switch_network.py --generate-config > config.ini')
+        sys.exit(1)
+
+    config = configparser.ConfigParser()
+    config.read(config_path)
+
+    errors = []
+
+    # ---- Validate [database] section ----
+    if 'database' not in config:
+        errors.append('Missing required [database] section')
+    else:
+        db_section = config['database']
+
+        # track_database (required)
+        if 'track_database' not in db_section or not db_section['track_database'].strip():
+            errors.append('[database] track_database is required')
+
+        # start_section (required, must be integer)
+        if 'start_section' not in db_section:
+            errors.append('[database] start_section is required')
+        else:
+            try:
+                int(db_section['start_section'])
+            except ValueError:
+                errors.append('[database] start_section must be an integer')
+
+        # depth (required, must be integer >= 1)
+        if 'depth' not in db_section:
+            errors.append('[database] depth is required')
+        else:
+            try:
+                depth_val = int(db_section['depth'])
+                if depth_val < 1:
+                    errors.append('[database] depth must be at least 1')
+            except ValueError:
+                errors.append('[database] depth must be an integer')
+
+    # ---- Parse [optional_layers] section ----
+    signal_db = None
+    industry_db = None
+    ai_locations = None
+
+    if 'optional_layers' in config:
+        opt_section = config['optional_layers']
+        signal_db = opt_section.get('signal_db', '').strip() or None
+        industry_db = opt_section.get('industry_db', '').strip() or None
+        ai_locations = opt_section.get('ai_locations', '').strip() or None
+
+    # ---- Parse [filtering] section ----
+    route_prefix = None
+    if 'filtering' in config:
+        filter_section = config['filtering']
+        route_prefix_str = filter_section.get('route_prefix', '').strip()
+        if route_prefix_str:
+            try:
+                route_prefix = int(route_prefix_str)
+            except ValueError:
+                errors.append('[filtering] route_prefix must be an integer')
+
+    # Conditional validation: route_prefix required if industry_db or ai_locations used
+    if industry_db and route_prefix is None:
+        errors.append('[filtering] route_prefix is required when industry_db is specified')
+    if ai_locations and route_prefix is None:
+        errors.append('[filtering] route_prefix is required when ai_locations is specified')
+
+    # ---- Parse [output] section ----
+    output_pattern = '{track_db}_{section}_depth{depth}.html'
+    if 'output' in config:
+        output_pattern = config['output'].get('output_pattern', output_pattern).strip() or output_pattern
+
+    # Report all errors at once
+    if errors:
+        print(f'Configuration errors in {config_path}:')
+        for error in errors:
+            print(f'  - {error}')
+        sys.exit(1)
+
+    # Build validated config dict
+    return {
+        'track_database': config['database']['track_database'].strip(),
+        'start_section': int(config['database']['start_section']),
+        'depth': int(config['database']['depth']),
+        'signal_db': signal_db,
+        'industry_db': industry_db,
+        'ai_locations': ai_locations,
+        'route_prefix': route_prefix,
+        'output_pattern': output_pattern,
+    }
+
+
+def parse_cli_args():
+    """Parse minimal CLI arguments (--config only)."""
+    parser = argparse.ArgumentParser(
+        description='Visualize switch network from a starting turnout',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+This script reads configuration from an INI file.
+
+Default config location: ./config.ini
+
+Use --config to specify an alternate configuration file.
+Use --generate-config to create a sample configuration file.
+
+Example:
+  python visualize_switch_network.py
+  python visualize_switch_network.py --config my_config.ini
+  python visualize_switch_network.py --generate-config > config.ini
+        """
+    )
+    parser.add_argument('--config', '-c', default=None,
+                        help='Path to configuration file (default: config.ini in current directory)')
+    parser.add_argument('--generate-config', action='store_true',
+                        help='Print a sample configuration file template and exit')
+    return parser.parse_args()
+
 
 def decompress_tr4(filepath):
     """Decompress a TR4 file using raw DEFLATE"""
@@ -711,41 +909,16 @@ def explore_switch_network(start_section_idx, section_map, depth=1):
     return all_sections, current_level_switches
 
 def main():
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(
-        description='Visualize switch network from a starting turnout',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python visualize_switch_network.py 66 1   # Start at section 66, go 1 switch deep
-  python visualize_switch_network.py 66 2   # Start at section 66, go 2 switches deep
-  python visualize_switch_network.py 470 3  # Start at section 470, go 3 switches deep
-        """
-    )
-    parser.add_argument('track_database', help='Track database filename')
-    parser.add_argument('start_section', type=int,
-                        help='Starting track section number (must be a turnout)')
-    parser.add_argument('depth', type=int,
-                        help='Number of switch levels to traverse (1, 2, 3, etc.)')
-    parser.add_argument('--signal-db', default=None,
-                        help='Optional: Signal database file (.r8) to visualize signals')
-    parser.add_argument('--industry-db', default=None,
-                        help='Optional: Industry database file (.ind) to visualize industry tracks')
-    parser.add_argument('--route-prefix', type=int, default=None,
-                        help='Required with --industry-db or --ai-locations: Route prefix to filter tracks')
-    parser.add_argument('--ai-locations', default=None,
-                        help='Optional: AI special locations file (.r8) to visualize spawn points')
+    # Parse minimal CLI args (--config, --generate-config)
+    cli_args = parse_cli_args()
 
-    args = parser.parse_args()
+    # Handle --generate-config
+    if cli_args.generate_config:
+        generate_sample_config()
+        return 0
 
-    # Validate --route-prefix is provided if --industry-db or --ai-locations is used
-    if args.industry_db and args.route_prefix is None:
-        print('ERROR: --route-prefix is required when using --industry-db')
-        return 1
-
-    if args.ai_locations and args.route_prefix is None:
-        print('ERROR: --route-prefix is required when using --ai-locations')
-        return 1
+    # Load and validate configuration
+    config = load_config(cli_args.config)
 
     print('='*80)
     print('SWITCH NETWORK VISUALIZER')
@@ -754,18 +927,16 @@ Examples:
 
     # Load track database
     print('Loading track database...')
-    #db = TrackDatabase('TrackDatabase_BarstowYermo.r8')
-    #db = TrackDatabase('TrackDatabase_Mojave.r8')
-    db = TrackDatabase(args.track_database)
+    db = TrackDatabase(config['track_database'])
 
     section_map = {sec.index: sec for sec in db.sections}
 
     # Load signal database if provided
     signal_db = None
-    if args.signal_db:
-        print(f'Loading signal database: {args.signal_db}')
+    if config['signal_db']:
+        print(f'Loading signal database: {config["signal_db"]}')
         try:
-            signal_db = SignalDatabase(args.signal_db)
+            signal_db = SignalDatabase(config['signal_db'])
             print(f'Loaded {len(signal_db.signal_heads)} signal heads')
         except Exception as e:
             print(f'WARNING: Failed to load signal database: {e}')
@@ -775,10 +946,10 @@ Examples:
     industry_db = None
     industry_sections_map = {}  # Maps section_id -> list of industries using that section
 
-    if args.industry_db:
-        print(f'Loading industry database: {args.industry_db}')
+    if config['industry_db']:
+        print(f'Loading industry database: {config["industry_db"]}')
         try:
-            with open(args.industry_db, 'rb') as f:
+            with open(config['industry_db'], 'rb') as f:
                 mem_map = f.read()
 
             # Parse industry file
@@ -798,7 +969,7 @@ Examples:
                 if hasattr(industry, 'track') and industry.number_of_tracks > 0:
                     for track in industry.track:
                         # Only include tracks matching the specified route prefix
-                        if track.route_prefix == args.route_prefix:
+                        if track.route_prefix == config['route_prefix']:
                             section_id = track.track_section
                             if section_id not in industry_sections_map:
                                 industry_sections_map[section_id] = []
@@ -806,7 +977,7 @@ Examples:
 
             industry_db = industry_file
             print(f'Loaded {industry_file.num_rec} industries')
-            print(f'Filtered to route prefix {args.route_prefix}')
+            print(f'Filtered to route prefix {config['route_prefix']}')
             print(f'Tracking {len(industry_sections_map)} track sections with matching industries')
 
         except Exception as e:
@@ -819,10 +990,10 @@ Examples:
     spawn_db = None
     spawn_sections_map = {}  # Maps track_id -> list of spawn points
 
-    if args.ai_locations:
-        print(f'Loading AI special locations: {args.ai_locations}')
+    if config['ai_locations']:
+        print(f'Loading AI special locations: {config['ai_locations']}')
         try:
-            with open(args.ai_locations, 'rb') as f:
+            with open(config['ai_locations'], 'rb') as f:
                 mem_map = f.read()
 
             # Parse spawn file
@@ -839,7 +1010,7 @@ Examples:
                 ptr += len(spawn)
 
                 # Filter by route prefix and build mapping
-                if spawn.route_prefix == args.route_prefix:
+                if spawn.route_prefix == config['route_prefix']:
                     track_id = spawn.track_id
                     if track_id not in spawn_sections_map:
                         spawn_sections_map[track_id] = []
@@ -847,7 +1018,7 @@ Examples:
 
             spawn_db = spawn_file
             print(f'Loaded {spawn_file.num_rec} AI special locations')
-            print(f'Filtered to route prefix {args.route_prefix}: {len(spawn_sections_map)} track sections with spawn points')
+            print(f'Filtered to route prefix {config['route_prefix']}: {len(spawn_sections_map)} track sections with spawn points')
 
         except Exception as e:
             print(f'WARNING: Failed to load AI special locations: {e}')
@@ -856,29 +1027,29 @@ Examples:
             spawn_db = None
 
     # Validate starting section exists
-    if args.start_section not in section_map:
-        print(f'ERROR: Section {args.start_section} not found in track database')
+    if config['start_section'] not in section_map:
+        print(f'ERROR: Section {config['start_section']} not found in track database')
         return 1
 
     # Validate starting section is a switch
-    start_section = section_map[args.start_section]
+    start_section = section_map[config['start_section']]
     if not is_switch(start_section):
-        print(f'ERROR: Section {args.start_section} is not a switch/turnout')
+        print(f'ERROR: Section {config['start_section']} is not a switch/turnout')
         print(f'  It has {len(start_section.nodes)} node(s)')
         print(f'  Switches must have multiple diverging paths')
         return 1
 
     # Validate depth
-    if args.depth < 1:
+    if config['depth'] < 1:
         print(f'ERROR: Depth must be at least 1')
         return 1
 
-    print(f'Starting from section {args.start_section}')
-    print(f'Traversing {args.depth} level(s) of switches')
+    print(f'Starting from section {config['start_section']}')
+    print(f'Traversing {config['depth']} level(s) of switches')
     print()
 
     # Explore the network
-    all_sections, terminal_switches = explore_switch_network(args.start_section, section_map, args.depth)
+    all_sections, terminal_switches = explore_switch_network(config['start_section'], section_map, config['depth'])
 
     print(f'Total sections to visualize: {len(all_sections)}')
     print(f'Sections: {sorted(all_sections)}')
@@ -1322,7 +1493,7 @@ Examples:
 
     # Draw each section
     # Color coding: red for start, blue for terminal switches, green for paths
-    colors = {args.start_section: 'red'}  # Starting switch in red
+    colors = {config['start_section']: 'red'}  # Starting switch in red
     section_metadata = []  # Collect section data for JavaScript (search, selection)
 
     # Add all terminal switches in blue
@@ -1333,7 +1504,7 @@ Examples:
     # (We need to identify these from the exploration)
     # For now, mark all switches (except start) as blue
     for sec_idx in all_sections:
-        if sec_idx != args.start_section and is_switch(section_map[sec_idx]):
+        if sec_idx != config['start_section'] and is_switch(section_map[sec_idx]):
             colors[sec_idx] = 'blue'
 
     # Track num_segments errors for summary
@@ -1452,7 +1623,7 @@ Examples:
 
             # Determine label based on section type with length
             section_type = ""
-            if sec_idx == args.start_section:
+            if sec_idx == config['start_section']:
                 section_type = " (START)"
             elif is_switch(section):
                 section_type = " (SWITCH)"
@@ -2318,9 +2489,21 @@ window.mapFeatures = {
     m.get_root().html.add_child(folium.Element(unified_script))
 
     # Save map
-    signal_suffix = '_with_signals' if args.signal_db else ''
-    ai_suffix = '_with_ai' if args.ai_locations else ''
-    output_file = f'{args.track_database.split(".")[0]}_{args.start_section}_depth{args.depth}{signal_suffix}{ai_suffix}.html'
+    track_db_name = Path(config['track_database']).stem
+    output_file = config['output_pattern'].format(
+        track_db=track_db_name,
+        section=config['start_section'],
+        depth=config['depth']
+    )
+
+    # Add suffixes for optional layers
+    if config['signal_db']:
+        base, ext = output_file.rsplit('.', 1)
+        output_file = f'{base}_with_signals.{ext}'
+    if config['ai_locations']:
+        base, ext = output_file.rsplit('.', 1)
+        output_file = f'{base}_with_ai.{ext}'
+
     m.save(output_file)
     print(f'Map saved to: {output_file}')
     print()

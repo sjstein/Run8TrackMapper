@@ -11,8 +11,56 @@ Tools for visualizing Run8 Train Simulator track networks on geographical maps. 
 - Traces track networks from a starting section to specified depth
 - Applies tile corrections to align misaligned tiles
 - Outputs: HTML files with track segments overlaid on maps
+- **Configuration via INI file** (no command-line arguments for visualization settings)
 
-Usage: `python visualize_switch_network.py <start_section> <depth>`
+Usage:
+```bash
+python visualize_switch_network.py                    # Use config.ini in current directory
+python visualize_switch_network.py --config my.ini   # Use specified config file
+python visualize_switch_network.py --generate-config # Print sample config template
+```
+
+#### Configuration File (config.ini)
+```ini
+[database]
+track_database = track_databases/Mojave.r8
+start_section = 5306
+depth = 10
+
+[optional_layers]
+signal_db = track_databases/SignalHeads_Mojave.r8
+industry_db = track_databases/Industries_Mojave.ind
+ai_locations = track_databases/AISpecialLocations.r8
+
+[filtering]
+route_prefix = 1
+
+[output]
+output_pattern = {track_db}_{section}_depth{depth}.html
+```
+
+| Section | Key | Required | Description |
+|---------|-----|----------|-------------|
+| `[database]` | `track_database` | Yes | Track database file path |
+| `[database]` | `start_section` | Yes | Starting track section (must be a turnout) |
+| `[database]` | `depth` | Yes | Number of switch levels to traverse (≥1) |
+| `[optional_layers]` | `signal_db` | No | Signal database file (.r8) |
+| `[optional_layers]` | `industry_db` | No | Industry database file (.ind) |
+| `[optional_layers]` | `ai_locations` | No | AI spawn locations file (.r8) |
+| `[filtering]` | `route_prefix` | Conditional | Required if `industry_db` or `ai_locations` used |
+| `[output]` | `output_pattern` | No | Output filename pattern with placeholders |
+
+#### Interactive Map Features
+- **Layer Controls**: Toggle visibility of Tile Boundaries, Industries, AI Locations, Signals
+- **Search Function**: Click magnifying glass (upper-left) to search by:
+  - Track section number
+  - Signal head number
+  - Industry tag (case-insensitive)
+- **Ctrl+Click Selection**: Select multiple track sections to calculate total length
+- **Background Opacity**: Slider to adjust base map transparency
+- **Legends**: Context-sensitive legends appear when relevant layers are enabled
+  - Signal legend: Shows Absolute vs Intermediate signal types
+  - Tile legend: Shows Normal vs Re-aligned tile boundaries
 
 ### manage_tile_corrections.py
 **Status:** Working well
@@ -44,10 +92,12 @@ CSV database of tile coordinate corrections with columns: tile_x, tile_z, lat_of
   - `struct` - Binary data parsing
   - `zlib` - TR4 tile decompression (raw DEFLATE)
   - `csv` - Correction database I/O
-  - `argparse` - CLI parsing
+  - `configparser` - INI configuration file parsing (visualize_switch_network.py)
+  - `argparse` - CLI parsing (manage_tile_corrections.py, explore_trackdb.py)
   - `cmd` - Interactive shell (explore_trackdb)
   - `typing` - Type hints
   - `collections` - deque, Counter
+  - `pathlib` - Cross-platform path handling
 
 ## File Formats
 
@@ -149,8 +199,15 @@ Compressed binary (DEFLATE) containing:
 ### Visualizing a Track Network
 1. Choose a track database from `track_databases/`
 2. Identify starting section (use explore_trackdb.py to browse)
-3. Run: `python visualize_switch_network.py <section> <depth>`
-4. Output: HTML file in `track_databases/` directory
+3. Create config.ini (or use `--generate-config` to create template):
+   ```ini
+   [database]
+   track_database = track_databases/Mojave.r8
+   start_section = 5306
+   depth = 10
+   ```
+4. Run: `python visualize_switch_network.py`
+5. Output: HTML file based on output_pattern (default: `{track_db}_{section}_depth{depth}.html`)
 
 ### Finding and Correcting Misaligned Tiles
 
@@ -186,3 +243,18 @@ Compressed binary (DEFLATE) containing:
 ## External Dependencies
 - Run8 Train Simulator V3 installation required for tile files
 - Default tile path: `C:\Run8Studios\Run8 Train Simulator V3\Content\V3Routes\Regions\SouthernCA\TerrainTiles`
+
+## Data Enumerations
+
+### AI Spawn Point Types
+Used in AI special locations files (.r8):
+| Value | Type Name |
+|-------|-----------|
+| 0 | Spawn Point |
+| 1 | Crew Change |
+| 2 | Crew Change & Hold |
+| 3 | Passenger |
+| 4 | Passenger Crew Change |
+| 5 | Passenger Crew Change & Hold |
+| 6 | Relinquish |
+| 7 | Passenger Relinquish |
