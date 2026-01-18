@@ -5,7 +5,83 @@ Tools for visualizing Run8 Train Simulator track networks on geographical maps. 
 
 ## Core Components
 
-### visualize_switch_network.py
+### Multi-Region Web Application (Primary)
+**Status:** Working well - recommended for new visualizations
+
+A web-based visualization system that supports multiple regions with dynamic loading.
+
+**Key Files:**
+- `output_generator.py` - Main entry point, generates manifest.json and per-region JSON files
+- `html_generator.py` - Generates index.html with Leaflet.js map
+- `region_extractor.py` - Extracts track, signal, industry, AI location, and tile data
+- `config_parser.py` - Parses multi-region INI configuration files
+
+**Usage:**
+```bash
+python output_generator.py config_multiregion_sample.ini
+```
+
+**Output Structure:**
+```
+output/<name>/
+├── index.html          # Interactive map viewer
+├── manifest.json       # Region metadata and tile corrections
+└── data/
+    └── <region_id>.json  # Per-region track/signal/industry data
+```
+
+#### Multi-Region Configuration File
+```ini
+[visualization]
+name = Southern California
+tile_corrections = tile_corrections.csv
+industry_db = C:\Run8Studios\...\Regions\SouthernCA\Config.ind
+
+[region.mojave]
+display_name = Mojave Subdivision
+route_prefix = 100
+directory = C:\Run8Studios\...\BNSF_MojaveSub
+enabled_by_default = true
+
+[region.barstow]
+display_name = Barstow Subdivision
+route_prefix = 200
+directory = C:\Run8Studios\...\BNSF_BarstowSub
+enabled_by_default = false
+
+[colors]
+# All colors are optional - defaults shown
+track = #0066cc
+track_selected = #ff0000
+switch = #800080
+industry_track = #00aa00
+signal_absolute = #FF6B35
+signal_intermediate = #FFD700
+signal_border_single = #000000
+signal_border_stacked = #87CEEB
+
+[output]
+output_dir = ./output/socal/
+```
+
+#### Interactive Map Features
+- **Base Map Selection**: OpenStreetMap, Satellite (Esri), or None
+- **Region Toggle**: Enable/disable regions dynamically (data loaded on demand)
+- **Overlay Controls**: Toggle Signals, Industries, AI Locations, Tile Boundaries
+- **Search Function**: Search by track section, signal, industry tag, or AI location
+- **Ctrl+Click Selection**: Select multiple track sections to calculate total length
+- **Mouse Position**: Lat/lon display in lower right corner
+- **Background Opacity**: Slider to adjust base map transparency
+
+#### Visual Elements
+- **Track Sections**: Configurable color, switches shown in different color
+- **Industry Tracks**: Change color when industry overlay is enabled
+- **Signals**: Directional triangles showing facing direction
+  - Fill color: Orange (absolute) or Gold (intermediate)
+  - Border color: Black (single head) or Light blue (stacked/multiple heads)
+- **Tile Boundaries**: Black (normal) or Red (corrected) rectangles
+
+### visualize_switch_network.py (Legacy)
 **Status:** Working well
 - Generates interactive HTML maps using Folium
 - Traces track networks from a starting section to specified depth

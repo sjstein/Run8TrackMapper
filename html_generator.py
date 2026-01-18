@@ -1,0 +1,1162 @@
+#!/usr/bin/env python3
+"""
+HTML generator for Run8 Track Mapper.
+
+Generates index.html with Folium base map and embedded JavaScript
+for dynamic region loading.
+"""
+
+import folium
+from pathlib import Path
+from typing import List, Tuple, Optional
+
+from config_parser import VisualizationConfig, ColorConfig
+
+
+# Default map center (Southern California)
+DEFAULT_CENTER = [34.9, -118.0]
+DEFAULT_ZOOM = 9
+
+
+def generate_color_config(colors: ColorConfig) -> str:
+    """Generate JavaScript color configuration"""
+    return f'''<script>
+window.COLORS = {{
+    track: '{colors.track}',
+    trackSelected: '{colors.track_selected}',
+    switch: '{colors.switch}',
+    industryTrack: '{colors.industry_track}',
+    signalAbsolute: '{colors.signal_absolute}',
+    signalIntermediate: '{colors.signal_intermediate}',
+    signalBorderSingle: '{colors.signal_border_single}',
+    signalBorderStacked: '{colors.signal_border_stacked}'
+}};
+</script>'''
+
+
+def generate_javascript() -> str:
+    """Generate the JavaScript code for dynamic region management"""
+    return '''
+<script>
+(function() {
+    'use strict';
+
+    // Use colors from window.COLORS (injected separately)
+    const COLORS = window.COLORS;
+
+    // ========================================
+    // MapApp - Main Application State
+    // ========================================
+    const MapApp = {
+        map: null,
+        manifest: null,
+        loadedRegions: new Map(),  // region_id -> {data, layers, visible}
+        sectionIndex: new Map(),   // section_id -> {region_id, polyline, metadata}
+        signalIndex: new Map(),    // signal_id -> {region_id, marker, metadata}
+        industryIndex: [],         // [{region_id, data}]
+        aiLocationIndex: [],       // [{region_id, data}]
+        industrySectionIds: new Set(),  // Set of "regionId_sectionId" keys for industry tracks
+
+        // Selection state
+        selectedSections: new Map(),  // section_id -> polyline
+        currentSelectionRegion: null,
+
+        // Layer groups for overlays
+        overlayStates: {
+            signals: true,
+            industries: true,
+            aiLocations: true,
+            tileBoundaries: false
+        },
+
+        // Base map layers
+        baseLayers: {},  // {name: layer}
+        currentBaseLayer: 'OpenStreetMap',
+
+        // UI elements
+        regionCheckboxes: new Map(),
+        searchDialog: null
+    };
+
+    // ========================================
+    // Initialization
+    // ========================================
+    function init() {
+        // Find the map object (Folium creates it with a specific name)
+        const mapContainer = document.querySelector('.folium-map');
+        if (!mapContainer) {
+            setTimeout(init, 100);
+            return;
+        }
+
+        // Get map variable name from container id
+        const mapId = mapContainer.id;
+        MapApp.map = window[mapId];
+
+        if (!MapApp.map || typeof MapApp.map.eachLayer !== 'function') {
+            setTimeout(init, 100);
+            return;
+        }
+
+        console.log('Map initialized, loading manifest...');
+        loadManifest();
+    }
+
+    async function loadManifest() {
+        try {
+            const response = await fetch('manifest.json');
+            MapApp.manifest = await response.json();
+            console.log('Manifest loaded:', MapApp.manifest.name);
+            console.log('Regions:', MapApp.manifest.regions.length);
+
+            setupUI();
+            loadDefaultRegions();
+        } catch (error) {
+            console.error('Failed to load manifest:', error);
+        }
+    }
+
+    // ========================================
+    // UI Setup
+    // ========================================
+    function setupUI() {
+        // Create base tile layers directly (Folium's show=False layers may not be on map)
+        MapApp.baseLayers['OpenStreetMap'] = L.tileLayer(
+            'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            {attribution: 'OpenStreetMap'}
+        );
+        MapApp.baseLayers['Satellite'] = L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            {attribution: 'Esri', maxZoom: 22, maxNativeZoom: 19}
+        );
+        MapApp.baseLayers['None'] = L.tileLayer('', {attribution: 'None'});
+
+        // Remove any existing base tile layers that Folium added
+        MapApp.map.eachLayer(layer => {
+            if (layer._url !== undefined) {
+                MapApp.map.removeLayer(layer);
+            }
+        });
+
+        // Add OpenStreetMap as default
+        MapApp.baseLayers['OpenStreetMap'].addTo(MapApp.map);
+        MapApp.currentBaseLayer = 'OpenStreetMap';
+
+        createControlPanel();
+        createSearchDialog();
+        createOpacityControl();
+        createScaleDisplay();
+        createMousePositionDisplay();
+        addTooltipStyles();
+    }
+
+    function createControlPanel() {
+        const panel = document.createElement('div');
+        panel.id = 'control-panel';
+        panel.innerHTML = `
+            <style>
+                #control-panel {
+                    position: absolute;
+                    top: 10px;
+                    right: 10px;
+                    background: white;
+                    padding: 15px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+                    z-index: 1000;
+                    max-height: 80vh;
+                    overflow-y: auto;
+                    font-family: Arial, sans-serif;
+                    font-size: 13px;
+                    min-width: 200px;
+                }
+                #control-panel h3 {
+                    margin: 0 0 10px 0;
+                    padding-bottom: 8px;
+                    border-bottom: 1px solid #ddd;
+                    font-size: 14px;
+                }
+                #control-panel h4 {
+                    margin: 15px 0 8px 0;
+                    font-size: 12px;
+                    color: #666;
+                    text-transform: uppercase;
+                }
+                .region-item, .overlay-item {
+                    display: flex;
+                    align-items: center;
+                    margin: 5px 0;
+                }
+                .region-item label, .overlay-item label {
+                    margin-left: 8px;
+                    cursor: pointer;
+                    flex: 1;
+                }
+                .region-item .loading {
+                    width: 14px;
+                    height: 14px;
+                    border: 2px solid #ddd;
+                    border-top-color: #007bff;
+                    border-radius: 50%;
+                    animation: spin 1s linear infinite;
+                    margin-left: 8px;
+                }
+                @keyframes spin {
+                    to { transform: rotate(360deg); }
+                }
+                .search-btn {
+                    display: block;
+                    width: 100%;
+                    padding: 8px;
+                    margin-top: 15px;
+                    background: #007bff;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    cursor: pointer;
+                }
+                .search-btn:hover {
+                    background: #0056b3;
+                }
+                #selection-info {
+                    margin-top: 15px;
+                    padding-top: 10px;
+                    border-top: 1px solid #ddd;
+                    display: none;
+                }
+                #selection-info.visible {
+                    display: block;
+                }
+                .basemap-item {
+                    display: flex;
+                    align-items: center;
+                    margin: 3px 0;
+                }
+                .basemap-item input {
+                    margin-right: 8px;
+                }
+                .basemap-item label {
+                    cursor: pointer;
+                }
+            </style>
+            <h3>${MapApp.manifest.name}</h3>
+            <h4>Base Map</h4>
+            <div id="basemap-list">
+                <div class="basemap-item">
+                    <input type="radio" name="basemap" id="basemap-osm" value="OpenStreetMap" checked>
+                    <label for="basemap-osm">OpenStreetMap</label>
+                </div>
+                <div class="basemap-item">
+                    <input type="radio" name="basemap" id="basemap-satellite" value="Satellite">
+                    <label for="basemap-satellite">Satellite</label>
+                </div>
+                <div class="basemap-item">
+                    <input type="radio" name="basemap" id="basemap-none" value="None">
+                    <label for="basemap-none">None</label>
+                </div>
+            </div>
+            <h4>Regions</h4>
+            <div id="region-list"></div>
+            <h4>Overlays</h4>
+            <div id="overlay-list"></div>
+            <button class="search-btn" onclick="MapApp.openSearch()">Search</button>
+            <div id="selection-info">
+                <strong>Selected:</strong> <span id="selection-count">0</span> sections<br>
+                <strong>Total Length:</strong> <span id="selection-length">0</span> ft<br>
+                <button onclick="MapApp.clearSelection()" style="margin-top:5px;padding:4px 8px;font-size:12px;">Clear Selection</button>
+            </div>
+        `;
+        document.body.appendChild(panel);
+
+        // Setup base map radio buttons
+        document.querySelectorAll('input[name="basemap"]').forEach(radio => {
+            radio.addEventListener('change', (e) => {
+                const selectedName = e.target.value;
+
+                // Remove current base layer
+                if (MapApp.baseLayers[MapApp.currentBaseLayer]) {
+                    MapApp.map.removeLayer(MapApp.baseLayers[MapApp.currentBaseLayer]);
+                }
+
+                // Add selected base layer
+                if (MapApp.baseLayers[selectedName]) {
+                    MapApp.baseLayers[selectedName].addTo(MapApp.map);
+                    // Apply current opacity
+                    const opacity = parseFloat(document.getElementById('opacity-slider').value) / 100;
+                    MapApp.baseLayers[selectedName].setOpacity(opacity);
+                }
+
+                MapApp.currentBaseLayer = selectedName;
+            });
+        });
+
+        // Build region checkboxes
+        const regionList = document.getElementById('region-list');
+        for (const region of MapApp.manifest.regions) {
+            const item = document.createElement('div');
+            item.className = 'region-item';
+            item.innerHTML = `
+                <input type="checkbox" id="region-${region.id}" ${region.enabled_by_default ? 'checked' : ''}>
+                <label for="region-${region.id}">${region.display_name}</label>
+            `;
+            regionList.appendChild(item);
+
+            const checkbox = item.querySelector('input');
+            MapApp.regionCheckboxes.set(region.id, checkbox);
+            checkbox.addEventListener('change', () => toggleRegion(region.id, checkbox.checked));
+        }
+
+        // Build overlay checkboxes
+        const overlayList = document.getElementById('overlay-list');
+        const overlays = [
+            {id: 'signals', label: 'Signals'},
+            {id: 'industries', label: 'Industries'},
+            {id: 'aiLocations', label: 'AI Locations'},
+            {id: 'tileBoundaries', label: 'Tile Boundaries'}
+        ];
+        for (const overlay of overlays) {
+            const item = document.createElement('div');
+            item.className = 'overlay-item';
+            const checked = MapApp.overlayStates[overlay.id] ? 'checked' : '';
+            item.innerHTML = `
+                <input type="checkbox" id="overlay-${overlay.id}" ${checked}>
+                <label for="overlay-${overlay.id}">${overlay.label}</label>
+            `;
+            overlayList.appendChild(item);
+
+            const checkbox = item.querySelector('input');
+            checkbox.addEventListener('change', () => toggleOverlay(overlay.id, checkbox.checked));
+        }
+    }
+
+    function createSearchDialog() {
+        const dialog = document.createElement('div');
+        dialog.id = 'search-dialog';
+        dialog.innerHTML = `
+            <style>
+                #search-dialog {
+                    display: none;
+                    position: fixed;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    background: white;
+                    padding: 20px;
+                    border-radius: 8px;
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+                    z-index: 2000;
+                    min-width: 350px;
+                    max-width: 500px;
+                    max-height: 80vh;
+                    overflow-y: auto;
+                }
+                #search-dialog.visible {
+                    display: block;
+                }
+                #search-dialog h3 {
+                    margin: 0 0 15px 0;
+                }
+                #search-dialog input[type="text"] {
+                    width: 100%;
+                    padding: 10px;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                    font-size: 14px;
+                    box-sizing: border-box;
+                }
+                #search-dialog select {
+                    width: 100%;
+                    padding: 8px;
+                    margin: 10px 0;
+                    border: 1px solid #ddd;
+                    border-radius: 4px;
+                }
+                #search-results {
+                    margin-top: 15px;
+                    max-height: 300px;
+                    overflow-y: auto;
+                }
+                .search-result {
+                    padding: 8px;
+                    border-bottom: 1px solid #eee;
+                    cursor: pointer;
+                }
+                .search-result:hover {
+                    background: #f5f5f5;
+                }
+                .search-close {
+                    position: absolute;
+                    top: 10px;
+                    right: 15px;
+                    background: none;
+                    border: none;
+                    font-size: 20px;
+                    cursor: pointer;
+                    color: #666;
+                }
+                #search-overlay {
+                    display: none;
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    background: rgba(0,0,0,0.5);
+                    z-index: 1999;
+                }
+                #search-overlay.visible {
+                    display: block;
+                }
+            </style>
+            <button class="search-close" id="search-close-btn">&times;</button>
+            <h3>Search</h3>
+            <select id="search-type">
+                <option value="section">Track Section</option>
+                <option value="signal">Signal</option>
+                <option value="industry">Industry</option>
+                <option value="aiLocation">AI Location</option>
+            </select>
+            <input type="text" id="search-input" placeholder="Enter search term...">
+            <div id="search-results"></div>
+        `;
+        document.body.appendChild(dialog);
+
+        const overlay = document.createElement('div');
+        overlay.id = 'search-overlay';
+        overlay.addEventListener('click', () => closeSearch());
+        document.body.appendChild(overlay);
+
+        const closeBtn = document.getElementById('search-close-btn');
+        closeBtn.addEventListener('click', () => closeSearch());
+
+        const input = document.getElementById('search-input');
+        input.addEventListener('input', debounce(performSearch, 300));
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeSearch();
+        });
+
+        MapApp.searchDialog = dialog;
+    }
+
+    function createOpacityControl() {
+        const control = document.createElement('div');
+        control.id = 'opacity-control';
+        control.innerHTML = `
+            <style>
+                #opacity-control {
+                    position: absolute;
+                    bottom: 60px;
+                    left: 10px;
+                    background: white;
+                    padding: 10px;
+                    border-radius: 4px;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+                    z-index: 1000;
+                    font-size: 12px;
+                }
+                #opacity-control input {
+                    width: 100px;
+                }
+            </style>
+            <label>Map Opacity: <input type="range" id="opacity-slider" min="0" max="100" value="100"></label>
+        `;
+        document.body.appendChild(control);
+
+        document.getElementById('opacity-slider').addEventListener('input', (e) => {
+            const opacity = e.target.value / 100;
+            // Only adjust opacity on the current base layer
+            if (MapApp.baseLayers[MapApp.currentBaseLayer]) {
+                MapApp.baseLayers[MapApp.currentBaseLayer].setOpacity(opacity);
+            }
+        });
+    }
+
+    function createMousePositionDisplay() {
+        const display = document.createElement('div');
+        display.id = 'mouse-position';
+        display.innerHTML = `
+            <style>
+                #mouse-position {
+                    position: absolute;
+                    bottom: 10px;
+                    right: 10px;
+                    background: white;
+                    padding: 5px 10px;
+                    border-radius: 4px;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+                    z-index: 1000;
+                    font-size: 12px;
+                    font-family: monospace;
+                }
+            </style>
+            <span id="mouse-coords">---, ---</span>
+        `;
+        document.body.appendChild(display);
+
+        MapApp.map.on('mousemove', (e) => {
+            const lat = e.latlng.lat.toFixed(6);
+            const lon = e.latlng.lng.toFixed(6);
+            document.getElementById('mouse-coords').textContent = `${lat}, ${lon}`;
+        });
+
+        MapApp.map.on('mouseout', () => {
+            document.getElementById('mouse-coords').textContent = '---, ---';
+        });
+    }
+
+    function createScaleDisplay() {
+        L.control.scale({imperial: true, metric: true}).addTo(MapApp.map);
+    }
+
+    function addTooltipStyles() {
+        const style = document.createElement('style');
+        style.textContent = `
+            .leaflet-tooltip {
+                font-size: 14px !important;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // ========================================
+    // Region Loading/Unloading
+    // ========================================
+    async function loadDefaultRegions() {
+        const defaultRegions = MapApp.manifest.regions.filter(r => r.enabled_by_default);
+        await Promise.all(defaultRegions.map(r => loadRegion(r.id)));
+    }
+
+    async function loadRegion(regionId) {
+        if (MapApp.loadedRegions.has(regionId)) {
+            // Already loaded, just show it
+            showRegion(regionId);
+            return;
+        }
+
+        const checkbox = MapApp.regionCheckboxes.get(regionId);
+        const item = checkbox.closest('.region-item');
+
+        // Show loading indicator
+        const loader = document.createElement('div');
+        loader.className = 'loading';
+        item.appendChild(loader);
+        checkbox.disabled = true;
+
+        try {
+            const response = await fetch(`data/${regionId}.json`);
+            const data = await response.json();
+
+            console.log(`Loaded region ${regionId}: ${data.sections.length} sections`);
+
+            // Create layer groups
+            const layers = {
+                sections: L.layerGroup(),
+                signals: L.layerGroup(),
+                industries: L.layerGroup(),
+                aiLocations: L.layerGroup(),
+                tileBoundaries: L.layerGroup()
+            };
+
+            // Render sections
+            for (const section of data.sections) {
+                // Each section may have multiple paths (especially switches)
+                const sectionGroup = L.featureGroup();
+
+                for (const path of section.paths) {
+                    const trackColor = section.is_switch ? COLORS.switch : COLORS.track;
+                    const polyline = L.polyline(path, {
+                        color: trackColor,
+                        weight: 5,
+                        opacity: 0.8
+                    });
+
+                    // Build detailed section popup
+                    const sectionType = section.is_switch ? ' (Switch)' : '';
+                    let sectionPopup = `<b>Section ${section.id}${sectionType}</b><br>`;
+                    sectionPopup += `Length: ${section.length_ft.toFixed(1)} ft (${section.length_m.toFixed(1)} m)<br>`;
+                    sectionPopup += `Paths: ${section.paths.length}`;
+
+                    polyline.bindPopup(sectionPopup, {maxWidth: 250});
+                    polyline.bindTooltip(`Section ${section.id}`, {sticky: true});
+
+                    // Click handler for selection and industry popups
+                    polyline.on('click', (e) => {
+                        if (e.originalEvent.ctrlKey) {
+                            // Ctrl+click for multi-section selection
+                            e.originalEvent.stopPropagation();
+                            toggleSectionSelection(regionId, section.id, sectionGroup, section);
+                        } else if (MapApp.overlayStates.industries && MapApp.industrySectionIds.has(`${regionId}_${section.id}`)) {
+                            // Industry overlay active and this is an industry track - show industry popup
+                            e.originalEvent.stopPropagation();
+                            const industries = getIndustriesForSection(regionId, section.id);
+                            if (industries.length > 0) {
+                                let popupContent = '';
+                                for (const ind of industries) {
+                                    if (popupContent) popupContent += '<hr>';
+                                    popupContent += `<b>${ind.name}</b><br>`;
+                                    popupContent += `Tag: ${ind.tag}<br>`;
+                                    if (ind.track_sections && ind.track_sections.length > 0) {
+                                        popupContent += `Track Sections: ${ind.track_sections.join(', ')}`;
+                                    }
+                                }
+                                L.popup({maxWidth: 300})
+                                    .setLatLng(e.latlng)
+                                    .setContent(popupContent)
+                                    .openOn(MapApp.map);
+                            }
+                        }
+                        // Else: normal click - let default popup show (track info)
+                    });
+
+                    sectionGroup.addLayer(polyline);
+                }
+
+                layers.sections.addLayer(sectionGroup);
+                const originalColor = section.is_switch ? COLORS.switch : COLORS.track;
+                MapApp.sectionIndex.set(section.id, {region_id: regionId, polyline: sectionGroup, metadata: section, originalColor: originalColor});
+            }
+
+            // Render signals as directional triangles
+            for (const signal of data.signals) {
+                const fillColor = signal.type === 'absolute' ? COLORS.signalAbsolute : COLORS.signalIntermediate;
+                // Border color based on head count (single vs stacked)
+                const borderColor = signal.name && signal.name.includes('/') ? COLORS.signalBorderStacked : COLORS.signalBorderSingle;
+
+                // Create triangle pointing in signal direction
+                // rotation is in degrees, convert to radians and flip 180 degrees
+                const rotRad = (signal.rotation * Math.PI / 180) + Math.PI;
+                const size = 0.00023;  // Triangle size in degrees (approx 15m)
+
+                // Triangle vertices: tip points in rotation direction
+                const tip = [
+                    signal.lat + size * Math.cos(rotRad),
+                    signal.lon + size * Math.sin(rotRad) / Math.cos(signal.lat * Math.PI / 180)
+                ];
+                const baseAngle1 = rotRad + 2.5;  // ~143 degrees back
+                const baseAngle2 = rotRad - 2.5;  // ~143 degrees back
+                const baseSize = size * 0.6;
+                const base1 = [
+                    signal.lat + baseSize * Math.cos(baseAngle1),
+                    signal.lon + baseSize * Math.sin(baseAngle1) / Math.cos(signal.lat * Math.PI / 180)
+                ];
+                const base2 = [
+                    signal.lat + baseSize * Math.cos(baseAngle2),
+                    signal.lon + baseSize * Math.sin(baseAngle2) / Math.cos(signal.lat * Math.PI / 180)
+                ];
+
+                const marker = L.polygon([tip, base1, base2], {
+                    fillColor: fillColor,
+                    color: borderColor,
+                    weight: 2,
+                    fillOpacity: 0.9
+                });
+
+                // Build detailed signal popup
+                let signalPopup = `<b>${signal.name}</b><br>`;
+                signalPopup += `Model: ${signal.model_name}<br>`;
+                signalPopup += `Type: ${signal.type === 'absolute' ? 'Absolute' : 'Intermediate'}<br>`;
+                signalPopup += `Dwarf: ${signal.is_dwarf ? 'Yes' : 'No'}<br>`;
+                signalPopup += `Switch Indicator: ${signal.is_switch_indicator ? 'Yes' : 'No'}<br>`;
+                signalPopup += `Advance Diverging: ${signal.is_advance_diverging ? 'Yes' : 'No'}`;
+
+                marker.bindPopup(signalPopup, {maxWidth: 300});
+                marker.bindTooltip(signal.name, {sticky: true});
+
+                layers.signals.addLayer(marker);
+                MapApp.signalIndex.set(signal.id, {region_id: regionId, marker, metadata: signal});
+            }
+
+            // Render industries and track industry section IDs
+            for (const industry of data.industries) {
+                const marker = L.marker([industry.lat, industry.lon], {
+                    icon: L.divIcon({
+                        className: 'industry-marker',
+                        html: `<div style="color:${COLORS.industryTrack};font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;">${industry.tag}</div>`,
+                        iconAnchor: [0, 0]
+                    })
+                });
+
+                // Build detailed industry popup
+                let industryPopup = `<b>${industry.name}</b><br>`;
+                industryPopup += `Tag: ${industry.tag}<br>`;
+                if (industry.track_sections && industry.track_sections.length > 0) {
+                    industryPopup += `Track Sections: ${industry.track_sections.join(', ')}`;
+                }
+
+                marker.bindPopup(industryPopup, {maxWidth: 300});
+                layers.industries.addLayer(marker);
+                MapApp.industryIndex.push({region_id: regionId, data: industry});
+
+                // Track which sections are industry tracks
+                if (industry.track_sections) {
+                    for (const sectionId of industry.track_sections) {
+                        MapApp.industrySectionIds.add(`${regionId}_${sectionId}`);
+                    }
+                }
+            }
+
+            // Render AI locations
+            for (const loc of data.ai_locations) {
+                const marker = L.circleMarker([loc.lat, loc.lon], {
+                    radius: 5,
+                    fillColor: '#9900cc',
+                    color: '#000',
+                    weight: 1,
+                    fillOpacity: 0.8
+                });
+
+                // Build detailed AI location popup
+                let aiPopup = `<b>${loc.name}</b><br>`;
+                aiPopup += `Type: ${loc.type_name}<br>`;
+                aiPopup += `Type ID: ${loc.type_id}`;
+
+                marker.bindPopup(aiPopup, {maxWidth: 250});
+                marker.bindTooltip(loc.name, {sticky: true});
+
+                layers.aiLocations.addLayer(marker);
+                MapApp.aiLocationIndex.push({region_id: regionId, data: loc});
+            }
+
+            // Render tile boundaries
+            for (const tile of data.tiles) {
+                const tileColor = tile.is_corrected ? 'red' : 'black';
+                const tileStatus = tile.is_corrected ? ' (CORRECTED)' : '';
+                const tileCoords = `(${tile.x}, ${tile.z})`;
+
+                // Draw tile boundary rectangle (non-interactive - only shows border)
+                const rect = L.rectangle(
+                    [[tile.lat_south, tile.lon_west], [tile.lat_north, tile.lon_east]],
+                    {
+                        color: tileColor,
+                        fill: false,
+                        weight: 2,
+                        opacity: 0.7,
+                        interactive: false  // Don't capture mouse events - let underlying elements be clickable
+                    }
+                );
+                layers.tileBoundaries.addLayer(rect);
+
+                // Draw center dot
+                const centerLat = (tile.lat_north + tile.lat_south) / 2;
+                const centerLon = (tile.lon_east + tile.lon_west) / 2;
+                const dotColor = tile.is_corrected ? 'red' : 'darkgrey';
+                const dotFill = tile.is_corrected ? 'red' : 'white';
+
+                const dot = L.circleMarker([centerLat, centerLon], {
+                    radius: 3,
+                    color: dotColor,
+                    fillColor: dotFill,
+                    fillOpacity: 1.0,
+                    weight: 1
+                });
+                dot.bindPopup(`<b>Tile ${tileCoords}${tileStatus}</b>`);
+                dot.bindTooltip(`Tile ${tileCoords}${tileStatus}`, {sticky: true});
+                layers.tileBoundaries.addLayer(dot);
+            }
+
+            // Store region data
+            MapApp.loadedRegions.set(regionId, {data, layers, visible: true});
+
+            // Add layers to map based on overlay states
+            layers.sections.addTo(MapApp.map);
+            if (MapApp.overlayStates.signals) layers.signals.addTo(MapApp.map);
+            if (MapApp.overlayStates.industries) {
+                layers.industries.addTo(MapApp.map);
+                updateIndustryTrackColors(true);  // Color industry tracks green
+            }
+            if (MapApp.overlayStates.aiLocations) layers.aiLocations.addTo(MapApp.map);
+            if (MapApp.overlayStates.tileBoundaries) layers.tileBoundaries.addTo(MapApp.map);
+
+        } catch (error) {
+            console.error(`Failed to load region ${regionId}:`, error);
+            checkbox.checked = false;
+        } finally {
+            loader.remove();
+            checkbox.disabled = false;
+        }
+    }
+
+    function unloadRegion(regionId) {
+        const region = MapApp.loadedRegions.get(regionId);
+        if (!region) return;
+
+        // Remove layers from map
+        for (const layer of Object.values(region.layers)) {
+            MapApp.map.removeLayer(layer);
+        }
+
+        // Remove from indexes
+        for (const [sectionId, data] of MapApp.sectionIndex) {
+            if (data.region_id === regionId) {
+                MapApp.sectionIndex.delete(sectionId);
+            }
+        }
+        for (const [signalId, data] of MapApp.signalIndex) {
+            if (data.region_id === regionId) {
+                MapApp.signalIndex.delete(signalId);
+            }
+        }
+        MapApp.industryIndex = MapApp.industryIndex.filter(i => i.region_id !== regionId);
+        MapApp.aiLocationIndex = MapApp.aiLocationIndex.filter(i => i.region_id !== regionId);
+
+        // Clear selection if it was in this region
+        if (MapApp.currentSelectionRegion === regionId) {
+            clearSelection();
+        }
+
+        region.visible = false;
+    }
+
+    function showRegion(regionId) {
+        const region = MapApp.loadedRegions.get(regionId);
+        if (!region || region.visible) return;
+
+        region.layers.sections.addTo(MapApp.map);
+        if (MapApp.overlayStates.signals) region.layers.signals.addTo(MapApp.map);
+        if (MapApp.overlayStates.industries) region.layers.industries.addTo(MapApp.map);
+        if (MapApp.overlayStates.aiLocations) region.layers.aiLocations.addTo(MapApp.map);
+        if (MapApp.overlayStates.tileBoundaries) region.layers.tileBoundaries.addTo(MapApp.map);
+
+        region.visible = true;
+    }
+
+    function toggleRegion(regionId, enabled) {
+        if (enabled) {
+            loadRegion(regionId);
+        } else {
+            unloadRegion(regionId);
+        }
+    }
+
+    // ========================================
+    // Overlay Toggle
+    // ========================================
+    function toggleOverlay(overlayId, enabled) {
+        MapApp.overlayStates[overlayId] = enabled;
+
+        for (const [regionId, region] of MapApp.loadedRegions) {
+            if (!region.visible) continue;
+
+            const layer = region.layers[overlayId];
+            if (layer) {
+                if (enabled) {
+                    layer.addTo(MapApp.map);
+                } else {
+                    MapApp.map.removeLayer(layer);
+                }
+            }
+        }
+
+        // When toggling industries, recolor industry tracks
+        if (overlayId === 'industries') {
+            updateIndustryTrackColors(enabled);
+        }
+    }
+
+    function updateIndustryTrackColors(showIndustryColor) {
+        for (const [sectionId, data] of MapApp.sectionIndex) {
+            const compositeKey = `${data.region_id}_${sectionId}`;
+            if (!MapApp.industrySectionIds.has(compositeKey)) continue;
+            if (MapApp.selectedSections.has(sectionId)) continue;  // Don't change selected sections
+
+            const color = showIndustryColor ? COLORS.industryTrack : data.originalColor;
+            data.polyline.eachLayer(layer => {
+                if (layer.setStyle) layer.setStyle({color: color});
+            });
+        }
+    }
+
+    function getIndustriesForSection(regionId, sectionId) {
+        const industries = [];
+        for (const item of MapApp.industryIndex) {
+            if (item.region_id === regionId &&
+                item.data.track_sections &&
+                item.data.track_sections.includes(sectionId)) {
+                industries.push(item.data);
+            }
+        }
+        return industries;
+    }
+
+    // ========================================
+    // Section Selection
+    // ========================================
+    function toggleSectionSelection(regionId, sectionId, featureGroup, metadata) {
+        // Check if selecting from different region
+        if (MapApp.currentSelectionRegion && MapApp.currentSelectionRegion !== regionId) {
+            showMessage('Cannot select sections from multiple regions. Clear selection first.');
+            return;
+        }
+
+        if (MapApp.selectedSections.has(sectionId)) {
+            // Deselect - apply style to all layers in the feature group
+            MapApp.selectedSections.delete(sectionId);
+            featureGroup.eachLayer(layer => {
+                if (layer.setStyle) layer.setStyle({color: data.originalColor || COLORS.track, weight: 3});
+            });
+
+            if (MapApp.selectedSections.size === 0) {
+                MapApp.currentSelectionRegion = null;
+            }
+        } else {
+            // Select - apply style to all layers in the feature group
+            MapApp.selectedSections.set(sectionId, {polyline: featureGroup, metadata});
+            MapApp.currentSelectionRegion = regionId;
+            featureGroup.eachLayer(layer => {
+                if (layer.setStyle) layer.setStyle({color: COLORS.trackSelected, weight: 5});
+            });
+        }
+
+        updateSelectionInfo();
+    }
+
+    function clearSelection() {
+        for (const [sectionId, data] of MapApp.selectedSections) {
+            data.polyline.eachLayer(layer => {
+                if (layer.setStyle) layer.setStyle({color: data.originalColor || COLORS.track, weight: 3});
+            });
+        }
+        MapApp.selectedSections.clear();
+        MapApp.currentSelectionRegion = null;
+        updateSelectionInfo();
+    }
+
+    function updateSelectionInfo() {
+        const infoDiv = document.getElementById('selection-info');
+        const countSpan = document.getElementById('selection-count');
+        const lengthSpan = document.getElementById('selection-length');
+
+        if (MapApp.selectedSections.size === 0) {
+            infoDiv.classList.remove('visible');
+        } else {
+            infoDiv.classList.add('visible');
+            countSpan.textContent = MapApp.selectedSections.size;
+
+            let totalLength = 0;
+            for (const [sectionId, data] of MapApp.selectedSections) {
+                totalLength += data.metadata.length_ft;
+            }
+            lengthSpan.textContent = totalLength.toFixed(1);
+        }
+    }
+
+    // ========================================
+    // Search
+    // ========================================
+    function openSearch() {
+        document.getElementById('search-dialog').classList.add('visible');
+        document.getElementById('search-overlay').classList.add('visible');
+        document.getElementById('search-input').focus();
+    }
+
+    function closeSearch() {
+        document.getElementById('search-dialog').classList.remove('visible');
+        document.getElementById('search-overlay').classList.remove('visible');
+        document.getElementById('search-input').value = '';
+        document.getElementById('search-results').innerHTML = '';
+    }
+
+    function performSearch() {
+        const searchType = document.getElementById('search-type').value;
+        const query = document.getElementById('search-input').value.trim().toLowerCase();
+        const resultsDiv = document.getElementById('search-results');
+
+        if (!query) {
+            resultsDiv.innerHTML = '';
+            return;
+        }
+
+        let results = [];
+
+        if (searchType === 'section') {
+            const queryNum = parseInt(query);
+            for (const [sectionId, data] of MapApp.sectionIndex) {
+                if (sectionId.toString().includes(query) || sectionId === queryNum) {
+                    results.push({
+                        type: 'section',
+                        id: sectionId,
+                        label: `Section ${sectionId}`,
+                        region: data.region_id,
+                        data: data
+                    });
+                }
+            }
+        } else if (searchType === 'signal') {
+            const queryNum = parseInt(query);
+            for (const [signalId, data] of MapApp.signalIndex) {
+                if (signalId.toString().includes(query) || signalId === queryNum) {
+                    results.push({
+                        type: 'signal',
+                        id: signalId,
+                        label: `Signal ${signalId}`,
+                        region: data.region_id,
+                        data: data
+                    });
+                }
+            }
+        } else if (searchType === 'industry') {
+            for (const item of MapApp.industryIndex) {
+                if (item.data.tag.toLowerCase().includes(query) ||
+                    item.data.name.toLowerCase().includes(query)) {
+                    results.push({
+                        type: 'industry',
+                        id: item.data.tag,
+                        label: `${item.data.tag} - ${item.data.name}`,
+                        region: item.region_id,
+                        data: item
+                    });
+                }
+            }
+        } else if (searchType === 'aiLocation') {
+            for (const item of MapApp.aiLocationIndex) {
+                if (item.data.name.toLowerCase().includes(query)) {
+                    results.push({
+                        type: 'aiLocation',
+                        id: item.data.id,
+                        label: `${item.data.name} (${item.data.type_name})`,
+                        region: item.region_id,
+                        data: item
+                    });
+                }
+            }
+        }
+
+        // Limit results
+        results = results.slice(0, 50);
+
+        resultsDiv.innerHTML = results.length === 0
+            ? '<div style="padding:10px;color:#666;">No results found</div>'
+            : results.map(r => {
+                // Escape for HTML attribute - use single quotes and escape any single quotes in the value
+                const idStr = typeof r.id === 'string'
+                    ? `'${r.id.replace(/'/g, "\\'")}'`
+                    : r.id;
+                return `
+                <div class="search-result" onclick="MapApp.goToResult('${r.type}', ${idStr}, '${r.region}')">
+                    <strong>${r.label}</strong>
+                    <span style="color:#666;font-size:11px;"> (${r.region})</span>
+                </div>
+                `;
+            }).join('');
+    }
+
+    function goToResult(type, id, regionId) {
+        closeSearch();
+
+        if (type === 'section') {
+            const data = MapApp.sectionIndex.get(id);
+            if (data) {
+                MapApp.map.fitBounds(data.polyline.getBounds(), {padding: [50, 50]});
+                // Open popup on first layer in the group
+                data.polyline.eachLayer(layer => {
+                    if (layer.openPopup) {
+                        layer.openPopup();
+                        return false; // Stop after first
+                    }
+                });
+            }
+        } else if (type === 'signal') {
+            const data = MapApp.signalIndex.get(id);
+            if (data) {
+                MapApp.map.setView([data.metadata.lat, data.metadata.lon], 16);
+                data.marker.openPopup();
+            }
+        } else if (type === 'industry') {
+            const item = MapApp.industryIndex.find(i => i.data.tag === id && i.region_id === regionId);
+            if (item) {
+                MapApp.map.setView([item.data.lat, item.data.lon], 16);
+            }
+        } else if (type === 'aiLocation') {
+            const item = MapApp.aiLocationIndex.find(i => i.data.id === id && i.region_id === regionId);
+            if (item) {
+                MapApp.map.setView([item.data.lat, item.data.lon], 16);
+            }
+        }
+    }
+
+    // ========================================
+    // Utilities
+    // ========================================
+    function debounce(func, wait) {
+        let timeout;
+        return function(...args) {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => func.apply(this, args), wait);
+        };
+    }
+
+    function showMessage(msg) {
+        const toast = document.createElement('div');
+        toast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#333;color:white;padding:10px 20px;border-radius:4px;z-index:3000;';
+        toast.textContent = msg;
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 3000);
+    }
+
+    // ========================================
+    // Public API
+    // ========================================
+    window.MapApp = {
+        openSearch,
+        closeSearch,
+        goToResult,
+        clearSelection: clearSelection
+    };
+
+    // Start initialization
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        setTimeout(init, 100);
+    }
+})();
+</script>
+'''
+
+
+def generate_html(config: VisualizationConfig, output_path: Path) -> None:
+    """Generate index.html with Folium map and JavaScript"""
+
+    # Calculate initial center from first region bounds in manifest
+    # For now, use default center
+    center = DEFAULT_CENTER
+    zoom = DEFAULT_ZOOM
+
+    # Create Folium map with canvas renderer and no default tiles
+    # Base layers are handled in JavaScript for proper switching
+    m = folium.Map(
+        location=center,
+        zoom_start=zoom,
+        prefer_canvas=True,
+        control_scale=False,  # We add our own scale control
+        tiles=None  # No default tiles - we create them in JavaScript
+    )
+
+    # Add color configuration and JavaScript
+    color_config = generate_color_config(config.colors)
+    m.get_root().html.add_child(folium.Element(color_config))
+    js_code = generate_javascript()
+    m.get_root().html.add_child(folium.Element(js_code))
+
+    # Save the map
+    m.save(str(output_path))
+    print(f"Generated HTML: {output_path}")
+
+
+if __name__ == '__main__':
+    import sys
+    from output_generator import generate_output
+
+    if len(sys.argv) < 2:
+        print("Usage: html_generator.py <config.ini>")
+        sys.exit(1)
+
+    from config_parser import parse_config
+    config = parse_config(sys.argv[1])
+
+    # Generate JSON files first
+    generate_output(config)
+
+    # Generate HTML
+    output_path = config.output_dir / "index.html"
+    generate_html(config, output_path)
