@@ -3,11 +3,14 @@
 Output generator for Run8 Track Mapper.
 
 Generates manifest.json and per-region JSON files from extracted region data.
+Can also generate tile reports listing all tiles that tracks pass through.
 """
 
+import argparse
 import json
 import os
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -137,6 +140,45 @@ def generate_manifest(config: VisualizationConfig,
     }
 
 
+def generate_tile_report(config: VisualizationConfig, output_path: str) -> None:
+    """Generate a tile report listing all tiles that tracks pass through.
+
+    Args:
+        config: Visualization configuration
+        output_path: Path to output tile list file
+    """
+    from explore_trackdb import TrackDatabase
+
+    all_tiles = set()
+
+    print(f"Collecting tiles from {len(config.regions)} region(s)...")
+
+    for region_config in config.regions:
+        print(f"  Loading {region_config.display_name}...")
+        track_db = TrackDatabase(str(region_config.track_database))
+
+        region_tiles = set()
+        for section in track_db.sections:
+            for node in section.nodes:
+                region_tiles.add(node.tile_index)
+
+        print(f"    Found {len(region_tiles)} tiles")
+        all_tiles.update(region_tiles)
+
+    print(f"\nTotal unique tiles: {len(all_tiles)}")
+
+    # Write tile report
+    with open(output_path, 'w') as f:
+        f.write(f"# Tiles from: {config.name}\n")
+        f.write(f"# Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"# Total tiles: {len(all_tiles)}\n")
+
+        for tile_x, tile_z in sorted(all_tiles):
+            f.write(f"{tile_x},{tile_z}\n")
+
+    print(f"Tile report saved to: {output_path}")
+
+
 def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_html: bool = True) -> None:
     """Generate all output files (manifest.json, per-region JSON files, and index.html)"""
     output_dir = config.output_dir
@@ -200,16 +242,40 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
     if generate_html:
         print(f"  HTML: {output_dir / 'index.html'}")
     print(f"  Regions: {len(regions_data)}")
+
+    total_track_length_ft = 0.0
+    total_track_length_m = 0.0
     for region in regions_data:
-        print(f"    - {region.id}: {len(region.sections)} sections, {len(region.signals)} signals")
+        region_length_ft = sum(s.length_ft for s in region.sections)
+        region_length_m = sum(s.length_m for s in region.sections)
+        total_track_length_ft += region_length_ft
+        total_track_length_m += region_length_m
+        # Convert to miles for display
+        region_length_miles = region_length_ft / 5280
+        print(f"    - {region.id}: {len(region.sections)} sections, {len(region.signals)} signals, {region_length_miles:.1f} miles ({region_length_m/1000:.1f} km)")
+
+    # Print grand total
+    total_miles = total_track_length_ft / 5280
+    total_km = total_track_length_m / 1000
+    print(f"\n  Total track length: {total_miles:.1f} miles ({total_km:.1f} km)")
 
 
 if __name__ == '__main__':
-    import sys
+    parser = argparse.ArgumentParser(
+        description='Generate output files from Run8 Track Mapper config'
+    )
+    parser.add_argument('config', help='Path to configuration INI file')
+    parser.add_argument(
+        '--tile_report',
+        metavar='FILE',
+        help='Generate tile list report to FILE (skip normal output generation)'
+    )
 
-    if len(sys.argv) < 2:
-        print("Usage: output_generator.py <config.ini>")
-        sys.exit(1)
+    args = parser.parse_args()
 
-    config = parse_config(sys.argv[1])
-    generate_output(config)
+    config = parse_config(args.config)
+
+    if args.tile_report:
+        generate_tile_report(config, args.tile_report)
+    else:
+        generate_output(config)

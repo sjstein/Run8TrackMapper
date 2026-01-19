@@ -126,46 +126,115 @@ def decompress_tr4(filepath: str) -> Optional[bytes]:
         return None
 
 
+def _extract_coords_at_offset(data: bytes, offset: int) -> Optional[Tuple[float, float, float, float]]:
+    """Extract and validate coordinates at a specific offset.
+
+    Returns tuple (lon_east, lon_west, lat_north, lat_south) if valid, None otherwise.
+    Uses strict tile size validation (0.005° - 0.02°) to filter false positives.
+    """
+    try:
+        if offset + 16 > len(data):
+            return None
+        lon_east = struct.unpack('<f', data[offset:offset+4])[0]
+        lon_west = struct.unpack('<f', data[offset+4:offset+8])[0]
+        lat_north = struct.unpack('<f', data[offset+8:offset+12])[0]
+        lat_south = struct.unpack('<f', data[offset+12:offset+16])[0]
+
+        # Validate coordinates with strict tile size bounds
+        # Typical tile size is ~0.009° × 0.009°
+        if (-180 < lon_east < 0 and -180 < lon_west < 0 and
+            0 < lat_north < 90 and 0 < lat_south < 90 and
+            lon_west < lon_east and lat_south < lat_north and
+            0.005 < abs(lon_east - lon_west) < 0.02 and
+            0.005 < abs(lat_north - lat_south) < 0.02):
+            return (lon_east, lon_west, lat_north, lat_south)
+    except:
+        pass
+    return None
+
+
 def find_tile_bounds(data: bytes, offset_e: float = 0.0, offset_n: float = 0.0) -> Optional[Tuple[float, float, float, float]]:
-    """Find geographic bounds in TR4 file data
+    """Find geographic bounds in TR4 file data.
+
+    Uses a multi-method approach for reliability:
+    1. Sentinel-based: Look for uint32 sentinel value 3, coordinates at +40 bytes
+    2. Direct access with string detection: Look for coordinates followed by known strings
+    3. Direct access best coordinates: Score all valid coordinates and pick the best
 
     Returns: (lon_east, lon_west, lat_north, lat_south) or None
     """
-    # Try sentinel-3 first
+    # Method 1: Try sentinel-3 based parsing
     for offset in range(0, len(data) - 44):
         try:
             sentinel = struct.unpack('<I', data[offset:offset+4])[0]
             if sentinel == 3:
                 coord_offset = offset + 40
-                if coord_offset + 16 <= len(data):
-                    lon_east = struct.unpack('<f', data[coord_offset:coord_offset+4])[0] - offset_e
-                    lon_west = struct.unpack('<f', data[coord_offset+4:coord_offset+8])[0] - offset_e
-                    lat_north = struct.unpack('<f', data[coord_offset+8:coord_offset+12])[0] - offset_n
-                    lat_south = struct.unpack('<f', data[coord_offset+12:coord_offset+16])[0] - offset_n
-
-                    if (-180 < lon_east < 0 and -180 < lon_west < 0 and
-                        0 < lat_north < 90 and 0 < lat_south < 90 and
-                        abs(lon_east - lon_west) < 1 and abs(lat_north - lat_south) < 1 and
-                        lat_south < lat_north and lon_west < lon_east):
-                        return (lon_east, lon_west, lat_north, lat_south)
+                coords = _extract_coords_at_offset(data, coord_offset)
+                if coords:
+                    # Apply offsets
+                    return (coords[0] - offset_e, coords[1] - offset_e,
+                            coords[2] - offset_n, coords[3] - offset_n)
         except:
             pass
 
-    # Try pattern matching for other formats
+    # Method 2: Direct access with string pattern detection
+    # Look for coordinates followed by known terrain/vegetation strings
+    known_strings = [b'NoCalVeg01', b'NSF_Mojave', b'NSF_Sierra', b'ProcVeg01']
+
     for offset in range(0, len(data) - 16):
-        try:
-            lon_east = struct.unpack('<f', data[offset:offset+4])[0] - offset_e
-            lon_west = struct.unpack('<f', data[offset+4:offset+8])[0] - offset_e
-            lat_north = struct.unpack('<f', data[offset+8:offset+12])[0] - offset_n
-            lat_south = struct.unpack('<f', data[offset+12:offset+16])[0] - offset_n
+        coords = _extract_coords_at_offset(data, offset)
+        if coords:
+            # Check if followed by known string pattern (within next 64 bytes)
+            search_end = min(offset + 80, len(data))
+            chunk = data[offset + 16:search_end]
+            for known_str in known_strings:
+                if known_str in chunk:
+                    # Apply offsets
+                    return (coords[0] - offset_e, coords[1] - offset_e,
+                            coords[2] - offset_n, coords[3] - offset_n)
 
-            if (LON_MIN < lon_east < LON_MAX and LON_MIN < lon_west < LON_MAX and
-                LAT_MIN < lat_north < LAT_MAX and LAT_MIN < lat_south < LAT_MAX and
-                abs(lon_east - lon_west) < 0.05 and abs(lat_north - lat_south) < 0.05 and
-                lon_west < lon_east and lat_south < lat_north):
-                return (lon_east, lon_west, lat_north, lat_south)
-        except:
-            pass
+    # Method 3: Direct access - find ALL valid coordinates and choose the best one
+    # This avoids false positives by scoring candidates on geographic plausibility
+    valid_coords = []
+    for offset in range(0, len(data) - 16):
+        coords = _extract_coords_at_offset(data, offset)
+        if coords:
+            valid_coords.append(coords)
+
+    if valid_coords:
+        # Choose the best coordinates based on geographic plausibility
+        best_score = -1
+        best_coords = None
+
+        for coords in valid_coords:
+            lon_east, lon_west, lat_north, lat_south = coords
+            score = 0
+
+            # Prefer realistic latitude/longitude ranges (California region)
+            if -130 <= lon_east <= -110:
+                score += 10
+            if 30 <= lat_north <= 40:
+                score += 10
+
+            # Prefer reasonable tile sizes
+            tile_width = abs(lon_east - lon_west)
+            tile_height = abs(lat_north - lat_south)
+            if 0.005 <= tile_width <= 0.015 and 0.005 <= tile_height <= 0.015:
+                score += 5
+
+            # Avoid coordinates near zero (likely false positives)
+            if abs(lon_east) < 1 and abs(lat_north) < 1:
+                score -= 20
+
+            if score > best_score:
+                best_score = score
+                best_coords = coords
+
+        if best_coords:
+            # Apply offsets
+            return (best_coords[0] - offset_e, best_coords[1] - offset_e,
+                    best_coords[2] - offset_n, best_coords[3] - offset_n)
+
     return None
 
 
