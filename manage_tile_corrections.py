@@ -51,44 +51,131 @@ def decompress_tr4(filepath):
     except Exception as e:
         return None
 
+def _extract_coords_at_offset(data, offset):
+    """Extract and validate coordinates at a specific offset.
+
+    Returns tuple (lon_east, lon_west, lat_north, lat_south) if valid, None otherwise.
+    Uses strict tile size validation (0.005° - 0.02°) to filter false positives.
+    """
+    try:
+        if offset + 16 > len(data):
+            return None
+        lon_east = struct.unpack('<f', data[offset:offset+4])[0]
+        lon_west = struct.unpack('<f', data[offset+4:offset+8])[0]
+        lat_north = struct.unpack('<f', data[offset+8:offset+12])[0]
+        lat_south = struct.unpack('<f', data[offset+12:offset+16])[0]
+
+        # Validate coordinates with strict tile size bounds
+        # Typical tile size is ~0.009° × 0.009°
+        if (-180 < lon_east < 0 and -180 < lon_west < 0 and
+            0 < lat_north < 90 and 0 < lat_south < 90 and
+            lon_west < lon_east and lat_south < lat_north and
+            0.005 < abs(lon_east - lon_west) < 0.02 and
+            0.005 < abs(lat_north - lat_south) < 0.02):
+            return (lon_east, lon_west, lat_north, lat_south)
+    except:
+        pass
+    return None
+
+
 def find_tile_bounds(data):
-    """Find geographic bounds in TR4 file data"""
-    # Try sentinel-3 first
+    """Find geographic bounds in TR4 file data.
+
+    Uses a multi-method approach for reliability:
+    1. Sentinel-based: Look for uint32 sentinel value 3, coordinates at +40 bytes
+    2. Direct access with string detection: Look for coordinates followed by known strings
+    3. Direct access first valid: Accept first coordinates matching strict size criteria
+    """
+    # Method 1: Try sentinel-3 based parsing
     for offset in range(0, len(data) - 44):
         try:
             sentinel = struct.unpack('<I', data[offset:offset+4])[0]
             if sentinel == 3:
                 coord_offset = offset + 40
-                if coord_offset + 16 <= len(data):
-                    lon_east = struct.unpack('<f', data[coord_offset:coord_offset+4])[0]
-                    lon_west = struct.unpack('<f', data[coord_offset+4:coord_offset+8])[0]
-                    lat_north = struct.unpack('<f', data[coord_offset+8:coord_offset+12])[0]
-                    lat_south = struct.unpack('<f', data[coord_offset+12:coord_offset+16])[0]
-
-                    if (-180 < lon_east < 0 and -180 < lon_west < 0 and
-                        0 < lat_north < 90 and 0 < lat_south < 90 and
-                        abs(lon_east - lon_west) < 1 and abs(lat_north - lat_south) < 1 and
-                        lat_south < lat_north and lon_west < lon_east):
-                        return (lon_east, lon_west, lat_north, lat_south)
+                coords = _extract_coords_at_offset(data, coord_offset)
+                if coords:
+                    return coords
         except:
             pass
 
-    # Try pattern matching for other formats
+    # Method 2: Direct access with string pattern detection
+    # Look for coordinates followed by known terrain/vegetation strings
+    known_strings = [b'NoCalVeg01', b'NSF_Mojave', b'NSF_Sierra', b'ProcVeg01']
+
     for offset in range(0, len(data) - 16):
-        try:
-            lon_east = struct.unpack('<f', data[offset:offset+4])[0]
-            lon_west = struct.unpack('<f', data[offset+4:offset+8])[0]
-            lat_north = struct.unpack('<f', data[offset+8:offset+12])[0]
-            lat_south = struct.unpack('<f', data[offset+12:offset+16])[0]
+        coords = _extract_coords_at_offset(data, offset)
+        if coords:
+            # Check if followed by known string pattern (within next 64 bytes)
+            search_end = min(offset + 80, len(data))
+            chunk = data[offset + 16:search_end]
+            for known_str in known_strings:
+                if known_str in chunk:
+                    return coords
 
-            if (-130 < lon_east < -65 and -130 < lon_west < -65 and
-                23 < lat_north < 50 and 23 < lat_south < 50 and
-                abs(lon_east - lon_west) < 0.05 and abs(lat_north - lat_south) < 0.05 and
-                lon_west < lon_east and lat_south < lat_north):
-                return (lon_east, lon_west, lat_north, lat_south)
-        except:
-            pass
+    # Method 3: Direct access - find ALL valid coordinates and choose the best one
+    # This avoids false positives by scoring candidates on geographic plausibility
+    valid_coords = []
+    for offset in range(0, len(data) - 16):
+        coords = _extract_coords_at_offset(data, offset)
+        if coords:
+            valid_coords.append(coords)
+
+    if valid_coords:
+        # Choose the best coordinates based on geographic plausibility
+        best_score = -1
+        best_coords = None
+
+        for coords in valid_coords:
+            lon_east, lon_west, lat_north, lat_south = coords
+            score = 0
+
+            # Prefer realistic latitude/longitude ranges (California region)
+            if -130 <= lon_east <= -110:
+                score += 10
+            if 30 <= lat_north <= 40:
+                score += 10
+
+            # Prefer reasonable tile sizes
+            tile_width = abs(lon_east - lon_west)
+            tile_height = abs(lat_north - lat_south)
+            if 0.005 <= tile_width <= 0.015 and 0.005 <= tile_height <= 0.015:
+                score += 5
+
+            # Avoid coordinates near zero (likely false positives)
+            if abs(lon_east) < 1 and abs(lat_north) < 1:
+                score -= 20
+
+            if score > best_score:
+                best_score = score
+                best_coords = coords
+
+        if best_coords:
+            return best_coords
+
     return None
+
+def load_tile_list(filepath):
+    """Load tile coordinates from a tile list file.
+
+    Args:
+        filepath: Path to tile list file
+
+    Returns:
+        set of (x, z) tuples
+    """
+    tiles = set()
+    with open(filepath, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            try:
+                x, z = map(int, line.split(','))
+                tiles.add((x, z))
+            except ValueError:
+                print(f"  Warning: Skipping invalid line: {line}")
+    return tiles
+
 
 def parse_tile_filename(filename):
     """
@@ -271,7 +358,8 @@ def calculate_gap(tile1_bounds, tile2_bounds, edge):
     Args:
         tile1_bounds: Bounds of first tile
         tile2_bounds: Bounds of second tile
-        edge: Which edge to compare ('north', 'south', 'east', 'west')
+        edge: Which edge to compare ('north', 'south', 'east', 'west',
+              'northeast', 'northwest', 'southeast', 'southwest')
 
     Returns:
         Gap in degrees (positive = gap, negative = overlap)
@@ -288,14 +376,41 @@ def calculate_gap(tile1_bounds, tile2_bounds, edge):
     elif edge == 'west':
         # tile2 is west of tile1: tile2.east should match tile1.west
         return tile1_bounds['lon_west'] - tile2_bounds['lon_east']
+    # Diagonal neighbors - check corner alignment
+    elif edge == 'northeast':
+        # tile2 is NE of tile1: tile2's SW corner should match tile1's NE corner
+        lat_gap = tile2_bounds['lat_south'] - tile1_bounds['lat_north']
+        lon_gap = tile2_bounds['lon_west'] - tile1_bounds['lon_east']
+        return max(abs(lat_gap), abs(lon_gap))
+    elif edge == 'northwest':
+        # tile2 is NW of tile1: tile2's SE corner should match tile1's NW corner
+        lat_gap = tile2_bounds['lat_south'] - tile1_bounds['lat_north']
+        lon_gap = tile1_bounds['lon_west'] - tile2_bounds['lon_east']
+        return max(abs(lat_gap), abs(lon_gap))
+    elif edge == 'southeast':
+        # tile2 is SE of tile1: tile2's NW corner should match tile1's SE corner
+        lat_gap = tile1_bounds['lat_south'] - tile2_bounds['lat_north']
+        lon_gap = tile2_bounds['lon_west'] - tile1_bounds['lon_east']
+        return max(abs(lat_gap), abs(lon_gap))
+    elif edge == 'southwest':
+        # tile2 is SW of tile1: tile2's NE corner should match tile1's SW corner
+        lat_gap = tile1_bounds['lat_south'] - tile2_bounds['lat_north']
+        lon_gap = tile1_bounds['lon_west'] - tile2_bounds['lon_east']
+        return max(abs(lat_gap), abs(lon_gap))
 
 def get_neighbors(tile_x, tile_z):
-    """Get coordinates and edge names for all 4 neighbors"""
+    """Get coordinates and edge names for all 8 neighbors (orthogonal + diagonal)"""
     return [
+        # Orthogonal neighbors
         ((tile_x, tile_z + 1), 'north'),
         ((tile_x, tile_z - 1), 'south'),
         ((tile_x + 1, tile_z), 'east'),
-        ((tile_x - 1, tile_z), 'west')
+        ((tile_x - 1, tile_z), 'west'),
+        # Diagonal neighbors
+        ((tile_x + 1, tile_z + 1), 'northeast'),
+        ((tile_x - 1, tile_z + 1), 'northwest'),
+        ((tile_x + 1, tile_z - 1), 'southeast'),
+        ((tile_x - 1, tile_z - 1), 'southwest'),
     ]
 
 def find_home_tile(track_db_path, start_section_idx):
@@ -738,6 +853,330 @@ def cmd_scan(args):
         print(f"\nSaved to: {args.output}")
 
     return 0
+
+def _scan_tile_set_core(tile_set, home_tile, threshold, max_passes, output, tile_dir=TILE_DIR):
+    """
+    Core multi-pass tile scanning for a specific set of tiles.
+
+    Unlike _scan_tile_range_core which scans a rectangular range,
+    this function only processes the tiles in the provided set.
+
+    Args:
+        tile_set (set): Set of (x, z) tile coordinates to scan
+        home_tile (tuple): (x, z) coordinates of trusted home tile
+        threshold (float): Gap threshold in degrees
+        max_passes (int): Maximum correction passes
+        output (str): Output CSV filepath
+        tile_dir (str): Tile directory path
+
+    Returns:
+        tuple: (corrections_dict, statistics_dict)
+            corrections_dict: {(x,z): {'lat_offset', 'lon_offset', 'gap_before_correction', 'notes'}}
+            statistics_dict: {
+                'total_tiles_loaded': int,
+                'tiles_checked': int,
+                'trusted_tiles': int,
+                'corrections_added': int,
+                'remaining_to_correct': int,
+                'still_uncategorized': int,
+                'passes_completed': int
+            }
+    """
+    # Load home tile bounds
+    home_bounds = load_tile_bounds_from_file(home_tile[0], home_tile[1], tile_dir)
+    if home_bounds is None:
+        raise ValueError(f"Could not load home tile {home_tile}")
+
+    print(f"Home tile bounds:")
+    print(f"  East:  {home_bounds['lon_east']:.6f}")
+    print(f"  West:  {home_bounds['lon_west']:.6f}")
+    print(f"  North: {home_bounds['lat_north']:.6f}")
+    print(f"  South: {home_bounds['lat_south']:.6f}")
+    print(f"Marked as TRUSTED (starting point)")
+    print()
+
+    # PASS 1: Load only tiles from the set and categorize them
+    trusted = {home_tile: home_bounds}
+    needs_correction = {}  # Map of tile -> bounds
+    uncategorized = {}  # Map of tile -> bounds for tiles not yet categorized
+
+    print(f"Pass 1: Loading tiles from list...")
+    print("-"*80)
+
+    # KEY DIFFERENCE: Only load tiles in the provided set
+    for tile_coords in tile_set:
+        if tile_coords == home_tile:
+            continue  # Already loaded as trusted
+        tile_bounds = load_tile_bounds_from_file(tile_coords[0], tile_coords[1], tile_dir)
+        if tile_bounds is not None:
+            uncategorized[tile_coords] = tile_bounds
+
+    total_tiles_loaded = len(uncategorized) + 1  # +1 for home tile
+    print(f"Loaded {total_tiles_loaded} tiles from list (including home tile)")
+    print()
+
+    # Iteratively categorize tiles until no more changes
+    categorization_pass = 1
+    while uncategorized:
+        print(f"Categorization pass {categorization_pass}:")
+        newly_trusted = {}
+        newly_needing_correction = {}
+
+        for tile_coords, tile_bounds in uncategorized.items():
+            tile_x, tile_z = tile_coords
+
+            # Check alignment with all 4 neighbors
+            is_aligned = False
+            max_gap = 0.0
+            has_trusted_neighbor = False
+
+            for (nx, nz), edge in get_neighbors(tile_x, tile_z):
+                # Only check against trusted neighbors
+                if (nx, nz) not in trusted:
+                    continue
+
+                has_trusted_neighbor = True
+                neighbor_bounds = trusted[(nx, nz)]
+                gap = calculate_gap(tile_bounds, neighbor_bounds, edge)
+                abs_gap = abs(gap)
+                max_gap = max(max_gap, abs_gap)
+
+                if abs_gap < threshold:
+                    # Aligned with this trusted neighbor
+                    is_aligned = True
+                    break
+
+            if is_aligned:
+                newly_trusted[tile_coords] = tile_bounds
+                print(f"  Tile ({tile_x:3d}, {tile_z:3d}): Aligned - TRUSTED")
+            elif has_trusted_neighbor:
+                # Has trusted neighbors but not aligned
+                newly_needing_correction[tile_coords] = tile_bounds
+                print(f"  Tile ({tile_x:3d}, {tile_z:3d}): GAP {max_gap:.6f}° - NEEDS CORRECTION")
+
+        # Update sets
+        trusted.update(newly_trusted)
+        needs_correction.update(newly_needing_correction)
+
+        # Remove categorized tiles from uncategorized
+        for tile_coords in newly_trusted:
+            del uncategorized[tile_coords]
+        for tile_coords in newly_needing_correction:
+            del uncategorized[tile_coords]
+
+        print(f"  Pass {categorization_pass}: {len(newly_trusted)} trusted, {len(newly_needing_correction)} need correction, {len(uncategorized)} remaining")
+        print()
+
+        # If no tiles were categorized, we're done
+        if not newly_trusted and not newly_needing_correction:
+            if uncategorized:
+                print(f"  {len(uncategorized)} tiles have no trusted neighbors and cannot be categorized")
+            break
+
+        categorization_pass += 1
+
+    tiles_checked = len(trusted) + len(needs_correction)
+
+    print("-"*80)
+    print()
+    print(f"Pass 1 complete:")
+    print(f"  Tiles checked: {tiles_checked}")
+    print(f"  Trusted tiles: {len(trusted)}")
+    print(f"  Tiles needing correction: {len(needs_correction)}")
+    if uncategorized:
+        print(f"  Uncategorized tiles (no trusted neighbors yet): {len(uncategorized)}")
+    print()
+
+    # PASS 2+: Iteratively calculate corrections and re-evaluate uncategorized tiles
+    virtually_trusted = trusted.copy()
+    remaining_to_correct = needs_correction.copy()
+    still_uncategorized = uncategorized.copy()
+    corrections = {}
+    corrections_added = 0
+    pass_num = 2
+
+    while (remaining_to_correct or still_uncategorized) and pass_num <= max_passes + 1:
+        print(f"Pass {pass_num}: Calculating corrections from {len(virtually_trusted)} trusted/corrected tiles...")
+        print("-"*80)
+
+        newly_corrected = {}
+
+        for tile_coords, tile_bounds in remaining_to_correct.items():
+            tile_x, tile_z = tile_coords
+
+            # Collect corrections from each trusted neighbor
+            lat_corrections = []
+            lon_corrections = []
+            contributing_neighbors = []
+
+            # Check all 4 neighbors
+            neighbors = [
+                ((tile_x, tile_z + 1), 'north'),
+                ((tile_x, tile_z - 1), 'south'),
+                ((tile_x + 1, tile_z), 'east'),
+                ((tile_x - 1, tile_z), 'west')
+            ]
+
+            for (nx, nz), edge in neighbors:
+                if (nx, nz) not in virtually_trusted:
+                    continue  # Not a trusted neighbor
+
+                neighbor_bounds = virtually_trusted[(nx, nz)]
+
+                # Calculate what this tile's edge should be to align with this neighbor
+                if edge == 'north':
+                    target_north = neighbor_bounds['lat_south']
+                    current_north = tile_bounds['lat_north']
+                    lat_correction = target_north - current_north
+                    lat_corrections.append(lat_correction)
+                    contributing_neighbors.append(f"({nx},{nz})")
+
+                    neighbor_mid_lon = (neighbor_bounds['lon_east'] + neighbor_bounds['lon_west']) / 2
+                    current_mid_lon = (tile_bounds['lon_east'] + tile_bounds['lon_west']) / 2
+                    lon_correction = neighbor_mid_lon - current_mid_lon
+                    lon_corrections.append(lon_correction)
+
+                elif edge == 'south':
+                    target_south = neighbor_bounds['lat_north']
+                    current_south = tile_bounds['lat_south']
+                    lat_correction = target_south - current_south
+                    lat_corrections.append(lat_correction)
+                    contributing_neighbors.append(f"({nx},{nz})")
+
+                    neighbor_mid_lon = (neighbor_bounds['lon_east'] + neighbor_bounds['lon_west']) / 2
+                    current_mid_lon = (tile_bounds['lon_east'] + tile_bounds['lon_west']) / 2
+                    lon_correction = neighbor_mid_lon - current_mid_lon
+                    lon_corrections.append(lon_correction)
+
+                elif edge == 'east':
+                    target_east = neighbor_bounds['lon_west']
+                    current_east = tile_bounds['lon_east']
+                    lon_correction = target_east - current_east
+                    lon_corrections.append(lon_correction)
+                    contributing_neighbors.append(f"({nx},{nz})")
+
+                    neighbor_mid_lat = (neighbor_bounds['lat_north'] + neighbor_bounds['lat_south']) / 2
+                    current_mid_lat = (tile_bounds['lat_north'] + tile_bounds['lat_south']) / 2
+                    lat_correction = neighbor_mid_lat - current_mid_lat
+                    lat_corrections.append(lat_correction)
+
+                elif edge == 'west':
+                    target_west = neighbor_bounds['lon_east']
+                    current_west = tile_bounds['lon_west']
+                    lon_correction = target_west - current_west
+                    lon_corrections.append(lon_correction)
+                    contributing_neighbors.append(f"({nx},{nz})")
+
+                    neighbor_mid_lat = (neighbor_bounds['lat_north'] + neighbor_bounds['lat_south']) / 2
+                    current_mid_lat = (tile_bounds['lat_north'] + tile_bounds['lat_south']) / 2
+                    lat_correction = neighbor_mid_lat - current_mid_lat
+                    lat_corrections.append(lat_correction)
+
+            # Calculate final corrections (average of all suggestions)
+            if lat_corrections or lon_corrections:
+                final_lat_offset = sum(lat_corrections) / len(lat_corrections) if lat_corrections else 0.0
+                final_lon_offset = sum(lon_corrections) / len(lon_corrections) if lon_corrections else 0.0
+
+                total_gap = (final_lat_offset**2 + final_lon_offset**2)**0.5
+
+                newly_corrected[tile_coords] = {
+                    'lat_offset': final_lat_offset,
+                    'lon_offset': final_lon_offset,
+                    'gap_before_correction': total_gap,
+                    'notes': f"Aligned to {len(contributing_neighbors)} neighbor(s): {', '.join(contributing_neighbors)}"
+                }
+                corrections_added += 1
+                print(f"  Tile ({tile_x:3d}, {tile_z:3d}): lat={final_lat_offset:+.6f}, lon={final_lon_offset:+.6f} (from {len(contributing_neighbors)} neighbors)")
+
+        # If no corrections made this pass, we're done
+        if not newly_corrected:
+            print("  No new corrections found")
+            break
+
+        # Add newly corrected tiles to corrections dict
+        corrections.update(newly_corrected)
+
+        # Apply corrections to bounds and add to virtually_trusted
+        for tile_coords, correction in newly_corrected.items():
+            original_bounds = remaining_to_correct[tile_coords]
+            corrected_bounds = {
+                'lon_east': original_bounds['lon_east'] + correction['lon_offset'],
+                'lon_west': original_bounds['lon_west'] + correction['lon_offset'],
+                'lat_north': original_bounds['lat_north'] + correction['lat_offset'],
+                'lat_south': original_bounds['lat_south'] + correction['lat_offset'],
+                'exists': True
+            }
+            virtually_trusted[tile_coords] = corrected_bounds
+
+        # Remove corrected tiles from remaining_to_correct
+        for tile_coords in newly_corrected.keys():
+            del remaining_to_correct[tile_coords]
+
+        # Re-evaluate uncategorized tiles
+        if still_uncategorized:
+            newly_categorized_trusted = {}
+            newly_categorized_correction = {}
+
+            for tile_coords, tile_bounds in list(still_uncategorized.items()):
+                tile_x, tile_z = tile_coords
+
+                is_aligned = False
+                max_gap = 0.0
+                has_trusted_neighbor = False
+
+                for (nx, nz), edge in get_neighbors(tile_x, tile_z):
+                    if (nx, nz) not in virtually_trusted:
+                        continue
+
+                    has_trusted_neighbor = True
+                    neighbor_bounds = virtually_trusted[(nx, nz)]
+                    gap = calculate_gap(tile_bounds, neighbor_bounds, edge)
+                    abs_gap = abs(gap)
+                    max_gap = max(max_gap, abs_gap)
+
+                    if abs_gap < threshold:
+                        is_aligned = True
+                        break
+
+                if is_aligned:
+                    newly_categorized_trusted[tile_coords] = tile_bounds
+                    virtually_trusted[tile_coords] = tile_bounds
+                elif has_trusted_neighbor:
+                    newly_categorized_correction[tile_coords] = tile_bounds
+                    remaining_to_correct[tile_coords] = tile_bounds
+
+            for tile_coords in newly_categorized_trusted:
+                del still_uncategorized[tile_coords]
+            for tile_coords in newly_categorized_correction:
+                del still_uncategorized[tile_coords]
+
+            if newly_categorized_trusted or newly_categorized_correction:
+                print(f"  Re-categorized {len(newly_categorized_trusted)} as trusted, {len(newly_categorized_correction)} as needing correction")
+
+        print("-"*80)
+        print(f"Pass {pass_num} complete: {len(newly_corrected)} corrections added")
+        print(f"Remaining tiles to correct: {len(remaining_to_correct)}")
+        if still_uncategorized:
+            print(f"Uncategorized: {len(still_uncategorized)}")
+        print()
+
+        pass_num += 1
+
+    # Compile statistics
+    statistics = {
+        'total_tiles_loaded': total_tiles_loaded,
+        'tiles_checked': tiles_checked,
+        'trusted_tiles': len(trusted),
+        'corrections_added': corrections_added,
+        'remaining_to_correct': len(remaining_to_correct),
+        'still_uncategorized': len(still_uncategorized),
+        'uncategorized_tiles': set(still_uncategorized.keys()),  # Include the actual tile coords
+        'passes_completed': pass_num - 2,
+        'max_passes': max_passes
+    }
+
+    return (corrections, statistics)
+
 
 def _scan_tile_range_core(x_min, x_max, z_min, z_max, home_tile,
                           threshold, max_passes, output, tile_dir=TILE_DIR):
@@ -1282,6 +1721,90 @@ def cmd_scan_all(args):
 
     return 0
 
+def cmd_scan_list(args):
+    """Scan tiles from a list file for misalignments"""
+    print("="*80)
+    print("SCANNING TILES FROM LIST")
+    print("="*80)
+    print()
+
+    # Load tile list
+    print(f"Loading tile list from: {args.tile_list}")
+    tile_coords = load_tile_list(args.tile_list)
+    print(f"Loaded {len(tile_coords)} tile coordinates")
+    print()
+
+    if not tile_coords:
+        print("ERROR: No valid tiles in list")
+        return 1
+
+    # Parse home tile
+    if not args.home_tile:
+        print("ERROR: --home-tile is required")
+        return 1
+
+    try:
+        home_x, home_z = map(int, args.home_tile.split(','))
+    except:
+        print(f"ERROR: Invalid --home-tile format. Use: x,z (e.g., -7,42)")
+        return 1
+
+    home_tile = (home_x, home_z)
+
+    if home_tile not in tile_coords:
+        print(f"ERROR: Home tile {home_tile} not in tile list")
+        return 1
+
+    print(f"Home tile: {home_tile}")
+    print(f"Threshold: {args.threshold}°")
+    print()
+
+    # Call core scanning logic with the tile set
+    try:
+        corrections, stats = _scan_tile_set_core(
+            tile_coords, home_tile,
+            args.threshold, args.max_passes, args.output
+        )
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        return 1
+
+    # Print summary
+    print("-"*80)
+    print()
+    print(f"Scan complete:")
+    print(f"  Tiles from list: {len(tile_coords)}")
+    print(f"  Tiles scanned: {stats['total_tiles_loaded']}")
+    print(f"  Trusted tiles: {stats['trusted_tiles']}")
+    print(f"  Corrections added: {stats['corrections_added']}")
+
+    if stats['remaining_to_correct'] > 0:
+        print(f"  WARNING: {stats['remaining_to_correct']} tiles still need correction")
+        print(f"           Consider increasing --max-passes (current: {stats['max_passes']})")
+
+    if stats['still_uncategorized'] > 0:
+        print(f"  WARNING: {stats['still_uncategorized']} tiles remain uncategorized")
+        print(f"           These tiles have no path to home tile through aligned tiles")
+
+        # Write uncategorized tiles to a file for investigation
+        uncategorized_file = args.output.replace('.csv', '_uncategorized.txt')
+        with open(uncategorized_file, 'w') as f:
+            f.write(f"# Uncategorized tiles from scan-list\n")
+            f.write(f"# Home tile: {home_tile}\n")
+            f.write(f"# These tiles have no path to home tile through aligned/corrected tiles\n")
+            f.write(f"# Total: {stats['still_uncategorized']} tiles\n")
+            f.write(f"#\n")
+            for tile_x, tile_z in sorted(stats['uncategorized_tiles']):
+                f.write(f"{tile_x},{tile_z}\n")
+        print(f"           Uncategorized tiles written to: {uncategorized_file}")
+
+    if stats['corrections_added'] > 0:
+        save_corrections_csv(corrections, args.output)
+        print(f"\nSaved to: {args.output}")
+
+    return 0
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -1346,6 +1869,19 @@ def main():
     scan_all_parser.add_argument('--tile-dir', default=TILE_DIR,
         help=f'Tile directory path (default: {TILE_DIR})')
 
+    # Scan-list command
+    scan_list_parser = subparsers.add_parser('scan-list',
+        help='Scan tiles from a list file for misalignments')
+    scan_list_parser.add_argument('tile_list', help='Path to tile list file')
+    scan_list_parser.add_argument('--home-tile', required=True,
+        help='Home tile coordinates (format: x,z). REQUIRED.')
+    scan_list_parser.add_argument('--threshold', type=float, default=DEFAULT_THRESHOLD,
+        help=f'Gap threshold in degrees (default: {DEFAULT_THRESHOLD})')
+    scan_list_parser.add_argument('--max-passes', type=int, default=20,
+        help='Maximum number of correction passes (default: 20)')
+    scan_list_parser.add_argument('--output', default=DEFAULT_CSV,
+        help=f'Output CSV file (default: {DEFAULT_CSV})')
+
     args = parser.parse_args()
 
     if args.command == 'inspect':
@@ -1358,6 +1894,8 @@ def main():
         return cmd_scan_range(args)
     elif args.command == 'scan-all':
         return cmd_scan_all(args)
+    elif args.command == 'scan-list':
+        return cmd_scan_list(args)
     else:
         parser.print_help()
         return 1
