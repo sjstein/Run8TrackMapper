@@ -24,6 +24,7 @@ def generate_color_config(colors: ColorConfig) -> str:
 window.COLORS = {{
     track: '{colors.track}',
     trackSelected: '{colors.track_selected}',
+    trackHover: '{colors.track_hover}',
     switch: '{colors.switch}',
     industryTrack: '{colors.industry_track}',
     signalAbsolute: '{colors.signal_absolute}',
@@ -63,9 +64,9 @@ def generate_javascript() -> str:
 
         // Layer groups for overlays
         overlayStates: {
-            signals: true,
-            industries: true,
-            aiLocations: true,
+            signals: false,
+            industries: false,
+            aiLocations: false,
             tileBoundaries: false
         },
 
@@ -123,13 +124,13 @@ def generate_javascript() -> str:
         // Create base tile layers directly (Folium's show=False layers may not be on map)
         MapApp.baseLayers['OpenStreetMap'] = L.tileLayer(
             'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-            {attribution: 'OpenStreetMap'}
+            {attribution: 'OpenStreetMap', maxZoom: 22, maxNativeZoom: 19}
         );
         MapApp.baseLayers['Satellite'] = L.tileLayer(
             'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             {attribution: 'Esri', maxZoom: 22, maxNativeZoom: 19}
         );
-        MapApp.baseLayers['None'] = L.tileLayer('', {attribution: 'None'});
+        MapApp.baseLayers['None'] = L.tileLayer('', {attribution: 'None', maxZoom: 22});
 
         // Remove any existing base tile layers that Folium added
         MapApp.map.eachLayer(layer => {
@@ -309,9 +310,9 @@ def generate_javascript() -> str:
         // Build overlay checkboxes
         const overlayList = document.getElementById('overlay-list');
         const overlays = [
-            {id: 'signals', label: 'Signals'},
+            {id: 'aiLocations', label: 'AI Spawns'},
             {id: 'industries', label: 'Industries'},
-            {id: 'aiLocations', label: 'AI Locations'},
+            {id: 'signals', label: 'Signals'},
             {id: 'tileBoundaries', label: 'Tile Boundaries'}
         ];
         for (const overlay of overlays) {
@@ -578,6 +579,25 @@ def generate_javascript() -> str:
 
                     polyline.bindPopup(sectionPopup, {maxWidth: 250});
                     polyline.bindTooltip(`Section ${section.id}`, {sticky: true});
+
+                    // Hover highlight handlers
+                    polyline.on('mouseover', function() {
+                        // Don't change if section is selected
+                        if (!MapApp.selectedSections.has(section.id)) {
+                            this.setStyle({ color: COLORS.trackHover });
+                        }
+                    });
+                    polyline.on('mouseout', function() {
+                        // Restore original color if not selected
+                        if (!MapApp.selectedSections.has(section.id)) {
+                            // Determine correct color based on overlay state
+                            let restoreColor = trackColor;
+                            if (MapApp.overlayStates.industries && MapApp.industrySectionIds.has(`${regionId}_${section.id}`)) {
+                                restoreColor = COLORS.industryTrack;
+                            }
+                            this.setStyle({ color: restoreColor });
+                        }
+                    });
 
                     // Click handler for selection and industry popups
                     polyline.on('click', (e) => {
@@ -1114,9 +1134,634 @@ def generate_javascript() -> str:
 '''
 
 
-def generate_html(config: VisualizationConfig, output_path: Path) -> None:
-    """Generate index.html with Folium map and JavaScript"""
+def generate_tile_based_html(config: VisualizationConfig) -> str:
+    """Generate HTML for tile-based coordinate mode using L.CRS.Simple"""
+    colors = config.colors
 
+    return f'''<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{config.name} - Tile-Based View</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        html, body {{ height: 100%; width: 100%; }}
+        #map {{ height: 100%; width: 100%; background-color: #333; }}
+        .control-panel {{
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+            max-width: 280px;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
+            font-family: Arial, sans-serif;
+            font-size: 13px;
+        }}
+        .control-panel h3 {{ margin-bottom: 10px; font-size: 14px; }}
+        .control-panel label {{ display: block; margin: 5px 0; cursor: pointer; }}
+        .control-panel input[type="checkbox"] {{ margin-right: 8px; }}
+        .region-list {{ margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #ddd; }}
+        .overlay-toggles {{ margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #ddd; }}
+        #mouse-position {{
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            z-index: 1000;
+            background: rgba(255,255,255,0.9);
+            padding: 5px 10px;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 12px;
+        }}
+        .search-btn {{
+            position: absolute;
+            top: 10px;
+            left: 50px;
+            z-index: 1000;
+            background: white;
+            border: 2px solid rgba(0,0,0,0.2);
+            border-radius: 4px;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-size: 16px;
+        }}
+        .search-btn:hover {{ background: #f4f4f4; }}
+        .search-dialog {{
+            display: none;
+            position: absolute;
+            top: 50px;
+            left: 50px;
+            z-index: 1001;
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+        }}
+        .search-dialog input {{
+            width: 200px;
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+        }}
+        .search-dialog button {{
+            padding: 8px 15px;
+            background: #007bff;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            margin-right: 5px;
+        }}
+        .search-dialog button:hover {{ background: #0056b3; }}
+        .search-dialog .close-btn {{ background: #6c757d; }}
+        .leaflet-popup-content {{ font-size: 12px; }}
+        .selection-info {{
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #ddd;
+        }}
+        .scale-control {{
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(255,255,255,0.9);
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 11px;
+        }}
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <button class="search-btn" onclick="toggleSearch()">&#128269;</button>
+    <div class="search-dialog" id="search-dialog">
+        <input type="text" id="search-input" placeholder="Section, Signal, Industry..." onkeypress="if(event.key==='Enter')doSearch()">
+        <button onclick="doSearch()">Search</button>
+        <button class="close-btn" onclick="toggleSearch()">Close</button>
+    </div>
+
+    <div class="control-panel">
+        <h3>Regions</h3>
+        <div class="region-list" id="region-list"></div>
+
+        <h3>Overlays</h3>
+        <div class="overlay-toggles">
+            <label><input type="checkbox" id="toggle-signals"> Signals</label>
+            <label><input type="checkbox" id="toggle-industries"> Industries</label>
+            <label><input type="checkbox" id="toggle-ai"> AI Locations</label>
+            <label><input type="checkbox" id="toggle-tiles"> Tile Boundaries</label>
+        </div>
+
+        <div class="selection-info" id="selection-info" style="display:none;">
+            <strong>Selection</strong>
+            <div id="selection-count">0 sections</div>
+            <div id="selection-length">0 m</div>
+            <button onclick="clearSelection()" style="margin-top:5px;padding:3px 8px;">Clear</button>
+        </div>
+    </div>
+
+    <div id="mouse-position">X: 0.0m, Y: 0.0m</div>
+    <div class="scale-control" id="scale-control">Scale: calculating...</div>
+
+<script>
+window.COLORS = {{
+    track: '{colors.track}',
+    trackSelected: '{colors.track_selected}',
+    trackHover: '{colors.track_hover}',
+    switch: '{colors.switch}',
+    industryTrack: '{colors.industry_track}',
+    signalAbsolute: '{colors.signal_absolute}',
+    signalIntermediate: '{colors.signal_intermediate}',
+    signalBorderSingle: '{colors.signal_border_single}',
+    signalBorderStacked: '{colors.signal_border_stacked}'
+}};
+
+(function() {{
+    'use strict';
+
+    const COLORS = window.COLORS;
+
+    const MapApp = {{
+        map: null,
+        manifest: null,
+        loadedRegions: new Map(),
+        sectionIndex: new Map(),
+        signalIndex: new Map(),
+        industryIndex: [],
+        aiLocationIndex: [],
+        industrySectionIds: new Set(),
+        selectedSections: new Map(),
+        overlayStates: {{ signals: false, industries: false, aiLocations: false, tileBoundaries: false }},
+        signalLayers: [],
+        industryLayers: [],
+        aiLayers: [],
+        tileLayers: []
+    }};
+
+    // Initialize map with L.CRS.Simple for tile-based coordinates
+    function init() {{
+        MapApp.map = L.map('map', {{
+            crs: L.CRS.Simple,
+            minZoom: -10,
+            maxZoom: 5,
+            zoomSnap: 0.25,
+            zoomDelta: 0.5
+        }});
+
+        // Set initial view (will be adjusted after loading data)
+        MapApp.map.setView([0, 0], 0);
+
+        // Mouse position display
+        MapApp.map.on('mousemove', (e) => {{
+            const x = e.latlng.lng.toFixed(1);
+            const y = e.latlng.lat.toFixed(1);
+            document.getElementById('mouse-position').textContent = `X: ${{x}}m, Y: ${{y}}m`;
+        }});
+
+        // Update scale on zoom
+        MapApp.map.on('zoomend', updateScale);
+
+        loadManifest();
+    }}
+
+    function updateScale() {{
+        // In L.CRS.Simple, 1 unit = 1 pixel at zoom 0
+        // At zoom level z, 1 unit = 2^z pixels
+        const zoom = MapApp.map.getZoom();
+        const pixelsPerMeter = Math.pow(2, zoom);
+        const metersPerPixel = 1 / pixelsPerMeter;
+
+        // Calculate a nice scale bar length
+        const containerWidth = MapApp.map.getContainer().offsetWidth;
+        const targetBarPixels = 100;  // Aim for ~100px bar
+        const targetMeters = targetBarPixels * metersPerPixel;
+
+        // Round to nice numbers
+        let scaleMeters;
+        if (targetMeters >= 1000) scaleMeters = Math.round(targetMeters / 1000) * 1000;
+        else if (targetMeters >= 100) scaleMeters = Math.round(targetMeters / 100) * 100;
+        else if (targetMeters >= 10) scaleMeters = Math.round(targetMeters / 10) * 10;
+        else scaleMeters = Math.round(targetMeters);
+
+        if (scaleMeters < 1) scaleMeters = 1;
+
+        const label = scaleMeters >= 1000 ? `${{scaleMeters/1000}} km` : `${{scaleMeters}} m`;
+        document.getElementById('scale-control').textContent = `Scale: ${{label}}`;
+    }}
+
+    async function loadManifest() {{
+        try {{
+            const response = await fetch('manifest.json');
+            MapApp.manifest = await response.json();
+            setupRegionControls();
+
+            // Load enabled regions
+            for (const region of MapApp.manifest.regions) {{
+                if (region.enabled_by_default) {{
+                    await loadRegion(region.id);
+                }}
+            }}
+
+            fitBoundsToData();
+            updateScale();
+        }} catch (error) {{
+            console.error('Failed to load manifest:', error);
+        }}
+    }}
+
+    function setupRegionControls() {{
+        const list = document.getElementById('region-list');
+        list.innerHTML = '';
+
+        for (const region of MapApp.manifest.regions) {{
+            const label = document.createElement('label');
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = region.enabled_by_default;
+            checkbox.onchange = () => toggleRegion(region.id, checkbox.checked);
+            label.appendChild(checkbox);
+            label.appendChild(document.createTextNode(region.display_name));
+            list.appendChild(label);
+        }}
+
+        // Overlay toggles
+        document.getElementById('toggle-signals').onchange = (e) => toggleOverlay('signals', e.target.checked);
+        document.getElementById('toggle-industries').onchange = (e) => toggleOverlay('industries', e.target.checked);
+        document.getElementById('toggle-ai').onchange = (e) => toggleOverlay('aiLocations', e.target.checked);
+        document.getElementById('toggle-tiles').onchange = (e) => toggleOverlay('tileBoundaries', e.target.checked);
+    }}
+
+    async function loadRegion(regionId) {{
+        if (MapApp.loadedRegions.has(regionId)) return;
+
+        try {{
+            const response = await fetch(`data/${{regionId}}.json`);
+            const data = await response.json();
+
+            const layers = {{
+                tracks: L.layerGroup().addTo(MapApp.map),
+                signals: L.layerGroup(),
+                industries: L.layerGroup(),
+                aiLocations: L.layerGroup(),
+                tiles: L.layerGroup()
+            }};
+
+            // Build industry section set
+            for (const ind of data.industries) {{
+                for (const secId of ind.track_sections) {{
+                    MapApp.industrySectionIds.add(`${{regionId}}_${{secId}}`);
+                }}
+            }}
+
+            // Render tracks
+            for (const section of data.sections) {{
+                const isIndustry = MapApp.industrySectionIds.has(`${{regionId}}_${{section.id}}`);
+                const color = section.is_switch ? COLORS.switch :
+                              (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : COLORS.track;
+
+                for (const path of section.paths) {{
+                    // In tile-based mode, coordinates are [x, y] (stored as [lat, lon] in data)
+                    // Leaflet expects [lat, lng] = [y, x], so we need to swap
+                    const coords = path.map(p => [p[1], p[0]]);  // Swap to [y, x]
+
+                    const polyline = L.polyline(coords, {{
+                        color: color,
+                        weight: 5,
+                        opacity: 0.8
+                    }}).addTo(layers.tracks);
+
+                    polyline.on('click', (e) => handleTrackClick(e, section, regionId, polyline));
+                    polyline.on('mouseover', () => polyline.setStyle({{ color: COLORS.trackHover }}));
+                    polyline.on('mouseout', () => {{
+                        if (!MapApp.selectedSections.has(section.id)) {{
+                            const c = section.is_switch ? COLORS.switch :
+                                      (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : COLORS.track;
+                            polyline.setStyle({{ color: c }});
+                        }}
+                    }});
+
+                    polyline.bindTooltip(`Section ${{section.id}}<br>${{section.length_m.toFixed(1)}}m`, {{ sticky: true }});
+
+                    MapApp.sectionIndex.set(section.id, {{ regionId, polyline, metadata: section, isIndustry }});
+                }}
+            }}
+
+            // Render signals
+            for (const signal of data.signals) {{
+                const marker = createSignalMarker(signal);
+                marker.addTo(layers.signals);
+                MapApp.signalLayers.push(marker);
+                MapApp.signalIndex.set(signal.id, {{ regionId, marker, metadata: signal }});
+            }}
+
+            // Render industries
+            for (const ind of data.industries) {{
+                const marker = L.circleMarker([ind.lon, ind.lat], {{  // [y, x]
+                    radius: 8,
+                    fillColor: '#00aa00',
+                    color: '#006600',
+                    weight: 2,
+                    fillOpacity: 0.8
+                }}).addTo(layers.industries);
+                marker.bindTooltip(`${{ind.tag}}<br>${{ind.name}}`, {{ sticky: true }});
+                MapApp.industryLayers.push(marker);
+                MapApp.industryIndex.push({{ regionId, data: ind }});
+            }}
+
+            // Render AI locations
+            for (const loc of data.ai_locations) {{
+                const marker = L.circleMarker([loc.lon, loc.lat], {{  // [y, x]
+                    radius: 6,
+                    fillColor: '#ff6600',
+                    color: '#cc4400',
+                    weight: 2,
+                    fillOpacity: 0.8
+                }}).addTo(layers.aiLocations);
+                marker.bindTooltip(`${{loc.name}}<br>${{loc.type_name}}`, {{ sticky: true }});
+                MapApp.aiLayers.push(marker);
+                MapApp.aiLocationIndex.push({{ regionId, data: loc }});
+            }}
+
+            // Render tile boundaries
+            for (const tile of data.tiles) {{
+                // In tile-based mode, tile bounds are in world coordinates
+                // lat_south/north are y_min/y_max, lon_west/east are x_min/x_max
+                const bounds = [[tile.lat_south, tile.lon_west], [tile.lat_north, tile.lon_east]];
+                const rect = L.rectangle(bounds, {{
+                    color: tile.is_corrected ? 'red' : 'black',
+                    fill: false,
+                    weight: 1,
+                    opacity: 0.5
+                }}).addTo(layers.tiles);
+                rect.bindTooltip(`Tile ${{tile.x}}, ${{tile.z}}`, {{ sticky: true }});
+                MapApp.tileLayers.push(rect);
+            }}
+
+            MapApp.loadedRegions.set(regionId, {{ data, layers, visible: true }});
+
+            // Apply overlay states
+            if (MapApp.overlayStates.signals) layers.signals.addTo(MapApp.map);
+            if (MapApp.overlayStates.industries) layers.industries.addTo(MapApp.map);
+            if (MapApp.overlayStates.aiLocations) layers.aiLocations.addTo(MapApp.map);
+            if (MapApp.overlayStates.tileBoundaries) layers.tiles.addTo(MapApp.map);
+
+        }} catch (error) {{
+            console.error(`Failed to load region ${{regionId}}:`, error);
+        }}
+    }}
+
+    function createSignalMarker(signal) {{
+        // Signal as directional triangle
+        const size = 12;
+        const rotation = signal.rotation * Math.PI / 180;
+        const cos = Math.cos(rotation);
+        const sin = Math.sin(rotation);
+
+        // Triangle pointing in direction of rotation
+        const points = [
+            [0, -size],        // Tip
+            [-size/2, size/2], // Left base
+            [size/2, size/2]   // Right base
+        ].map(([x, y]) => [
+            x * cos - y * sin,
+            x * sin + y * cos
+        ]);
+
+        const lat = signal.lon;  // y coordinate
+        const lng = signal.lat;  // x coordinate
+
+        const fillColor = signal.type === 'absolute' ? COLORS.signalAbsolute : COLORS.signalIntermediate;
+        const borderColor = signal.is_dwarf || signal.model_name.includes('_2') ?
+                           COLORS.signalBorderStacked : COLORS.signalBorderSingle;
+
+        const svgIcon = L.divIcon({{
+            className: 'signal-icon',
+            html: `<svg width="${{size*2}}" height="${{size*2}}" style="overflow:visible;">
+                     <polygon points="${{points.map(p => `${{p[0]+size}},${{p[1]+size}}`).join(' ')}}"
+                              fill="${{fillColor}}" stroke="${{borderColor}}" stroke-width="2"/>
+                   </svg>`,
+            iconSize: [size*2, size*2],
+            iconAnchor: [size, size]
+        }});
+
+        const marker = L.marker([lat, lng], {{ icon: svgIcon }});
+        marker.bindTooltip(`Signal ${{signal.id}}<br>${{signal.type}}`, {{ sticky: true }});
+        return marker;
+    }}
+
+    function handleTrackClick(e, section, regionId, polyline) {{
+        if (e.originalEvent.ctrlKey) {{
+            // Toggle selection
+            if (MapApp.selectedSections.has(section.id)) {{
+                MapApp.selectedSections.delete(section.id);
+                polyline.setStyle({{ color: section.is_switch ? COLORS.switch : COLORS.track }});
+            }} else {{
+                MapApp.selectedSections.set(section.id, {{ polyline, metadata: section }});
+                polyline.setStyle({{ color: COLORS.trackSelected }});
+            }}
+            updateSelectionInfo();
+        }} else {{
+            // Show popup
+            const content = `<b>Section ${{section.id}}</b><br>
+                            Length: ${{section.length_m.toFixed(1)}}m (${{section.length_ft.toFixed(1)}}ft)<br>
+                            ${{section.is_switch ? 'Switch/Turnout' : 'Track Section'}}`;
+            L.popup().setLatLng(e.latlng).setContent(content).openOn(MapApp.map);
+        }}
+    }}
+
+    function updateSelectionInfo() {{
+        const count = MapApp.selectedSections.size;
+        const info = document.getElementById('selection-info');
+
+        if (count === 0) {{
+            info.style.display = 'none';
+            return;
+        }}
+
+        info.style.display = 'block';
+        document.getElementById('selection-count').textContent = `${{count}} section${{count > 1 ? 's' : ''}}`;
+
+        let totalLength = 0;
+        MapApp.selectedSections.forEach(s => totalLength += s.metadata.length_m);
+        document.getElementById('selection-length').textContent = `${{totalLength.toFixed(1)}} m`;
+    }}
+
+    window.clearSelection = function() {{
+        MapApp.selectedSections.forEach((s) => {{
+            s.polyline.setStyle({{ color: s.metadata.is_switch ? COLORS.switch : COLORS.track }});
+        }});
+        MapApp.selectedSections.clear();
+        updateSelectionInfo();
+    }};
+
+    function toggleRegion(regionId, enabled) {{
+        if (enabled) {{
+            if (!MapApp.loadedRegions.has(regionId)) {{
+                loadRegion(regionId);
+            }} else {{
+                const region = MapApp.loadedRegions.get(regionId);
+                region.layers.tracks.addTo(MapApp.map);
+                if (MapApp.overlayStates.signals) region.layers.signals.addTo(MapApp.map);
+                if (MapApp.overlayStates.industries) region.layers.industries.addTo(MapApp.map);
+                if (MapApp.overlayStates.aiLocations) region.layers.aiLocations.addTo(MapApp.map);
+                if (MapApp.overlayStates.tileBoundaries) region.layers.tiles.addTo(MapApp.map);
+                region.visible = true;
+            }}
+        }} else {{
+            const region = MapApp.loadedRegions.get(regionId);
+            if (region) {{
+                MapApp.map.removeLayer(region.layers.tracks);
+                MapApp.map.removeLayer(region.layers.signals);
+                MapApp.map.removeLayer(region.layers.industries);
+                MapApp.map.removeLayer(region.layers.aiLocations);
+                MapApp.map.removeLayer(region.layers.tiles);
+                region.visible = false;
+            }}
+        }}
+    }}
+
+    function toggleOverlay(overlay, enabled) {{
+        MapApp.overlayStates[overlay] = enabled;
+
+        MapApp.loadedRegions.forEach((region) => {{
+            if (!region.visible) return;
+
+            const layerMap = {{
+                signals: region.layers.signals,
+                industries: region.layers.industries,
+                aiLocations: region.layers.aiLocations,
+                tileBoundaries: region.layers.tiles
+            }};
+
+            const layer = layerMap[overlay];
+            if (enabled) layer.addTo(MapApp.map);
+            else MapApp.map.removeLayer(layer);
+        }});
+
+        // Update track colors for industry overlay
+        if (overlay === 'industries') {{
+            MapApp.sectionIndex.forEach((s) => {{
+                if (s.isIndustry) {{
+                    s.polyline.setStyle({{
+                        color: enabled ? COLORS.industryTrack :
+                               (s.metadata.is_switch ? COLORS.switch : COLORS.track)
+                    }});
+                }}
+            }});
+        }}
+    }}
+
+    function fitBoundsToData() {{
+        const bounds = [];
+        MapApp.loadedRegions.forEach((region) => {{
+            region.data.sections.forEach((section) => {{
+                section.paths.forEach((path) => {{
+                    path.forEach((p) => bounds.push([p[1], p[0]]));  // [y, x]
+                }});
+            }});
+        }});
+
+        if (bounds.length > 0) {{
+            MapApp.map.fitBounds(bounds);
+        }}
+    }}
+
+    // Search functionality
+    window.toggleSearch = function() {{
+        const dialog = document.getElementById('search-dialog');
+        dialog.style.display = dialog.style.display === 'none' ? 'block' : 'none';
+        if (dialog.style.display === 'block') {{
+            document.getElementById('search-input').focus();
+        }}
+    }};
+
+    window.doSearch = function() {{
+        const query = document.getElementById('search-input').value.trim().toLowerCase();
+        if (!query) return;
+
+        // Search sections
+        const sectionNum = parseInt(query);
+        if (!isNaN(sectionNum) && MapApp.sectionIndex.has(sectionNum)) {{
+            const s = MapApp.sectionIndex.get(sectionNum);
+            MapApp.map.setView(s.polyline.getCenter(), 2);
+            s.polyline.openTooltip();
+            toggleSearch();
+            return;
+        }}
+
+        // Search signals
+        if (!isNaN(sectionNum)) {{
+            for (const [id, s] of MapApp.signalIndex) {{
+                if (id === sectionNum) {{
+                    MapApp.map.setView(s.marker.getLatLng(), 2);
+                    s.marker.openTooltip();
+                    toggleSearch();
+                    return;
+                }}
+            }}
+        }}
+
+        // Search industries
+        for (const ind of MapApp.industryIndex) {{
+            if (ind.data.tag.toLowerCase().includes(query) ||
+                ind.data.name.toLowerCase().includes(query)) {{
+                MapApp.map.setView([ind.data.lon, ind.data.lat], 2);
+                toggleSearch();
+                return;
+            }}
+        }}
+
+        // Search AI locations
+        for (const loc of MapApp.aiLocationIndex) {{
+            if (loc.data.name.toLowerCase().includes(query)) {{
+                MapApp.map.setView([loc.data.lon, loc.data.lat], 2);
+                toggleSearch();
+                return;
+            }}
+        }}
+
+        alert('Not found: ' + query);
+    }};
+
+    // Initialize
+    init();
+}})();
+</script>
+</body>
+</html>
+'''
+
+
+def generate_html(config: VisualizationConfig, output_path: Path, tile_based: bool = False) -> None:
+    """Generate index.html with Folium map and JavaScript
+
+    Args:
+        config: Visualization configuration
+        output_path: Path to write HTML file
+        tile_based: If True, generate for tile-based coordinates (L.CRS.Simple)
+    """
+    if tile_based:
+        # For tile-based mode, we generate a custom HTML without Folium
+        # since Folium doesn't easily support L.CRS.Simple
+        html_content = generate_tile_based_html(config)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        print(f"Generated HTML (tile-based): {output_path}")
+        return
+
+    # Geographic mode - use Folium as before
     # Calculate initial center from first region bounds in manifest
     # For now, use default center
     center = DEFAULT_CENTER
@@ -1127,6 +1772,7 @@ def generate_html(config: VisualizationConfig, output_path: Path) -> None:
     m = folium.Map(
         location=center,
         zoom_start=zoom,
+        max_zoom=22,
         prefer_canvas=True,
         control_scale=False,  # We add our own scale control
         tiles=None  # No default tiles - we create them in JavaScript

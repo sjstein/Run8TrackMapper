@@ -99,7 +99,8 @@ def region_to_dict(region: RegionData) -> dict:
 
 def generate_manifest(config: VisualizationConfig,
                       regions_data: List[RegionData],
-                      tile_corrections: Dict[Tuple[int, int], Dict[str, float]]) -> dict:
+                      tile_corrections: Dict[Tuple[int, int], Dict[str, float]],
+                      tile_based: bool = False) -> dict:
     """Generate manifest.json content"""
     regions_manifest = []
 
@@ -116,8 +117,8 @@ def generate_manifest(config: VisualizationConfig,
         # Add bounds if available
         if region.bounds:
             region_entry["bounds"] = [
-                [region.bounds[0][0], region.bounds[0][1]],  # [min_lat, min_lon]
-                [region.bounds[1][0], region.bounds[1][1]]   # [max_lat, max_lon]
+                [region.bounds[0][0], region.bounds[0][1]],  # [min_lat/y, min_lon/x]
+                [region.bounds[1][0], region.bounds[1][1]]   # [max_lat/y, max_lon/x]
             ]
 
         regions_manifest.append(region_entry)
@@ -133,11 +134,22 @@ def generate_manifest(config: VisualizationConfig,
         for k, v in tile_corrections.items()
     ]
 
-    return {
+    manifest = {
         "name": config.name,
         "regions": regions_manifest,
-        "tile_corrections": tile_corrections_list
+        "tile_corrections": tile_corrections_list,
+        "coordinate_system": "tile_local" if tile_based else "geographic"
     }
+
+    # Add tile parameters if using tile-based coordinates
+    if tile_based and config.tile_based:
+        manifest["tile_params"] = {
+            "home_tile": list(config.tile_based.home_tile),
+            "tile_width": config.tile_based.tile_width,
+            "tile_height": config.tile_based.tile_height
+        }
+
+    return manifest
 
 
 def generate_tile_report(config: VisualizationConfig, output_path: str) -> None:
@@ -179,8 +191,16 @@ def generate_tile_report(config: VisualizationConfig, output_path: str) -> None:
     print(f"Tile report saved to: {output_path}")
 
 
-def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_html: bool = True) -> None:
-    """Generate all output files (manifest.json, per-region JSON files, and index.html)"""
+def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_html: bool = True,
+                    tile_based: bool = False) -> None:
+    """Generate all output files (manifest.json, per-region JSON files, and index.html)
+
+    Args:
+        config: Visualization configuration
+        tile_dir: Override tile directory
+        generate_html: Whether to generate index.html
+        tile_based: Use tile-based coordinates instead of lat/lon
+    """
     output_dir = config.output_dir
     data_dir = output_dir / "data"
 
@@ -191,19 +211,36 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
     print(f"\nOutput directory: {output_dir}")
     print(f"Data directory: {data_dir}")
 
-    # Load tile corrections
-    print(f"\nLoading tile corrections from: {config.tile_corrections}")
-    tile_corrections = load_tile_corrections(str(config.tile_corrections))
+    # Determine tile_based_config
+    tile_based_config = None
+    if tile_based:
+        if config.tile_based:
+            tile_based_config = config.tile_based
+            print(f"\nUsing tile-based coordinates:")
+            print(f"  Home tile: {tile_based_config.home_tile}")
+            print(f"  Tile size: {tile_based_config.tile_width}m x {tile_based_config.tile_height}m")
+        else:
+            print("\nWarning: --tile-based flag specified but no [tile_based_plot] section in config")
+            print("Using default tile parameters")
+            from config_parser import TileBasedConfig
+            tile_based_config = TileBasedConfig()
+
+    # Load tile corrections (still needed for geographic mode)
+    tile_corrections = {}
+    if not tile_based:
+        print(f"\nLoading tile corrections from: {config.tile_corrections}")
+        tile_corrections = load_tile_corrections(str(config.tile_corrections))
 
     # Extract all regions
     regions_data = []
     for region_config in config.regions:
-        kwargs = {"tile_dir": tile_dir} if tile_dir else {}
+        # tile_dir parameter overrides per-region config if specified
         region_data = extract_region(
             region_config,
             config.industry_db,
             tile_corrections,
-            **kwargs
+            tile_dir=tile_dir,  # None lets each region use its configured terrain_tile_dir
+            tile_based_config=tile_based_config
         )
         regions_data.append(region_data)
 
@@ -226,7 +263,7 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
     manifest_file = output_dir / "manifest.json"
     print(f"\nWriting manifest: {manifest_file}")
 
-    manifest = generate_manifest(config, regions_data, tile_corrections)
+    manifest = generate_manifest(config, regions_data, tile_corrections, tile_based)
     with open(manifest_file, 'w', encoding='utf-8') as f:
         json.dump(manifest, f, indent=2)
 
@@ -235,7 +272,7 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
         from html_generator import generate_html as gen_html
         html_file = output_dir / "index.html"
         print(f"\nGenerating HTML: {html_file}")
-        gen_html(config, html_file)
+        gen_html(config, html_file, tile_based=tile_based)
 
     print(f"\nOutput generation complete!")
     print(f"  Manifest: {manifest_file}")
@@ -270,6 +307,12 @@ if __name__ == '__main__':
         metavar='FILE',
         help='Generate tile list report to FILE (skip normal output generation)'
     )
+    parser.add_argument(
+        '--tile-based',
+        action='store_true',
+        dest='tile_based',
+        help='Generate plot using tile-based coordinates instead of lat/lon'
+    )
 
     args = parser.parse_args()
 
@@ -278,4 +321,4 @@ if __name__ == '__main__':
     if args.tile_report:
         generate_tile_report(config, args.tile_report)
     else:
-        generate_output(config)
+        generate_output(config, tile_based=args.tile_based)

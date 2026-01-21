@@ -395,7 +395,8 @@ def point_match(p1, p2, tolerance=0.5):
     """Check if two points match within tolerance"""
     return math.sqrt((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2) < tolerance
 
-def interpolate_curve(start_pos, end_pos, radius, arc_length, curve_sign, num_segments=10):
+def interpolate_curve(start_pos, end_pos, radius, arc_length, curve_sign, num_segments=10,
+                      curve_degrees=None):
     """Interpolate points along a curved track segment"""
     x1, y1, z1 = start_pos
     x2, y2, z2 = end_pos
@@ -413,20 +414,66 @@ def interpolate_curve(start_pos, end_pos, radius, arc_length, curve_sign, num_se
     if chord_len < 0.1:
         return [(x1, z1), (x2, z2)]
 
-    # Calculate center of circular arc
-    h_squared = radius*radius - (chord_len/2.0)**2
-    if h_squared < 0:
-        return [(x1, z1), (x2, z2)]
+    # Midpoint of chord
+    mid_x = (x1 + x2) / 2.0
+    mid_z = (z1 + z2) / 2.0
 
-    h = math.sqrt(h_squared)
+    # For semicircles (curve_degrees ≈ 180), the standard formula h² = r² - (chord/2)²
+    # gives h ≈ 0, which places the center on the chord and breaks the arc generation.
+    # Use a parametric approach instead for semicircles.
+    is_semicircle = curve_degrees is not None and abs(abs(curve_degrees) - 180) < 5.0
 
+    if is_semicircle:
+        # For a semicircle, the center is at the midpoint of the chord.
+        # Generate points parametrically by sweeping 180 degrees around the center.
+        # The perpendicular direction determines which side the arc bulges toward.
+
+        # Unit vector along chord (from start to end)
+        chord_unit_x = dx / chord_len
+        chord_unit_z = dz / chord_len
+
+        # Perpendicular unit vector (rotated 90 degrees CCW)
+        perp_x = -chord_unit_z
+        perp_z = chord_unit_x
+
+        # The center is at the midpoint
+        center_x = mid_x
+        center_z = mid_z
+
+        # Generate points by sweeping from start angle to end angle (180 degrees)
+        # curve_sign determines which direction the arc bulges
+        points = [(x1, z1)]
+
+        for i in range(1, num_segments):
+            t = i / num_segments
+            # Angle from 0 to pi (180 degrees)
+            theta = t * math.pi
+
+            # Parametric semicircle: start at one end, sweep to the other
+            # Position along chord: goes from -radius to +radius (relative to center)
+            chord_offset = -math.cos(theta) * radius  # -r at t=0, +r at t=1
+            # Perpendicular offset: bulges out by sin(theta) * radius
+            # Negate curve_sign to match the coordinate system convention
+            perp_offset = math.sin(theta) * radius * (-curve_sign)
+
+            x = center_x + chord_offset * chord_unit_x + perp_offset * perp_x
+            z = center_z + chord_offset * chord_unit_z + perp_offset * perp_z
+
+            points.append((x, z))
+
+        points.append((x2, z2))
+        return points
+
+    # Standard arc calculation for non-semicircle curves
     # Perpendicular to chord (rotated 90 degrees)
     perp_x = -dz / chord_len
     perp_z = dx / chord_len
 
-    # Center point (offset from midpoint by h in perpendicular direction)
-    mid_x = (x1 + x2) / 2.0
-    mid_z = (z1 + z2) / 2.0
+    # Calculate center of circular arc
+    h_squared = radius*radius - (chord_len/2.0)**2
+    if h_squared < 0:
+        return [(x1, z1), (x2, z2)]
+    h = math.sqrt(h_squared)
 
     center_x = mid_x + h * perp_x * curve_sign
     center_z = mid_z + h * perp_z * curve_sign
@@ -523,7 +570,8 @@ def interpolate_curve_geographic(start_latlon, end_latlon, radius, arc_length, c
         radius,
         arc_length,
         -curve_sign,  # Negate to flip curve direction for positive-north z-axis
-        num_segments
+        num_segments,
+        curve_degrees
     )
 
     # Convert interpolated points back to lat/lon

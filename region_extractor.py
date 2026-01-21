@@ -20,7 +20,7 @@ from explore_trackdb import TrackDatabase, TrackSection, TrackNode
 from explore_signalHeadDb import SignalDatabase, SignalHead
 from r8lib import SpawnFile, SpawnPoint, IndustryFile, Industry
 
-from config_parser import RegionConfig, VisualizationConfig
+from config_parser import RegionConfig, VisualizationConfig, TileBasedConfig
 
 
 # Constants for coordinate conversion
@@ -326,7 +326,37 @@ def convert_run8_to_latlon(x: float, z: float, tile_geo_bounds: Tuple[float, flo
     return (lat, lon)
 
 
-def interpolate_curve(start_pos, end_pos, radius, arc_length, curve_sign, num_segments=10):
+def convert_run8_to_tile_coords(
+    x: float, z: float,
+    tile_index: Tuple[int, int],
+    home_tile: Tuple[int, int],
+    tile_width: float,
+    tile_height: float
+) -> Tuple[float, float]:
+    """Convert Run8 local coordinates to world tile-based coordinates.
+
+    Args:
+        x: Local X coordinate within the tile (meters)
+        z: Local Z coordinate within the tile (meters)
+        tile_index: (tile_x, tile_z) grid coordinates of the tile
+        home_tile: (home_x, home_z) reference tile for origin
+        tile_width: Width of each tile in meters
+        tile_height: Height of each tile in meters
+
+    Returns:
+        (world_x, world_y) in meters relative to home_tile origin.
+    """
+    tile_x, tile_z = tile_index
+    home_x, home_z = home_tile
+
+    world_x = (tile_x - home_x) * tile_width + x
+    world_y = (tile_z - home_z) * tile_height + z
+
+    return (world_x, world_y)
+
+
+def interpolate_curve(start_pos, end_pos, radius, arc_length, curve_sign, num_segments=10,
+                      curve_degrees=None):
     """Interpolate points along a curved track segment in local coordinates"""
     x1, y1, z1 = start_pos
     x2, y2, z2 = end_pos
@@ -344,20 +374,66 @@ def interpolate_curve(start_pos, end_pos, radius, arc_length, curve_sign, num_se
     if chord_len < 0.1:
         return [(x1, z1), (x2, z2)]
 
-    # Calculate center of circular arc
-    h_squared = radius*radius - (chord_len/2.0)**2
-    if h_squared < 0:
-        return [(x1, z1), (x2, z2)]
+    # Midpoint of chord
+    mid_x = (x1 + x2) / 2.0
+    mid_z = (z1 + z2) / 2.0
 
-    h = math.sqrt(h_squared)
+    # For semicircles (curve_degrees ≈ 180), the standard formula h² = r² - (chord/2)²
+    # gives h ≈ 0, which places the center on the chord and breaks the arc generation.
+    # Use a parametric approach instead for semicircles.
+    is_semicircle = curve_degrees is not None and abs(abs(curve_degrees) - 180) < 5.0
 
+    if is_semicircle:
+        # For a semicircle, the center is at the midpoint of the chord.
+        # Generate points parametrically by sweeping 180 degrees around the center.
+        # The perpendicular direction determines which side the arc bulges toward.
+
+        # Unit vector along chord (from start to end)
+        chord_unit_x = dx / chord_len
+        chord_unit_z = dz / chord_len
+
+        # Perpendicular unit vector (rotated 90 degrees CCW)
+        perp_x = -chord_unit_z
+        perp_z = chord_unit_x
+
+        # The center is at the midpoint
+        center_x = mid_x
+        center_z = mid_z
+
+        # Generate points by sweeping from start angle to end angle (180 degrees)
+        # curve_sign determines which direction the arc bulges
+        points = [(x1, z1)]
+
+        for i in range(1, num_segments):
+            t = i / num_segments
+            # Angle from 0 to pi (180 degrees)
+            theta = t * math.pi
+
+            # Parametric semicircle: start at one end, sweep to the other
+            # Position along chord: goes from -radius to +radius (relative to center)
+            chord_offset = -math.cos(theta) * radius  # -r at t=0, +r at t=1
+            # Perpendicular offset: bulges out by sin(theta) * radius
+            # Negate curve_sign to match the coordinate system convention
+            perp_offset = math.sin(theta) * radius * (-curve_sign)
+
+            x = center_x + chord_offset * chord_unit_x + perp_offset * perp_x
+            z = center_z + chord_offset * chord_unit_z + perp_offset * perp_z
+
+            points.append((x, z))
+
+        points.append((x2, z2))
+        return points
+
+    # Standard arc calculation for non-semicircle curves
     # Perpendicular to chord (rotated 90 degrees)
     perp_x = -dz / chord_len
     perp_z = dx / chord_len
 
-    # Center point (offset from midpoint by h in perpendicular direction)
-    mid_x = (x1 + x2) / 2.0
-    mid_z = (z1 + z2) / 2.0
+    # Calculate center of circular arc
+    h_squared = radius*radius - (chord_len/2.0)**2
+    if h_squared < 0:
+        return [(x1, z1), (x2, z2)]
+    h = math.sqrt(h_squared)
 
     center_x = mid_x + h * perp_x * curve_sign
     center_z = mid_z + h * perp_z * curve_sign
@@ -449,7 +525,8 @@ def interpolate_curve_geographic(start_latlon, end_latlon, radius, arc_length, c
         radius,
         arc_length,
         -curve_sign,  # Negate for positive-north z-axis
-        num_segments
+        num_segments,
+        curve_degrees
     )
 
     curve_points_latlon = []
@@ -553,13 +630,20 @@ def find_end_tile(node: TrackNode, section: TrackSection) -> Tuple[int, int]:
 
 
 def extract_sections(db: TrackDatabase,
-                     tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]]) -> List[SectionData]:
+                     tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]] = None,
+                     tile_based_config: Optional[TileBasedConfig] = None) -> List[SectionData]:
     """Extract all sections from a track database
 
     Each section may have multiple paths (especially switches/turnouts).
     Each path is stored as a separate list of coordinates.
+
+    Args:
+        db: Track database to extract from
+        tile_geo_bounds: Geographic bounds for tiles (required for geographic mode)
+        tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
     """
     sections = []
+    use_tile_coords = tile_based_config is not None
 
     for section in db.sections:
         # Select which nodes to plot
@@ -569,59 +653,126 @@ def extract_sections(db: TrackDatabase,
         total_length_m = 0.0
 
         for node in nodes_to_plot:
-            # Get start tile
             start_tile = node.tile_index
-            if start_tile not in tile_geo_bounds:
-                continue
 
-            # Find end tile (may be different for cross-tile sections)
-            end_tile = find_end_tile(node, section)
-            if end_tile not in tile_geo_bounds:
-                end_tile = start_tile  # Fall back to start tile
-                if end_tile not in tile_geo_bounds:
+            if use_tile_coords:
+                # Tile-based coordinate mode
+                # Find end tile for cross-tile sections
+                end_tile = find_end_tile(node, section)
+
+                # Convert to world tile coordinates
+                start_x, start_y = convert_run8_to_tile_coords(
+                    node.position[0], node.position[2],
+                    start_tile,
+                    tile_based_config.home_tile,
+                    tile_based_config.tile_width,
+                    tile_based_config.tile_height
+                )
+                end_x, end_y = convert_run8_to_tile_coords(
+                    node.end_position[0], node.end_position[2],
+                    end_tile,
+                    tile_based_config.home_tile,
+                    tile_based_config.tile_width,
+                    tile_based_config.tile_height
+                )
+
+                # Check if curved
+                is_curved = abs(node.radius_meters) > 0.1
+
+                if is_curved:
+                    # Interpolate curve in local coordinates directly
+                    curve_points_local = interpolate_curve(
+                        (node.position[0], node.position[1], node.position[2]),
+                        (node.end_position[0], node.end_position[1], node.end_position[2]),
+                        abs(node.radius_meters),
+                        node.arcLen_meters,
+                        node.curve_sign,
+                        max(50, int(node.num_segments / 4)),
+                        node.curve_deg
+                    )
+                    # Convert each point to world tile coordinates
+                    path_points = []
+                    for local_x, local_z in curve_points_local:
+                        world_x, world_y = convert_run8_to_tile_coords(
+                            local_x, local_z,
+                            start_tile,
+                            tile_based_config.home_tile,
+                            tile_based_config.tile_width,
+                            tile_based_config.tile_height
+                        )
+                        path_points.append((world_x, world_y))
+                    total_length_m += node.arcLen_meters
+                else:
+                    # Straight segment
+                    path_points = [(start_x, start_y), (end_x, end_y)]
+                    # Calculate straight-line distance
+                    dx = node.end_position[0] - node.position[0]
+                    dy = node.end_position[1] - node.position[1]
+                    dz = node.end_position[2] - node.position[2]
+                    total_length_m += math.sqrt(dx*dx + dy*dy + dz*dz)
+
+                if len(path_points) >= 2:
+                    # Filter out zero-length paths (in meters now)
+                    seg_length = math.sqrt(
+                        (path_points[-1][0] - path_points[0][0])**2 +
+                        (path_points[-1][1] - path_points[0][1])**2
+                    )
+                    if seg_length > 0.1:  # 0.1 meters threshold
+                        all_paths.append(path_points)
+
+            else:
+                # Geographic coordinate mode (original behavior)
+                if start_tile not in tile_geo_bounds:
                     continue
 
-            # Convert start/end to lat/lon using correct tiles
-            start_lat, start_lon = convert_run8_to_latlon(
-                node.position[0], node.position[2], tile_geo_bounds[start_tile]
-            )
-            end_lat, end_lon = convert_run8_to_latlon(
-                node.end_position[0], node.end_position[2], tile_geo_bounds[end_tile]
-            )
+                # Find end tile (may be different for cross-tile sections)
+                end_tile = find_end_tile(node, section)
+                if end_tile not in tile_geo_bounds:
+                    end_tile = start_tile  # Fall back to start tile
+                    if end_tile not in tile_geo_bounds:
+                        continue
 
-            # Check if curved
-            is_curved = abs(node.radius_meters) > 0.1
-
-            if is_curved:
-                # Interpolate curve in geographic space
-                path_points = interpolate_curve_geographic(
-                    (start_lat, start_lon),
-                    (end_lat, end_lon),
-                    abs(node.radius_meters),
-                    node.arcLen_meters,
-                    node.curve_sign,
-                    node.curve_deg,
-                    num_segments=max(50, int(node.num_segments / 4))
+                # Convert start/end to lat/lon using correct tiles
+                start_lat, start_lon = convert_run8_to_latlon(
+                    node.position[0], node.position[2], tile_geo_bounds[start_tile]
                 )
-                total_length_m += node.arcLen_meters
-            else:
-                # Straight segment
-                path_points = [(start_lat, start_lon), (end_lat, end_lon)]
-                # Calculate straight-line distance
-                dx = node.end_position[0] - node.position[0]
-                dy = node.end_position[1] - node.position[1]
-                dz = node.end_position[2] - node.position[2]
-                total_length_m += math.sqrt(dx*dx + dy*dy + dz*dz)
-
-            if len(path_points) >= 2:
-                # Filter out zero-length or near-zero-length paths (renders as circles)
-                seg_length = math.sqrt(
-                    (path_points[-1][0] - path_points[0][0])**2 +
-                    (path_points[-1][1] - path_points[0][1])**2
+                end_lat, end_lon = convert_run8_to_latlon(
+                    node.end_position[0], node.end_position[2], tile_geo_bounds[end_tile]
                 )
-                # Only add if segment length is meaningful (> ~1 meter in degrees)
-                if seg_length > 0.00001:
-                    all_paths.append(path_points)
+
+                # Check if curved
+                is_curved = abs(node.radius_meters) > 0.1
+
+                if is_curved:
+                    # Interpolate curve in geographic space
+                    path_points = interpolate_curve_geographic(
+                        (start_lat, start_lon),
+                        (end_lat, end_lon),
+                        abs(node.radius_meters),
+                        node.arcLen_meters,
+                        node.curve_sign,
+                        node.curve_deg,
+                        num_segments=max(50, int(node.num_segments / 4))
+                    )
+                    total_length_m += node.arcLen_meters
+                else:
+                    # Straight segment
+                    path_points = [(start_lat, start_lon), (end_lat, end_lon)]
+                    # Calculate straight-line distance
+                    dx = node.end_position[0] - node.position[0]
+                    dy = node.end_position[1] - node.position[1]
+                    dz = node.end_position[2] - node.position[2]
+                    total_length_m += math.sqrt(dx*dx + dy*dy + dz*dz)
+
+                if len(path_points) >= 2:
+                    # Filter out zero-length or near-zero-length paths (renders as circles)
+                    seg_length = math.sqrt(
+                        (path_points[-1][0] - path_points[0][0])**2 +
+                        (path_points[-1][1] - path_points[0][1])**2
+                    )
+                    # Only add if segment length is meaningful (> ~1 meter in degrees)
+                    if seg_length > 0.00001:
+                        all_paths.append(path_points)
 
         if all_paths:
             length_ft = total_length_m * 3.28084
@@ -638,17 +789,37 @@ def extract_sections(db: TrackDatabase,
 
 
 def extract_signals(signal_db: SignalDatabase,
-                    tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]]) -> List[SignalData]:
-    """Extract all signals from a signal database"""
+                    tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]] = None,
+                    tile_based_config: Optional[TileBasedConfig] = None) -> List[SignalData]:
+    """Extract all signals from a signal database
+
+    Args:
+        signal_db: Signal database to extract from
+        tile_geo_bounds: Geographic bounds for tiles (required for geographic mode)
+        tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
+    """
     signals = []
+    use_tile_coords = tile_based_config is not None
 
     for signal in signal_db.signal_heads:
         tile = signal.tile_xz
-        if tile not in tile_geo_bounds:
-            continue
 
-        bounds = tile_geo_bounds[tile]
-        lat, lon = convert_run8_to_latlon(signal.position[0], signal.position[2], bounds)
+        if use_tile_coords:
+            # Tile-based coordinate mode
+            x, y = convert_run8_to_tile_coords(
+                signal.position[0], signal.position[2],
+                tile,
+                tile_based_config.home_tile,
+                tile_based_config.tile_width,
+                tile_based_config.tile_height
+            )
+            lat, lon = x, y  # Store as lat/lon fields but actually tile coords
+        else:
+            # Geographic coordinate mode
+            if tile not in tile_geo_bounds:
+                continue
+            bounds = tile_geo_bounds[tile]
+            lat, lon = convert_run8_to_latlon(signal.position[0], signal.position[2], bounds)
 
         signals.append(SignalData(
             id=signal.signal_index,
@@ -669,9 +840,19 @@ def extract_signals(signal_db: SignalDatabase,
 def extract_ai_locations(ai_db_path: str,
                          route_prefix: int,
                          section_map: Dict[int, TrackSection],
-                         tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]]) -> List[AILocationData]:
-    """Extract AI locations for a specific route prefix"""
+                         tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]] = None,
+                         tile_based_config: Optional[TileBasedConfig] = None) -> List[AILocationData]:
+    """Extract AI locations for a specific route prefix
+
+    Args:
+        ai_db_path: Path to AI locations database file
+        route_prefix: Route prefix to filter by
+        section_map: Map of section IDs to TrackSection objects
+        tile_geo_bounds: Geographic bounds for tiles (required for geographic mode)
+        tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
+    """
     locations = []
+    use_tile_coords = tile_based_config is not None
 
     # Parse the AI locations file
     with open(ai_db_path, 'rb') as f:
@@ -705,10 +886,11 @@ def extract_ai_locations(ai_db_path: str,
         # Get position from first node
         node = section.nodes[0]
         tile = node.tile_index
-        if tile not in tile_geo_bounds:
-            continue
 
-        bounds = tile_geo_bounds[tile]
+        if not use_tile_coords:
+            if tile not in tile_geo_bounds:
+                continue
+            bounds = tile_geo_bounds[tile]
 
         # Calculate position along track
         distance = struct.unpack('<f', spawn.unk4)[0]
@@ -728,7 +910,15 @@ def extract_ai_locations(ai_db_path: str,
             x = start_node.position[0] + ratio * (end_node.end_position[0] - start_node.position[0])
             z = start_node.position[2] + ratio * (end_node.end_position[2] - start_node.position[2])
 
-            lat, lon = convert_run8_to_latlon(x, z, bounds)
+            if use_tile_coords:
+                lat, lon = convert_run8_to_tile_coords(
+                    x, z, tile,
+                    tile_based_config.home_tile,
+                    tile_based_config.tile_width,
+                    tile_based_config.tile_height
+                )
+            else:
+                lat, lon = convert_run8_to_latlon(x, z, bounds)
 
             locations.append(AILocationData(
                 id=idx,
@@ -745,9 +935,19 @@ def extract_ai_locations(ai_db_path: str,
 def extract_industries(industry_db_path: str,
                        route_prefix: int,
                        section_map: Dict[int, TrackSection],
-                       tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]]) -> List[IndustryData]:
-    """Extract industries for a specific route prefix"""
+                       tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]] = None,
+                       tile_based_config: Optional[TileBasedConfig] = None) -> List[IndustryData]:
+    """Extract industries for a specific route prefix
+
+    Args:
+        industry_db_path: Path to industry database file
+        route_prefix: Route prefix to filter by
+        section_map: Map of section IDs to TrackSection objects
+        tile_geo_bounds: Geographic bounds for tiles (required for geographic mode)
+        tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
+    """
     industries = []
+    use_tile_coords = tile_based_config is not None
 
     # Parse the industry file
     with open(industry_db_path, 'rb') as f:
@@ -792,16 +992,25 @@ def extract_industries(industry_db_path: str,
 
         node = section.nodes[0]
         tile = node.tile_index
-        if tile not in tile_geo_bounds:
-            continue
 
-        bounds = tile_geo_bounds[tile]
+        if not use_tile_coords:
+            if tile not in tile_geo_bounds:
+                continue
+            bounds = tile_geo_bounds[tile]
 
         # Use midpoint of first node
         x = (node.position[0] + node.end_position[0]) / 2
         z = (node.position[2] + node.end_position[2]) / 2
 
-        lat, lon = convert_run8_to_latlon(x, z, bounds)
+        if use_tile_coords:
+            lat, lon = convert_run8_to_tile_coords(
+                x, z, tile,
+                tile_based_config.home_tile,
+                tile_based_config.tile_width,
+                tile_based_config.tile_height
+            )
+        else:
+            lat, lon = convert_run8_to_latlon(x, z, bounds)
 
         industries.append(IndustryData(
             tag=industry.trk_sym,
@@ -849,9 +1058,30 @@ def calculate_bounds(sections: List[SectionData],
 def extract_region(region_config: RegionConfig,
                    industry_db_path: Path,
                    tile_corrections: Dict[Tuple[int, int], Dict[str, float]],
-                   tile_dir: str = TILE_DIR) -> RegionData:
-    """Extract all data for a single region"""
+                   tile_dir: str = None,
+                   tile_based_config: Optional[TileBasedConfig] = None) -> RegionData:
+    """Extract all data for a single region
+
+    Args:
+        region_config: Region configuration
+        industry_db_path: Path to the industry database
+        tile_corrections: Dict of tile corrections
+        tile_dir: Override tile directory (uses region_config.terrain_tile_dir or TILE_DIR if None)
+        tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
+    """
     print(f"\nExtracting region: {region_config.display_name}")
+    use_tile_coords = tile_based_config is not None
+
+    if use_tile_coords:
+        print(f"  Using tile-based coordinates (home_tile={tile_based_config.home_tile})")
+    else:
+        # Determine tile directory: explicit override > region config > global default
+        if tile_dir is None:
+            if region_config.terrain_tile_dir:
+                tile_dir = str(region_config.terrain_tile_dir)
+            else:
+                tile_dir = TILE_DIR
+        print(f"  Using terrain tiles from: {tile_dir}")
 
     # Load track database
     print(f"  Loading track database: {region_config.track_database}")
@@ -868,14 +1098,17 @@ def extract_region(region_config: RegionConfig,
             tiles_involved.add(node.tile_index)
     print(f"  Found {len(tiles_involved)} unique tiles")
 
-    # Load tile bounds
-    print(f"  Loading tile bounds...")
-    tile_geo_bounds, corrected_tiles = load_tile_bounds(tiles_involved, tile_corrections, tile_dir)
-    print(f"  Loaded bounds for {len(tile_geo_bounds)} tiles ({len(corrected_tiles)} corrected)")
+    # Load tile bounds (only needed for geographic mode)
+    tile_geo_bounds = {}
+    corrected_tiles = set()
+    if not use_tile_coords:
+        print(f"  Loading tile bounds...")
+        tile_geo_bounds, corrected_tiles = load_tile_bounds(tiles_involved, tile_corrections, tile_dir)
+        print(f"  Loaded bounds for {len(tile_geo_bounds)} tiles ({len(corrected_tiles)} corrected)")
 
     # Extract sections
     print(f"  Extracting track sections...")
-    sections = extract_sections(track_db, tile_geo_bounds)
+    sections = extract_sections(track_db, tile_geo_bounds, tile_based_config)
     print(f"  Extracted {len(sections)} sections with coordinates")
 
     # Load and extract signals (optional - some regions are dark territory)
@@ -883,20 +1116,25 @@ def extract_region(region_config: RegionConfig,
     if region_config.signal_database.exists():
         print(f"  Loading signal database: {region_config.signal_database}")
         signal_db = SignalDatabase(str(region_config.signal_database))
-        signals = extract_signals(signal_db, tile_geo_bounds)
+        signals = extract_signals(signal_db, tile_geo_bounds, tile_based_config)
         print(f"  Extracted {len(signals)} signals")
     else:
         print(f"  No signal database (dark territory) - skipping signals")
 
-    # Extract AI locations
-    print(f"  Extracting AI locations for route prefix {region_config.route_prefix}...")
-    ai_locations = extract_ai_locations(
-        str(region_config.ai_locations_database),
-        region_config.route_prefix,
-        section_map,
-        tile_geo_bounds
-    )
-    print(f"  Extracted {len(ai_locations)} AI locations")
+    # Extract AI locations (optional - some regions may not have AI locations file)
+    ai_locations = []
+    if region_config.ai_locations_database.exists():
+        print(f"  Extracting AI locations for route prefix {region_config.route_prefix}...")
+        ai_locations = extract_ai_locations(
+            str(region_config.ai_locations_database),
+            region_config.route_prefix,
+            section_map,
+            tile_geo_bounds,
+            tile_based_config
+        )
+        print(f"  Extracted {len(ai_locations)} AI locations")
+    else:
+        print(f"  No AI locations database - skipping AI locations")
 
     # Extract industries
     print(f"  Extracting industries for route prefix {region_config.route_prefix}...")
@@ -904,7 +1142,8 @@ def extract_region(region_config: RegionConfig,
         str(industry_db_path),
         region_config.route_prefix,
         section_map,
-        tile_geo_bounds
+        tile_geo_bounds,
+        tile_based_config
     )
     print(f"  Extracted {len(industries)} industries")
 
@@ -913,17 +1152,33 @@ def extract_region(region_config: RegionConfig,
 
     # Convert tile bounds to TileData list
     tiles = []
-    for (tile_x, tile_z), tile_bounds in tile_geo_bounds.items():
-        lon_east, lon_west, lat_north, lat_south = tile_bounds
-        tiles.append(TileData(
-            x=tile_x,
-            z=tile_z,
-            lat_north=lat_north,
-            lat_south=lat_south,
-            lon_east=lon_east,
-            lon_west=lon_west,
-            is_corrected=(tile_x, tile_z) in corrected_tiles
-        ))
+    if use_tile_coords:
+        # For tile-based mode, create tile data from tiles_involved
+        for (tile_x, tile_z) in tiles_involved:
+            # Calculate tile bounds in world coordinates
+            x_offset = (tile_x - tile_based_config.home_tile[0]) * tile_based_config.tile_width
+            z_offset = (tile_z - tile_based_config.home_tile[1]) * tile_based_config.tile_height
+            tiles.append(TileData(
+                x=tile_x,
+                z=tile_z,
+                lat_north=z_offset + tile_based_config.tile_height,  # y_max
+                lat_south=z_offset,  # y_min
+                lon_east=x_offset + tile_based_config.tile_width,  # x_max
+                lon_west=x_offset,  # x_min
+                is_corrected=False
+            ))
+    else:
+        for (tile_x, tile_z), tile_bounds in tile_geo_bounds.items():
+            lon_east, lon_west, lat_north, lat_south = tile_bounds
+            tiles.append(TileData(
+                x=tile_x,
+                z=tile_z,
+                lat_north=lat_north,
+                lat_south=lat_south,
+                lon_east=lon_east,
+                lon_west=lon_west,
+                is_corrected=(tile_x, tile_z) in corrected_tiles
+            ))
     print(f"  Extracted {len(tiles)} tile boundaries ({len(corrected_tiles)} corrected)")
 
     return RegionData(
