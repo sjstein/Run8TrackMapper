@@ -151,7 +151,7 @@ Usage examples:
 - `python manage_tile_corrections.py scan --track-db <file> --start-section <num>` - Scan from track database
 - `python manage_tile_corrections.py scan-range <x_min> <x_max> <z_min> <z_max> --home-tile <x>,<z>` - Scan specific tile range
 
-### explore_trackdb.py
+### util/explore_trackdb.py
 **Status:** Working - core library
 - Parses Run8 .r8 track database files
 - Defines data structures: TrackNode, TrackSection, TrackDatabase

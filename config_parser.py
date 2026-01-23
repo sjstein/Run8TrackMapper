@@ -25,7 +25,7 @@ output_dir = ./output/socal/
 import configparser
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 # Standard filenames within each region directory
@@ -35,16 +35,26 @@ AI_LOCATIONS_FILENAME = "AiSpecialLocations.r8"
 
 
 @dataclass
+class TileBasedConfig:
+    """Configuration for tile-based plotting (non-geographic coordinates)"""
+    home_tile: Tuple[int, int] = (0, 0)  # Reference tile for origin
+    tile_width: float = 842.3            # Tile width in meters
+    tile_height: float = 1023.2          # Tile height in meters
+
+
+@dataclass
 class ColorConfig:
     """Color configuration for visualization elements"""
     track: str = "#0066cc"              # Regular track sections
     track_selected: str = "#ff0000"     # Selected track sections
+    track_hover: str = "#ffff00"        # Hover highlight color (yellow)
     switch: str = "#800080"             # Switch/turnout sections (purple)
     industry_track: str = "#00aa00"     # Industry track sections (green)
     signal_absolute: str = "#FF6B35"    # Absolute signals (orange)
     signal_intermediate: str = "#FFD700"  # Intermediate signals (gold)
     signal_border_single: str = "#000000"  # Single head signal border (black)
     signal_border_stacked: str = "#87CEEB"  # Multiple head signal border (light blue)
+    background: str = "#333333"         # Background color (tile-based mode)
 
 
 @dataclass
@@ -55,6 +65,7 @@ class RegionConfig:
     route_prefix: int
     directory: Path
     enabled_by_default: bool = False
+    terrain_tile_dir: Optional[Path] = None  # Path to terrain tiles (.tr4 files)
 
     @property
     def track_database(self) -> Path:
@@ -78,6 +89,7 @@ class VisualizationConfig:
     output_dir: Path
     regions: List[RegionConfig] = field(default_factory=list)
     colors: ColorConfig = field(default_factory=ColorConfig)
+    tile_based: Optional[TileBasedConfig] = None
 
 
 class ConfigError(Exception):
@@ -164,13 +176,18 @@ def parse_config(config_path: str) -> VisualizationConfig:
         enabled_str = region.get('enabled_by_default', 'false').strip().lower()
         enabled_by_default = enabled_str in ('true', 'yes', '1')
 
+        # Optional terrain tile directory
+        terrain_tile_dir_str = region.get('terrain_tile_dir', '').strip()
+        terrain_tile_dir = Path(terrain_tile_dir_str) if terrain_tile_dir_str else None
+
         if display_name and directory_str:
             regions.append(RegionConfig(
                 id=region_id,
                 display_name=display_name,
                 route_prefix=route_prefix,
                 directory=Path(directory_str),
-                enabled_by_default=enabled_by_default
+                enabled_by_default=enabled_by_default,
+                terrain_tile_dir=terrain_tile_dir
             ))
 
     # If we have basic parsing errors, raise now
@@ -184,12 +201,37 @@ def parse_config(config_path: str) -> VisualizationConfig:
         colors = ColorConfig(
             track=color_section.get('track', colors.track).strip(),
             track_selected=color_section.get('track_selected', colors.track_selected).strip(),
+            track_hover=color_section.get('track_hover', colors.track_hover).strip(),
             switch=color_section.get('switch', colors.switch).strip(),
             industry_track=color_section.get('industry_track', colors.industry_track).strip(),
             signal_absolute=color_section.get('signal_absolute', colors.signal_absolute).strip(),
             signal_intermediate=color_section.get('signal_intermediate', colors.signal_intermediate).strip(),
             signal_border_single=color_section.get('signal_border_single', colors.signal_border_single).strip(),
             signal_border_stacked=color_section.get('signal_border_stacked', colors.signal_border_stacked).strip(),
+            background=color_section.get('background', colors.background).strip(),
+        )
+
+    # Parse [tile_based_plot] section (optional)
+    tile_based = None
+    if 'tile_based_plot' in parser:
+        tb_section = parser['tile_based_plot']
+
+        # Parse home_tile (format: "x,z" e.g., "209,-10")
+        home_tile_str = tb_section.get('home_tile', '0,0').strip()
+        try:
+            parts = home_tile_str.split(',')
+            home_tile = (int(parts[0].strip()), int(parts[1].strip()))
+        except (ValueError, IndexError):
+            errors.append(f"[tile_based_plot] home_tile must be in format 'x,z' (e.g., '209,-10')")
+            home_tile = (0, 0)
+
+        tile_width = float(tb_section.get('tile_width', '842.3').strip())
+        tile_height = float(tb_section.get('tile_height', '1023.2').strip())
+
+        tile_based = TileBasedConfig(
+            home_tile=home_tile,
+            tile_width=tile_width,
+            tile_height=tile_height
         )
 
     # Build the config object
@@ -199,7 +241,8 @@ def parse_config(config_path: str) -> VisualizationConfig:
         industry_db=Path(industry_db_str),
         output_dir=Path(output_dir_str),
         regions=regions,
-        colors=colors
+        colors=colors,
+        tile_based=tile_based
     )
 
     # Validate that all files exist
@@ -222,7 +265,12 @@ def parse_config(config_path: str) -> VisualizationConfig:
                 # Signal database is optional (dark territory regions have no signals)
                 print(f"  Note: [region.{region.id}] has no signal database (dark territory) - signals will not be rendered")
             if not region.ai_locations_database.exists():
-                file_errors.append(f"[region.{region.id}] AI locations database not found: {region.ai_locations_database}")
+                # AI locations database is optional
+                print(f"  Note: [region.{region.id}] has no AI locations database - AI locations will not be rendered")
+
+        # Validate terrain_tile_dir if specified
+        if region.terrain_tile_dir and not region.terrain_tile_dir.exists():
+            file_errors.append(f"[region.{region.id}] terrain_tile_dir not found: {region.terrain_tile_dir}")
 
     if file_errors:
         raise ConfigError("Missing files:\n  - " + "\n  - ".join(file_errors))
@@ -257,6 +305,10 @@ route_prefix = 1
 # Directory containing TrackDatabase.r8, SignalHeadDatabase.r8, AiSpecialLocations.r8
 directory = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\BNSF_MojaveSub
 
+# (Optional) Path to terrain tile directory containing .tr4 files
+# If not specified, uses the default SouthernCA tile location
+terrain_tile_dir = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\Regions\\SouthernCA\\TerrainTiles
+
 # Whether this region is enabled by default when the map loads
 enabled_by_default = true
 
@@ -264,6 +316,7 @@ enabled_by_default = true
 display_name = Barstow Subdivision
 route_prefix = 2
 directory = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\BNSF_BarstowSub
+# terrain_tile_dir can be omitted to use the default location
 enabled_by_default = false
 
 # Add more [region.*] sections as needed...
@@ -275,6 +328,7 @@ enabled_by_default = false
 # Track colors
 track = #0066cc
 track_selected = #ff0000
+track_hover = #ffff00
 switch = #800080
 industry_track = #00aa00
 
@@ -312,6 +366,8 @@ if __name__ == '__main__':
             for region in config.regions:
                 print(f"    - {region.display_name} (prefix={region.route_prefix}, enabled={region.enabled_by_default})")
                 print(f"      Directory: {region.directory}")
+                if region.terrain_tile_dir:
+                    print(f"      Terrain tiles: {region.terrain_tile_dir}")
         except ConfigError as e:
             print(f"ERROR: {e}")
             sys.exit(1)
