@@ -67,6 +67,7 @@ class SignalData:
     is_dwarf: bool = False
     is_switch_indicator: bool = False
     is_advance_diverging: bool = False
+    stacked_ids: List[int] = None  # All signal IDs in this stack (for multi-head signals)
 
 
 @dataclass
@@ -350,7 +351,7 @@ def convert_run8_to_tile_coords(
     home_x, home_z = home_tile
 
     world_x = (tile_x - home_x) * tile_width + x
-    world_y = (tile_z - home_z) * tile_height + z
+    world_y = (tile_z - home_z) * tile_height - z
 
     return (world_x, world_y)
 
@@ -680,22 +681,62 @@ def extract_sections(db: TrackDatabase,
                 is_curved = abs(node.radius_meters) > 0.1
 
                 if is_curved:
+                    # For cross-tile curves, transform end position to start tile's
+                    # extended coordinate space before interpolating
+                    end_pos_x = node.end_position[0]
+                    end_pos_y = node.end_position[1]
+                    end_pos_z = node.end_position[2]
+
+                    if end_tile != start_tile:
+                        # Adjust end position to be in start tile's extended coordinates
+                        tile_diff_x = end_tile[0] - start_tile[0]
+                        tile_diff_z = end_tile[1] - start_tile[1]
+                        end_pos_x += tile_diff_x * tile_based_config.tile_width
+                        # Z increases going North, but local z is negative going North
+                        end_pos_z -= tile_diff_z * tile_based_config.tile_height
+
+                    # Determine curve sign for interpolation
+                    # Flip for curves > 180 degrees (same as geographic mode)
+                    curve_sign = node.curve_sign
+                    if abs(node.curve_deg) > 180:
+                        curve_sign = -curve_sign
+
                     # Interpolate curve in local coordinates directly
                     curve_points_local = interpolate_curve(
                         (node.position[0], node.position[1], node.position[2]),
-                        (node.end_position[0], node.end_position[1], node.end_position[2]),
+                        (end_pos_x, end_pos_y, end_pos_z),
                         abs(node.radius_meters),
                         node.arcLen_meters,
-                        node.curve_sign,
+                        curve_sign,
                         max(50, int(node.num_segments / 4)),
                         node.curve_deg
                     )
                     # Convert each point to world tile coordinates
+                    # For cross-tile curves, determine which tile each point belongs to
                     path_points = []
+                    start_tile_x, start_tile_z = start_tile
                     for local_x, local_z in curve_points_local:
+                        # Calculate tile offset from start tile based on local coordinates
+                        # X increases going East, each tile is tile_width meters
+                        tile_offset_x = int(local_x // tile_based_config.tile_width)
+                        # Z is negative going North, need to handle correctly
+                        # local_z ranges from 0 to -tile_height within a tile
+                        if local_z >= 0:
+                            tile_offset_z = 0
+                        else:
+                            # Negative z means we might be in a northern tile
+                            tile_offset_z = int((-local_z) // tile_based_config.tile_height)
+
+                        # Adjust local coordinates to be within tile bounds
+                        adjusted_x = local_x - (tile_offset_x * tile_based_config.tile_width)
+                        adjusted_z = local_z + (tile_offset_z * tile_based_config.tile_height)
+
+                        # Calculate actual tile for this point
+                        point_tile = (start_tile_x + tile_offset_x, start_tile_z + tile_offset_z)
+
                         world_x, world_y = convert_run8_to_tile_coords(
-                            local_x, local_z,
-                            start_tile,
+                            adjusted_x, adjusted_z,
+                            point_tile,
                             tile_based_config.home_tile,
                             tile_based_config.tile_width,
                             tile_based_config.tile_height
@@ -821,6 +862,9 @@ def extract_signals(signal_db: SignalDatabase,
             bounds = tile_geo_bounds[tile]
             lat, lon = convert_run8_to_latlon(signal.position[0], signal.position[2], bounds)
 
+        # Get stacked signal IDs (for multi-head signals)
+        stacked_ids = signal.signal_indices if signal.signal_indices else [signal.signal_index]
+
         signals.append(SignalData(
             id=signal.signal_index,
             lat=lat,
@@ -831,7 +875,8 @@ def extract_signals(signal_db: SignalDatabase,
             model_name=signal.model_name,
             is_dwarf=signal.is_dwarf,
             is_switch_indicator=signal.is_switch_indicator,
-            is_advance_diverging=signal.is_advance_diverging
+            is_advance_diverging=signal.is_advance_diverging,
+            stacked_ids=stacked_ids
         ))
 
     return signals
@@ -1157,7 +1202,8 @@ def extract_region(region_config: RegionConfig,
         for (tile_x, tile_z) in tiles_involved:
             # Calculate tile bounds in world coordinates
             x_offset = (tile_x - tile_based_config.home_tile[0]) * tile_based_config.tile_width
-            z_offset = (tile_z - tile_based_config.home_tile[1]) * tile_based_config.tile_height
+            z_offset = (tile_z - tile_based_config.home_tile[1]) * tile_based_config.tile_height  # Inverted
+
             tiles.append(TileData(
                 x=tile_x,
                 z=tile_z,

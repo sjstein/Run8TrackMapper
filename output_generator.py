@@ -44,7 +44,8 @@ def signal_to_dict(signal: SignalData) -> dict:
         "model_name": signal.model_name,
         "is_dwarf": signal.is_dwarf,
         "is_switch_indicator": signal.is_switch_indicator,
-        "is_advance_diverging": signal.is_advance_diverging
+        "is_advance_diverging": signal.is_advance_diverging,
+        "stacked_ids": signal.stacked_ids or []
     }
 
 

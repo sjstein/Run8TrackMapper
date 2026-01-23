@@ -640,7 +640,8 @@ def generate_javascript() -> str:
             for (const signal of data.signals) {
                 const fillColor = signal.type === 'absolute' ? COLORS.signalAbsolute : COLORS.signalIntermediate;
                 // Border color based on head count (single vs stacked)
-                const borderColor = signal.name && signal.name.includes('/') ? COLORS.signalBorderStacked : COLORS.signalBorderSingle;
+                const isStacked = signal.stacked_ids && signal.stacked_ids.length > 1;
+                const borderColor = isStacked ? COLORS.signalBorderStacked : COLORS.signalBorderSingle;
 
                 // Create triangle pointing in signal direction
                 // rotation is in degrees, convert to radians and flip 180 degrees
@@ -680,7 +681,11 @@ def generate_javascript() -> str:
                 signalPopup += `Advance Diverging: ${signal.is_advance_diverging ? 'Yes' : 'No'}`;
 
                 marker.bindPopup(signalPopup, {maxWidth: 300});
-                marker.bindTooltip(signal.name, {sticky: true});
+                // Show all stacked signal IDs in tooltip for multi-head signals
+                const tooltipText = isStacked
+                    ? `Signals ${signal.stacked_ids.join(', ')}`
+                    : signal.name;
+                marker.bindTooltip(tooltipText, {sticky: true});
 
                 layers.signals.addLayer(marker);
                 MapApp.signalIndex.set(signal.id, {region_id: regionId, marker, metadata: signal});
@@ -1149,7 +1154,7 @@ def generate_tile_based_html(config: VisualizationConfig) -> str:
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         html, body {{ height: 100%; width: 100%; }}
-        #map {{ height: 100%; width: 100%; background-color: #333; }}
+        #map {{ height: 100%; width: 100%; background-color: {colors.background}; }}
         .control-panel {{
             position: absolute;
             top: 10px;
@@ -1194,35 +1199,71 @@ def generate_tile_based_html(config: VisualizationConfig) -> str:
             font-size: 16px;
         }}
         .search-btn:hover {{ background: #f4f4f4; }}
+        .search-overlay {{
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1999;
+        }}
+        .search-overlay.visible {{ display: block; }}
         .search-dialog {{
             display: none;
-            position: absolute;
-            top: 50px;
-            left: 50px;
-            z-index: 1001;
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 2000;
             background: white;
-            padding: 15px;
-            border-radius: 5px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            min-width: 350px;
+            max-width: 500px;
+            max-height: 80vh;
+            overflow-y: auto;
         }}
-        .search-dialog input {{
-            width: 200px;
+        .search-dialog.visible {{ display: block; }}
+        .search-dialog h3 {{ margin: 0 0 15px 0; }}
+        .search-dialog select {{
+            width: 100%;
             padding: 8px;
             margin-bottom: 10px;
             border: 1px solid #ddd;
-            border-radius: 3px;
+            border-radius: 4px;
         }}
-        .search-dialog button {{
-            padding: 8px 15px;
-            background: #007bff;
-            color: white;
+        .search-dialog input {{
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }}
+        .search-dialog .search-close {{
+            position: absolute;
+            top: 10px;
+            right: 15px;
+            background: none;
             border: none;
-            border-radius: 3px;
+            font-size: 20px;
             cursor: pointer;
-            margin-right: 5px;
+            color: #666;
         }}
-        .search-dialog button:hover {{ background: #0056b3; }}
-        .search-dialog .close-btn {{ background: #6c757d; }}
+        .search-results {{
+            margin-top: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+        }}
+        .search-result {{
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+            cursor: pointer;
+        }}
+        .search-result:hover {{ background: #f5f5f5; }}
         .leaflet-popup-content {{ font-size: 12px; }}
         .selection-info {{
             margin-top: 10px;
@@ -1245,11 +1286,19 @@ def generate_tile_based_html(config: VisualizationConfig) -> str:
 <body>
     <div id="map"></div>
 
-    <button class="search-btn" onclick="toggleSearch()">&#128269;</button>
+    <button class="search-btn" onclick="openSearch()">&#128269;</button>
+    <div class="search-overlay" id="search-overlay" onclick="closeSearch()"></div>
     <div class="search-dialog" id="search-dialog">
-        <input type="text" id="search-input" placeholder="Section, Signal, Industry..." onkeypress="if(event.key==='Enter')doSearch()">
-        <button onclick="doSearch()">Search</button>
-        <button class="close-btn" onclick="toggleSearch()">Close</button>
+        <button class="search-close" onclick="closeSearch()">&times;</button>
+        <h3>Search</h3>
+        <select id="search-type">
+            <option value="section">Track Section</option>
+            <option value="signal">Signal</option>
+            <option value="industry">Industry</option>
+            <option value="aiLocation">AI Location</option>
+        </select>
+        <input type="text" id="search-input" placeholder="Enter search term..." oninput="performSearch()">
+        <div class="search-results" id="search-results"></div>
     </div>
 
     <div class="control-panel">
@@ -1468,16 +1517,31 @@ window.COLORS = {{
 
             // Render industries
             for (const ind of data.industries) {{
-                const marker = L.circleMarker([ind.lon, ind.lat], {{  // [y, x]
-                    radius: 8,
-                    fillColor: '#00aa00',
-                    color: '#006600',
-                    weight: 2,
-                    fillOpacity: 0.8
+                const marker = L.marker([ind.lon, ind.lat], {{  // [y, x]
+                    icon: L.divIcon({{
+                        className: 'industry-marker',
+                        html: `<div style="color:${{COLORS.industryTrack}};font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;">${{ind.tag}}</div>`,
+                        iconAnchor: [0, 0]
+                    }})
                 }}).addTo(layers.industries);
-                marker.bindTooltip(`${{ind.tag}}<br>${{ind.name}}`, {{ sticky: true }});
+
+                // Build detailed industry popup
+                let industryPopup = `<b>${{ind.name}}</b><br>`;
+                industryPopup += `Tag: ${{ind.tag}}<br>`;
+                if (ind.track_sections && ind.track_sections.length > 0) {{
+                    industryPopup += `Track Sections: ${{ind.track_sections.join(', ')}}`;
+                }}
+                marker.bindPopup(industryPopup, {{maxWidth: 300}});
+
                 MapApp.industryLayers.push(marker);
                 MapApp.industryIndex.push({{ regionId, data: ind }});
+
+                // Track which sections are industry tracks
+                if (ind.track_sections) {{
+                    for (const sectionId of ind.track_sections) {{
+                        MapApp.industrySectionIds.add(`${{regionId}}_${{sectionId}}`);
+                    }}
+                }}
             }}
 
             // Render AI locations
@@ -1507,6 +1571,22 @@ window.COLORS = {{
                 }}).addTo(layers.tiles);
                 rect.bindTooltip(`Tile ${{tile.x}}, ${{tile.z}}`, {{ sticky: true }});
                 MapApp.tileLayers.push(rect);
+
+                // Draw center dot
+                const centerY = (tile.lat_north + tile.lat_south) / 2;
+                const centerX = (tile.lon_east + tile.lon_west) / 2;
+                const dotColor = tile.is_corrected ? 'red' : 'darkgrey';
+                const dotFill = tile.is_corrected ? 'red' : 'white';
+
+                const dot = L.circleMarker([centerY, centerX], {{
+                    radius: 3,
+                    color: dotColor,
+                    fillColor: dotFill,
+                    fillOpacity: 1.0,
+                    weight: 1
+                }}).addTo(layers.tiles);
+                dot.bindTooltip(`Tile ${{tile.x}}, ${{tile.z}}`, {{ sticky: true }});
+                MapApp.tileLayers.push(dot);
             }}
 
             MapApp.loadedRegions.set(regionId, {{ data, layers, visible: true }});
@@ -1525,7 +1605,8 @@ window.COLORS = {{
     function createSignalMarker(signal) {{
         // Signal as directional triangle
         const size = 12;
-        const rotation = signal.rotation * Math.PI / 180;
+        // Add Math.PI (180°) to match geographic mode rotation convention
+        const rotation = (signal.rotation * Math.PI / 180) + Math.PI;
         const cos = Math.cos(rotation);
         const sin = Math.sin(rotation);
 
@@ -1543,8 +1624,9 @@ window.COLORS = {{
         const lng = signal.lat;  // x coordinate
 
         const fillColor = signal.type === 'absolute' ? COLORS.signalAbsolute : COLORS.signalIntermediate;
-        const borderColor = signal.is_dwarf || signal.model_name.includes('_2') ?
-                           COLORS.signalBorderStacked : COLORS.signalBorderSingle;
+        // Use stacked border if multi-head signal (stacked_ids has more than one ID)
+        const isStacked = signal.stacked_ids && signal.stacked_ids.length > 1;
+        const borderColor = isStacked ? COLORS.signalBorderStacked : COLORS.signalBorderSingle;
 
         const svgIcon = L.divIcon({{
             className: 'signal-icon',
@@ -1557,7 +1639,11 @@ window.COLORS = {{
         }});
 
         const marker = L.marker([lat, lng], {{ icon: svgIcon }});
-        marker.bindTooltip(`Signal ${{signal.id}}<br>${{signal.type}}`, {{ sticky: true }});
+        // Show all stacked signal IDs in tooltip for multi-head signals
+        let tooltipText = isStacked
+            ? `Signals ${{signal.stacked_ids.join(', ')}}<br>${{signal.type}}`
+            : `Signal ${{signal.id}}<br>${{signal.type}}`;
+        marker.bindTooltip(tooltipText, {{ sticky: true }});
         return marker;
     }}
 
@@ -1679,60 +1765,136 @@ window.COLORS = {{
     }}
 
     // Search functionality
-    window.toggleSearch = function() {{
-        const dialog = document.getElementById('search-dialog');
-        dialog.style.display = dialog.style.display === 'none' ? 'block' : 'none';
-        if (dialog.style.display === 'block') {{
-            document.getElementById('search-input').focus();
-        }}
+    window.openSearch = function() {{
+        document.getElementById('search-overlay').classList.add('visible');
+        document.getElementById('search-dialog').classList.add('visible');
+        document.getElementById('search-input').focus();
     }};
 
-    window.doSearch = function() {{
-        const query = document.getElementById('search-input').value.trim().toLowerCase();
-        if (!query) return;
+    window.closeSearch = function() {{
+        document.getElementById('search-overlay').classList.remove('visible');
+        document.getElementById('search-dialog').classList.remove('visible');
+        document.getElementById('search-input').value = '';
+        document.getElementById('search-results').innerHTML = '';
+    }};
 
-        // Search sections
-        const sectionNum = parseInt(query);
-        if (!isNaN(sectionNum) && MapApp.sectionIndex.has(sectionNum)) {{
-            const s = MapApp.sectionIndex.get(sectionNum);
-            MapApp.map.setView(s.polyline.getCenter(), 2);
-            s.polyline.openTooltip();
-            toggleSearch();
+    // Debounce helper
+    let searchTimeout;
+    window.performSearch = function() {{
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(doSearch, 300);
+    }};
+
+    function doSearch() {{
+        const searchType = document.getElementById('search-type').value;
+        const query = document.getElementById('search-input').value.trim().toLowerCase();
+        const resultsDiv = document.getElementById('search-results');
+
+        if (!query) {{
+            resultsDiv.innerHTML = '';
             return;
         }}
 
-        // Search signals
-        if (!isNaN(sectionNum)) {{
-            for (const [id, s] of MapApp.signalIndex) {{
-                if (id === sectionNum) {{
-                    MapApp.map.setView(s.marker.getLatLng(), 2);
-                    s.marker.openTooltip();
-                    toggleSearch();
-                    return;
+        let results = [];
+
+        if (searchType === 'section') {{
+            const queryNum = parseInt(query);
+            for (const [sectionId, data] of MapApp.sectionIndex) {{
+                if (sectionId.toString().includes(query) || sectionId === queryNum) {{
+                    results.push({{
+                        type: 'section',
+                        id: sectionId,
+                        label: `Section ${{sectionId}}`,
+                        region: data.regionId,
+                        data: data
+                    }});
+                }}
+            }}
+        }} else if (searchType === 'signal') {{
+            const queryNum = parseInt(query);
+            for (const [signalId, data] of MapApp.signalIndex) {{
+                if (signalId.toString().includes(query) || signalId === queryNum) {{
+                    results.push({{
+                        type: 'signal',
+                        id: signalId,
+                        label: `Signal ${{signalId}}`,
+                        region: data.regionId,
+                        data: data
+                    }});
+                }}
+            }}
+        }} else if (searchType === 'industry') {{
+            for (const item of MapApp.industryIndex) {{
+                if (item.data.tag.toLowerCase().includes(query) ||
+                    item.data.name.toLowerCase().includes(query)) {{
+                    results.push({{
+                        type: 'industry',
+                        id: item.data.tag,
+                        label: `${{item.data.tag}} - ${{item.data.name}}`,
+                        region: item.regionId,
+                        data: item
+                    }});
+                }}
+            }}
+        }} else if (searchType === 'aiLocation') {{
+            for (const item of MapApp.aiLocationIndex) {{
+                if (item.data.name.toLowerCase().includes(query)) {{
+                    results.push({{
+                        type: 'aiLocation',
+                        id: item.data.id,
+                        label: `${{item.data.name}} (${{item.data.type_name}})`,
+                        region: item.regionId,
+                        data: item
+                    }});
                 }}
             }}
         }}
 
-        // Search industries
-        for (const ind of MapApp.industryIndex) {{
-            if (ind.data.tag.toLowerCase().includes(query) ||
-                ind.data.name.toLowerCase().includes(query)) {{
-                MapApp.map.setView([ind.data.lon, ind.data.lat], 2);
-                toggleSearch();
-                return;
+        // Limit results
+        results = results.slice(0, 50);
+
+        resultsDiv.innerHTML = results.length === 0
+            ? '<div style="padding:10px;color:#666;">No results found</div>'
+            : results.map(r => {{
+                const idStr = typeof r.id === 'string'
+                    ? `'${{r.id.replace(/'/g, "\\'")}}'`
+                    : r.id;
+                return `
+                <div class="search-result" onclick="goToResult('${{r.type}}', ${{idStr}}, '${{r.region}}')">
+                    <strong>${{r.label}}</strong>
+                    <span style="color:#666;font-size:11px;"> (${{r.region}})</span>
+                </div>
+                `;
+            }}).join('');
+    }}
+
+    window.goToResult = function(type, id, regionId) {{
+        closeSearch();
+
+        if (type === 'section') {{
+            const data = MapApp.sectionIndex.get(id);
+            if (data) {{
+                MapApp.map.fitBounds(data.polyline.getBounds(), {{padding: [50, 50]}});
+                data.polyline.openTooltip();
+            }}
+        }} else if (type === 'signal') {{
+            const data = MapApp.signalIndex.get(id);
+            if (data) {{
+                // In tile-based mode, coords are [y, x] so we need to use marker position
+                MapApp.map.setView(data.marker.getLatLng(), 2);
+                data.marker.openTooltip();
+            }}
+        }} else if (type === 'industry') {{
+            const item = MapApp.industryIndex.find(i => i.data.tag === id && i.regionId === regionId);
+            if (item) {{
+                MapApp.map.setView([item.data.lon, item.data.lat], 2);
+            }}
+        }} else if (type === 'aiLocation') {{
+            const item = MapApp.aiLocationIndex.find(i => i.data.id === id && i.regionId === regionId);
+            if (item) {{
+                MapApp.map.setView([item.data.lon, item.data.lat], 2);
             }}
         }}
-
-        // Search AI locations
-        for (const loc of MapApp.aiLocationIndex) {{
-            if (loc.data.name.toLowerCase().includes(query)) {{
-                MapApp.map.setView([loc.data.lon, loc.data.lat], 2);
-                toggleSearch();
-                return;
-            }}
-        }}
-
-        alert('Not found: ' + query);
     }};
 
     // Initialize

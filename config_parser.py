@@ -54,6 +54,7 @@ class ColorConfig:
     signal_intermediate: str = "#FFD700"  # Intermediate signals (gold)
     signal_border_single: str = "#000000"  # Single head signal border (black)
     signal_border_stacked: str = "#87CEEB"  # Multiple head signal border (light blue)
+    background: str = "#333333"         # Background color (tile-based mode)
 
 
 @dataclass
@@ -207,6 +208,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
             signal_intermediate=color_section.get('signal_intermediate', colors.signal_intermediate).strip(),
             signal_border_single=color_section.get('signal_border_single', colors.signal_border_single).strip(),
             signal_border_stacked=color_section.get('signal_border_stacked', colors.signal_border_stacked).strip(),
+            background=color_section.get('background', colors.background).strip(),
         )
 
     # Parse [tile_based_plot] section (optional)
