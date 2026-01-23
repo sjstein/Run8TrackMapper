@@ -25,7 +25,6 @@ from config_parser import RegionConfig, VisualizationConfig, TileBasedConfig
 
 # Constants for coordinate conversion
 METERS_PER_DEGREE_LAT = 111139.0
-TILE_DIR = r'C:\Run8Studios\Run8 Train Simulator V3\Content\V3Routes\Regions\SouthernCA\TerrainTiles'
 
 # Coordinate bounds for validation (CONUS)
 LON_MIN, LON_MAX = -130.0, -65.0
@@ -268,7 +267,7 @@ def load_tile_corrections(csv_path: str) -> Dict[Tuple[int, int], Dict[str, floa
 
 def load_tile_bounds(tiles_involved: Set[Tuple[int, int]],
                      tile_corrections: Dict[Tuple[int, int], Dict[str, float]],
-                     tile_dir: str = TILE_DIR) -> Tuple[Dict, Set]:
+                     tile_dir: str) -> Tuple[Dict, Set]:
     """Load geographic bounds for all tiles involved
 
     Returns: (tile_geo_bounds dict, corrected_tiles set)
@@ -283,6 +282,7 @@ def load_tile_bounds(tiles_involved: Set[Tuple[int, int]],
         filepath = os.path.join(tile_dir, filename)
 
         if not os.path.exists(filepath):
+            print(f"  Warning: No such file: {filepath}")
             continue
 
         data = decompress_tr4(filepath)
@@ -1103,6 +1103,7 @@ def calculate_bounds(sections: List[SectionData],
 def extract_region(region_config: RegionConfig,
                    industry_db_path: Path,
                    tile_corrections: Dict[Tuple[int, int], Dict[str, float]],
+                   default_tile_dir: str,
                    tile_dir: str = None,
                    tile_based_config: Optional[TileBasedConfig] = None) -> RegionData:
     """Extract all data for a single region
@@ -1111,7 +1112,8 @@ def extract_region(region_config: RegionConfig,
         region_config: Region configuration
         industry_db_path: Path to the industry database
         tile_corrections: Dict of tile corrections
-        tile_dir: Override tile directory (uses region_config.terrain_tile_dir or TILE_DIR if None)
+        default_tile_dir: Default tile directory from config (derived from region_dir)
+        tile_dir: Override tile directory (uses region_config.terrain_tile_dir or default_tile_dir if None)
         tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
     """
     print(f"\nExtracting region: {region_config.display_name}")
@@ -1120,12 +1122,12 @@ def extract_region(region_config: RegionConfig,
     if use_tile_coords:
         print(f"  Using tile-based coordinates (home_tile={tile_based_config.home_tile})")
     else:
-        # Determine tile directory: explicit override > region config > global default
+        # Determine tile directory: explicit override > region config > default from config
         if tile_dir is None:
             if region_config.terrain_tile_dir:
                 tile_dir = str(region_config.terrain_tile_dir)
             else:
-                tile_dir = TILE_DIR
+                tile_dir = default_tile_dir
         print(f"  Using terrain tiles from: {tile_dir}")
 
     # Load track database
@@ -1254,7 +1256,8 @@ if __name__ == '__main__':
         region_data = extract_region(
             region_config,
             config.industry_db,
-            tile_corrections
+            tile_corrections,
+            str(config.terrain_tile_dir)
         )
         print(f"\nRegion {region_data.id} summary:")
         print(f"  Sections: {len(region_data.sections)}")

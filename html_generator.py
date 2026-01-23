@@ -412,10 +412,10 @@ def generate_javascript() -> str:
             <button class="search-close" id="search-close-btn">&times;</button>
             <h3>Search</h3>
             <select id="search-type">
-                <option value="section">Track Section</option>
-                <option value="signal">Signal</option>
-                <option value="industry">Industry</option>
                 <option value="aiLocation">AI Location</option>
+                <option value="industry">Industry</option>            
+                <option value="signal">Signal</option>
+                <option value="section">Track Section</option>
             </select>
             <input type="text" id="search-input" placeholder="Enter search term...">
             <div id="search-results"></div>
@@ -1292,10 +1292,10 @@ def generate_tile_based_html(config: VisualizationConfig) -> str:
         <button class="search-close" onclick="closeSearch()">&times;</button>
         <h3>Search</h3>
         <select id="search-type">
+            <option value="aiLocation">AI Location</option>
+            <option value="industry">Industry</option>
             <option value="section">Track Section</option>
             <option value="signal">Signal</option>
-            <option value="industry">Industry</option>
-            <option value="aiLocation">AI Location</option>
         </select>
         <input type="text" id="search-input" placeholder="Enter search term..." oninput="performSearch()">
         <div class="search-results" id="search-results"></div>
@@ -1307,9 +1307,9 @@ def generate_tile_based_html(config: VisualizationConfig) -> str:
 
         <h3>Overlays</h3>
         <div class="overlay-toggles">
-            <label><input type="checkbox" id="toggle-signals"> Signals</label>
-            <label><input type="checkbox" id="toggle-industries"> Industries</label>
             <label><input type="checkbox" id="toggle-ai"> AI Locations</label>
+            <label><input type="checkbox" id="toggle-industries"> Industries</label>
+            <label><input type="checkbox" id="toggle-signals"> Signals</label>
             <label><input type="checkbox" id="toggle-tiles"> Tile Boundaries</label>
         </div>
 
@@ -1477,8 +1477,12 @@ window.COLORS = {{
             // Render tracks
             for (const section of data.sections) {{
                 const isIndustry = MapApp.industrySectionIds.has(`${{regionId}}_${{section.id}}`);
+                const trackColor = section.is_switch ? COLORS.switch : COLORS.track;
                 const color = section.is_switch ? COLORS.switch :
                               (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : COLORS.track;
+
+                // Use LayerGroup to collect all polylines for this section (like geographic mode)
+                const sectionGroup = L.layerGroup();
 
                 for (const path of section.paths) {{
                     // In tile-based mode, coordinates are [x, y] (stored as [lat, lon] in data)
@@ -1489,22 +1493,29 @@ window.COLORS = {{
                         color: color,
                         weight: 5,
                         opacity: 0.8
-                    }}).addTo(layers.tracks);
+                    }});
 
-                    polyline.on('click', (e) => handleTrackClick(e, section, regionId, polyline));
-                    polyline.on('mouseover', () => polyline.setStyle({{ color: COLORS.trackHover }}));
+                    polyline.on('click', (e) => handleTrackClick(e, section, regionId, sectionGroup));
+                    polyline.on('mouseover', () => {{
+                        if (!MapApp.selectedSections.has(section.id)) {{
+                            sectionGroup.eachLayer(layer => layer.setStyle({{ color: COLORS.trackHover }}));
+                        }}
+                    }});
                     polyline.on('mouseout', () => {{
                         if (!MapApp.selectedSections.has(section.id)) {{
                             const c = section.is_switch ? COLORS.switch :
                                       (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : COLORS.track;
-                            polyline.setStyle({{ color: c }});
+                            sectionGroup.eachLayer(layer => layer.setStyle({{ color: c }}));
                         }}
                     }});
 
                     polyline.bindTooltip(`Section ${{section.id}}<br>${{section.length_m.toFixed(1)}}m`, {{ sticky: true }});
 
-                    MapApp.sectionIndex.set(section.id, {{ regionId, polyline, metadata: section, isIndustry }});
+                    sectionGroup.addLayer(polyline);
                 }}
+
+                sectionGroup.addTo(layers.tracks);
+                MapApp.sectionIndex.set(section.id, {{ regionId, polyline: sectionGroup, metadata: section, isIndustry, originalColor: trackColor }});
             }}
 
             // Render signals
@@ -1647,15 +1658,16 @@ window.COLORS = {{
         return marker;
     }}
 
-    function handleTrackClick(e, section, regionId, polyline) {{
+    function handleTrackClick(e, section, regionId, sectionGroup) {{
         if (e.originalEvent.ctrlKey) {{
             // Toggle selection
             if (MapApp.selectedSections.has(section.id)) {{
                 MapApp.selectedSections.delete(section.id);
-                polyline.setStyle({{ color: section.is_switch ? COLORS.switch : COLORS.track }});
+                const color = section.is_switch ? COLORS.switch : COLORS.track;
+                sectionGroup.eachLayer(layer => layer.setStyle({{ color: color }}));
             }} else {{
-                MapApp.selectedSections.set(section.id, {{ polyline, metadata: section }});
-                polyline.setStyle({{ color: COLORS.trackSelected }});
+                MapApp.selectedSections.set(section.id, {{ polyline: sectionGroup, metadata: section }});
+                sectionGroup.eachLayer(layer => layer.setStyle({{ color: COLORS.trackSelected }}));
             }}
             updateSelectionInfo();
         }} else {{
@@ -1739,11 +1751,9 @@ window.COLORS = {{
         // Update track colors for industry overlay
         if (overlay === 'industries') {{
             MapApp.sectionIndex.forEach((s) => {{
-                if (s.isIndustry) {{
-                    s.polyline.setStyle({{
-                        color: enabled ? COLORS.industryTrack :
-                               (s.metadata.is_switch ? COLORS.switch : COLORS.track)
-                    }});
+                if (s.isIndustry && !MapApp.selectedSections.has(s.metadata.id)) {{
+                    const color = enabled ? COLORS.industryTrack : s.originalColor;
+                    s.polyline.eachLayer(layer => layer.setStyle({{ color: color }}));
                 }}
             }});
         }}
@@ -1875,7 +1885,13 @@ window.COLORS = {{
             const data = MapApp.sectionIndex.get(id);
             if (data) {{
                 MapApp.map.fitBounds(data.polyline.getBounds(), {{padding: [50, 50]}});
-                data.polyline.openTooltip();
+                // Open tooltip on first layer in the group
+                data.polyline.eachLayer(layer => {{
+                    if (layer.openTooltip) {{
+                        layer.openTooltip();
+                        return false; // Stop after first
+                    }}
+                }});
             }}
         }} else if (type === 'signal') {{
             const data = MapApp.signalIndex.get(id);

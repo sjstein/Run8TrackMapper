@@ -32,6 +32,8 @@ from typing import List, Optional, Tuple
 TRACK_DB_FILENAME = "TrackDatabase.r8"
 SIGNAL_DB_FILENAME = "SignalHeadDatabase.r8"
 AI_LOCATIONS_FILENAME = "AiSpecialLocations.r8"
+INDUSTRY_DB_FILENAME = "Config.ind"
+TERRAIN_DIR_NAME = "TerrainTiles"
 
 
 @dataclass
@@ -85,11 +87,21 @@ class VisualizationConfig:
     """Complete configuration for a multi-region visualization"""
     name: str
     tile_corrections: Path
-    industry_db: Path
+    region_dir: Path
     output_dir: Path
     regions: List[RegionConfig] = field(default_factory=list)
     colors: ColorConfig = field(default_factory=ColorConfig)
     tile_based: Optional[TileBasedConfig] = None
+
+    @property
+    def industry_db(self) -> Path:
+        """Path to industry database file (derived from region_dir)"""
+        return self.region_dir / INDUSTRY_DB_FILENAME
+
+    @property
+    def terrain_tile_dir(self) -> Path:
+        """Path to terrain tiles directory (derived from region_dir)"""
+        return self.region_dir / TERRAIN_DIR_NAME
 
 
 class ConfigError(Exception):
@@ -132,9 +144,9 @@ def parse_config(config_path: str) -> VisualizationConfig:
         if not tile_corrections_str:
             errors.append("[visualization] tile_corrections is required")
 
-        industry_db_str = viz.get('industry_db', '').strip()
-        if not industry_db_str:
-            errors.append("[visualization] industry_db is required")
+        region_dir_str = viz.get('region_dir', '').strip()
+        if not region_dir_str:
+            errors.append("[visualization] region_dir is required")
 
     # Parse [output] section
     if 'output' not in parser:
@@ -238,7 +250,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
     config = VisualizationConfig(
         name=name,
         tile_corrections=Path(tile_corrections_str),
-        industry_db=Path(industry_db_str),
+        region_dir=Path(region_dir_str),
         output_dir=Path(output_dir_str),
         regions=regions,
         colors=colors,
@@ -251,8 +263,14 @@ def parse_config(config_path: str) -> VisualizationConfig:
     if not config.tile_corrections.exists():
         file_errors.append(f"[visualization] tile_corrections file not found: {config.tile_corrections}")
 
-    if not config.industry_db.exists():
-        file_errors.append(f"[visualization] industry_db file not found: {config.industry_db}")
+    if not config.region_dir.exists():
+        file_errors.append(f"[visualization] region_dir not found: {config.region_dir}")
+    else:
+        # Validate derived paths
+        if not config.industry_db.exists():
+            file_errors.append(f"[visualization] industry_db not found: {config.industry_db} (derived from region_dir)")
+        if not config.terrain_tile_dir.exists():
+            file_errors.append(f"[visualization] terrain tile directory not found: {config.terrain_tile_dir} (derived from region_dir)")
 
     for region in config.regions:
         if not region.directory.exists():
@@ -291,9 +309,10 @@ name = Southern California
 # Path to tile corrections CSV (global for all regions)
 tile_corrections = tile_corrections_socal.csv
 
-# Path to industry database (global, filtered by route_prefix per region)
-# Always named Config.ind, located in the Regions directory
-industry_db = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\Regions\\SouthernCA\\Config.ind
+# Path to the region directory containing Config.ind and TerrainTiles
+# The industry database (Config.ind) and terrain tiles directory (TerrainTiles)
+# are automatically derived from this path
+region_dir = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\Regions\\SouthernCA
 
 [region.mojave]
 # Human-readable name for this region
@@ -360,7 +379,9 @@ if __name__ == '__main__':
             print(f"Configuration loaded successfully!")
             print(f"  Name: {config.name}")
             print(f"  Tile corrections: {config.tile_corrections}")
-            print(f"  Industry DB: {config.industry_db}")
+            print(f"  Region dir: {config.region_dir}")
+            print(f"  Industry DB (derived): {config.industry_db}")
+            print(f"  Terrain tiles (derived): {config.terrain_tile_dir}")
             print(f"  Output directory: {config.output_dir}")
             print(f"  Regions: {len(config.regions)}")
             for region in config.regions:

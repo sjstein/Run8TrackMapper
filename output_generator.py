@@ -240,6 +240,7 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
             region_config,
             config.industry_db,
             tile_corrections,
+            default_tile_dir=str(config.terrain_tile_dir),
             tile_dir=tile_dir,  # None lets each region use its configured terrain_tile_dir
             tile_based_config=tile_based_config
         )
