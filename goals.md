@@ -1,57 +1,30 @@
 # Goals and Feedback
 
-# I've noticed a bug in some of the track section renderings coming from the penn region
-(C:\Run8Studios\Run8 Train Simulator V3\Content\V3Routes\NS_South_Fork_Secondary\TrackDatabase.r8)
+## COMPLETED: Fix for 2-Node Track Section Rendering Bug
 
-For example, track section 1022 is rendering as a 1022.9m section, but the arc_len value shows 14m. 
-Furthermore, the tangent value shows Node 0 heading Eastwards, yet the rendering has the section going almost North South.
+Fixed the bug where track sections with 2 nodes (one with `num_segments=1`, one with `num_segments=0`) were rendering incorrectly due to garbage data in the `end_position` field.
 
-The coordinates for Node0 are odd in that they are not directly reciprocal of each other. 
+### Changes Made in `region_extractor.py`:
 
-======================================================================
-TrackSection[956] (index=1022)
-======================================================================
-Number of nodes:         2
-Section type:            Regular section
-Spans multiple tiles:    No
-Track type:              25
-Switch position:         0
-Retarder speed (mph):    -1.0
-Is occupied:             False
-Is CTC switch:           False
-Next sections:           1021, 1023
+1. **Added `partner_end_position` detection** in `extract_sections()`:
+   - For 2-node sections where one node has `num_segments=1` and the other has `num_segments=0`
+   - Uses the position of the 0-segment node as the effective end position
 
-Nodes:
-----------------------------------------------------------------------
+2. **Updated `find_end_tile()` function**:
+   - Added optional `end_position` parameter to override `node.end_position`
+   - Allows passing the effective end position for accurate tile matching
 
-Node 0:
-  Belongs to track:      1022
-  Tile index:            (5, 2)
-  Num Segments:          1
-  Is Selected:           False
-  Position:              (623.24, 647.07, -4.03)
-  End position:          (636.85, 646.87, -1026.86)
-  Tangent (deg):         (-0.82, 103.43, 0.00)
-  Is switch node:        False
-  Is reverse path:       False
-  Curve deg:             0.00
-  Curve sign:            1
-  Radius (m):            0.00
-  Arc length (m):        14.00
+3. **Updated all `node.end_position` usages** to use `effective_end_position`:
+   - Tile-based coordinate conversion
+   - Geographic coordinate conversion
+   - Curve interpolation
+   - Straight segment length calculation
 
-Node 1:
-  Belongs to track:      1022
-  Tile index:            (5, 2)
-  Num Segments:          0
-  Is Selected:           False
-  Position:              (636.85, 646.87, -0.78)
-  End position:          (623.24, 647.07, -4.03)
-  Tangent (deg):         (0.82, 283.43, 0.00)
-  Is switch node:        False
-  Is reverse path:       False
-  Curve deg:             0.00
-  Curve sign:            0
-  Radius (m):            0.00
-  Arc length (m):        14.00
+4. **Fixed AI spawn location extraction**:
+   - Added same (1,0) pattern detection for interpolating spawn positions
 
+5. **Fixed industry location extraction**:
+   - Added same (1,0) pattern detection for calculating midpoint positions
 
+### Testing:
+Run `python output_generator.py config-file.ini` with a config that includes the NS_South_Fork_Secondary region. Section 1022 should now show ~14m length instead of ~1022m.

@@ -609,21 +609,30 @@ def select_nodes_to_plot(section: TrackSection) -> List[TrackNode]:
     return forward_nodes
 
 
-def find_end_tile(node: TrackNode, section: TrackSection) -> Tuple[int, int]:
+def find_end_tile(node: TrackNode, section: TrackSection,
+                  end_position: Tuple[float, float, float] = None) -> Tuple[int, int]:
     """Find the tile that contains the end position of a node
 
     For cross-tile sections, the end position may be on a different tile.
     We find this by matching the end position with another node's start position.
+
+    Args:
+        node: The node to find the end tile for
+        section: The track section containing the node
+        end_position: Optional override for the end position to match (uses node.end_position if None)
     """
     end_tile = node.tile_index  # Default to same tile
+
+    # Use provided end_position or fall back to node's end_position
+    end_pos = end_position if end_position is not None else node.end_position
 
     for other_node in section.nodes:
         if other_node is node:
             continue
         # Check if other node's start position matches this node's end position
-        if (abs(other_node.position[0] - node.end_position[0]) < 0.5 and
-            abs(other_node.position[1] - node.end_position[1]) < 0.5 and
-            abs(other_node.position[2] - node.end_position[2]) < 0.5):
+        if (abs(other_node.position[0] - end_pos[0]) < 0.5 and
+            abs(other_node.position[1] - end_pos[1]) < 0.5 and
+            abs(other_node.position[2] - end_pos[2]) < 0.5):
             end_tile = other_node.tile_index
             break
 
@@ -650,16 +659,39 @@ def extract_sections(db: TrackDatabase,
         # Select which nodes to plot
         nodes_to_plot = select_nodes_to_plot(section)
 
+        # For 2-node sections with num_segments pattern (1, 0), find partner positions
+        # When one node has num_segments=1 and the other has num_segments=0,
+        # use the 0-segment node's position as the end point (the 1-segment node's
+        # end_position may contain garbage data)
+        forward_nodes = [n for n in section.nodes if not n.is_reverse_path]
+        partner_end_position = {}  # node -> position to use as end point
+
+        if len(forward_nodes) == 2 and not is_switch(section):
+            n0_seg = forward_nodes[0].num_segments
+            n1_seg = forward_nodes[1].num_segments
+
+            # One has num_segments=1, one has 0 - use the 0-segment node's position as end
+            if n0_seg == 1 and n1_seg == 0:
+                partner_end_position[forward_nodes[0]] = forward_nodes[1].position
+            elif n1_seg == 1 and n0_seg == 0:
+                partner_end_position[forward_nodes[1]] = forward_nodes[0].position
+
         all_paths = []  # List of paths, one per node
         total_length_m = 0.0
 
         for node in nodes_to_plot:
             start_tile = node.tile_index
 
+            # Determine end position - use partner's position if available (num_segments=1 case)
+            if node in partner_end_position:
+                effective_end_position = partner_end_position[node]
+            else:
+                effective_end_position = node.end_position
+
             if use_tile_coords:
                 # Tile-based coordinate mode
                 # Find end tile for cross-tile sections
-                end_tile = find_end_tile(node, section)
+                end_tile = find_end_tile(node, section, effective_end_position)
 
                 # Convert to world tile coordinates
                 start_x, start_y = convert_run8_to_tile_coords(
@@ -670,7 +702,7 @@ def extract_sections(db: TrackDatabase,
                     tile_based_config.tile_height
                 )
                 end_x, end_y = convert_run8_to_tile_coords(
-                    node.end_position[0], node.end_position[2],
+                    effective_end_position[0], effective_end_position[2],
                     end_tile,
                     tile_based_config.home_tile,
                     tile_based_config.tile_width,
@@ -683,9 +715,9 @@ def extract_sections(db: TrackDatabase,
                 if is_curved:
                     # For cross-tile curves, transform end position to start tile's
                     # extended coordinate space before interpolating
-                    end_pos_x = node.end_position[0]
-                    end_pos_y = node.end_position[1]
-                    end_pos_z = node.end_position[2]
+                    end_pos_x = effective_end_position[0]
+                    end_pos_y = effective_end_position[1]
+                    end_pos_z = effective_end_position[2]
 
                     if end_tile != start_tile:
                         # Adjust end position to be in start tile's extended coordinates
@@ -747,9 +779,9 @@ def extract_sections(db: TrackDatabase,
                     # Straight segment
                     path_points = [(start_x, start_y), (end_x, end_y)]
                     # Calculate straight-line distance
-                    dx = node.end_position[0] - node.position[0]
-                    dy = node.end_position[1] - node.position[1]
-                    dz = node.end_position[2] - node.position[2]
+                    dx = effective_end_position[0] - node.position[0]
+                    dy = effective_end_position[1] - node.position[1]
+                    dz = effective_end_position[2] - node.position[2]
                     total_length_m += math.sqrt(dx*dx + dy*dy + dz*dz)
 
                 if len(path_points) >= 2:
@@ -767,7 +799,7 @@ def extract_sections(db: TrackDatabase,
                     continue
 
                 # Find end tile (may be different for cross-tile sections)
-                end_tile = find_end_tile(node, section)
+                end_tile = find_end_tile(node, section, effective_end_position)
                 if end_tile not in tile_geo_bounds:
                     end_tile = start_tile  # Fall back to start tile
                     if end_tile not in tile_geo_bounds:
@@ -778,7 +810,7 @@ def extract_sections(db: TrackDatabase,
                     node.position[0], node.position[2], tile_geo_bounds[start_tile]
                 )
                 end_lat, end_lon = convert_run8_to_latlon(
-                    node.end_position[0], node.end_position[2], tile_geo_bounds[end_tile]
+                    effective_end_position[0], effective_end_position[2], tile_geo_bounds[end_tile]
                 )
 
                 # Check if curved
@@ -800,9 +832,9 @@ def extract_sections(db: TrackDatabase,
                     # Straight segment
                     path_points = [(start_lat, start_lon), (end_lat, end_lon)]
                     # Calculate straight-line distance
-                    dx = node.end_position[0] - node.position[0]
-                    dy = node.end_position[1] - node.position[1]
-                    dz = node.end_position[2] - node.position[2]
+                    dx = effective_end_position[0] - node.position[0]
+                    dy = effective_end_position[1] - node.position[1]
+                    dz = effective_end_position[2] - node.position[2]
                     total_length_m += math.sqrt(dx*dx + dy*dy + dz*dz)
 
                 if len(path_points) >= 2:
@@ -952,8 +984,23 @@ def extract_ai_locations(ai_db_path: str,
             start_node = section.nodes[0]
             end_node = section.nodes[-1] if not section.nodes[-1].is_reverse_path else section.nodes[0]
 
-            x = start_node.position[0] + ratio * (end_node.end_position[0] - start_node.position[0])
-            z = start_node.position[2] + ratio * (end_node.end_position[2] - start_node.position[2])
+            # Determine effective end position for interpolation
+            # For 2-node sections with num_segments pattern (1,0), use the 0-segment node's position
+            forward_nodes = [n for n in section.nodes if not n.is_reverse_path]
+            if len(forward_nodes) == 2:
+                n0_seg = forward_nodes[0].num_segments
+                n1_seg = forward_nodes[1].num_segments
+                if n0_seg == 1 and n1_seg == 0:
+                    end_pos = forward_nodes[1].position
+                elif n1_seg == 1 and n0_seg == 0:
+                    end_pos = forward_nodes[0].position
+                else:
+                    end_pos = end_node.end_position
+            else:
+                end_pos = end_node.end_position
+
+            x = start_node.position[0] + ratio * (end_pos[0] - start_node.position[0])
+            z = start_node.position[2] + ratio * (end_pos[2] - start_node.position[2])
 
             if use_tile_coords:
                 lat, lon = convert_run8_to_tile_coords(
@@ -1043,9 +1090,24 @@ def extract_industries(industry_db_path: str,
                 continue
             bounds = tile_geo_bounds[tile]
 
+        # Determine effective end position for midpoint calculation
+        # For 2-node sections with num_segments pattern (1,0), use the 0-segment node's position
+        forward_nodes = [n for n in section.nodes if not n.is_reverse_path]
+        if len(forward_nodes) == 2:
+            n0_seg = forward_nodes[0].num_segments
+            n1_seg = forward_nodes[1].num_segments
+            if n0_seg == 1 and n1_seg == 0:
+                effective_end = forward_nodes[1].position
+            elif n1_seg == 1 and n0_seg == 0:
+                effective_end = forward_nodes[0].position
+            else:
+                effective_end = node.end_position
+        else:
+            effective_end = node.end_position
+
         # Use midpoint of first node
-        x = (node.position[0] + node.end_position[0]) / 2
-        z = (node.position[2] + node.end_position[2]) / 2
+        x = (node.position[0] + effective_end[0]) / 2
+        z = (node.position[2] + effective_end[2]) / 2
 
         if use_tile_coords:
             lat, lon = convert_run8_to_tile_coords(
