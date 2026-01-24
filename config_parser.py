@@ -68,6 +68,7 @@ class RegionConfig:
     directory: Path
     enabled_by_default: bool = False
     terrain_tile_dir: Optional[Path] = None  # Path to terrain tiles (.tr4 files)
+    track_color: Optional[str] = None  # Per-region track color (hex), falls back to global default
 
     @property
     def track_database(self) -> Path:
@@ -92,6 +93,7 @@ class VisualizationConfig:
     regions: List[RegionConfig] = field(default_factory=list)
     colors: ColorConfig = field(default_factory=ColorConfig)
     tile_based: Optional[TileBasedConfig] = None
+    initial_center: Optional[Tuple[float, float]] = None  # (lat, lon) for initial map center
 
     @property
     def industry_db(self) -> Path:
@@ -148,6 +150,16 @@ def parse_config(config_path: str) -> VisualizationConfig:
         if not region_dir_str:
             errors.append("[visualization] region_dir is required")
 
+        # Optional initial_center (format: "lat,lon" e.g., "34.9,-118.0")
+        initial_center_str = viz.get('initial_center', '').strip()
+        initial_center = None
+        if initial_center_str:
+            try:
+                parts = initial_center_str.split(',')
+                initial_center = (float(parts[0].strip()), float(parts[1].strip()))
+            except (ValueError, IndexError):
+                errors.append(f"[visualization] initial_center must be in format 'lat,lon' (e.g., '34.9,-118.0')")
+
     # Parse [output] section
     if 'output' not in parser:
         errors.append("[output] section is required")
@@ -192,6 +204,10 @@ def parse_config(config_path: str) -> VisualizationConfig:
         terrain_tile_dir_str = region.get('terrain_tile_dir', '').strip()
         terrain_tile_dir = Path(terrain_tile_dir_str) if terrain_tile_dir_str else None
 
+        # Optional per-region track color
+        track_color_str = region.get('track_color', '').strip()
+        track_color = track_color_str if track_color_str else None
+
         if display_name and directory_str:
             regions.append(RegionConfig(
                 id=region_id,
@@ -199,7 +215,8 @@ def parse_config(config_path: str) -> VisualizationConfig:
                 route_prefix=route_prefix,
                 directory=Path(directory_str),
                 enabled_by_default=enabled_by_default,
-                terrain_tile_dir=terrain_tile_dir
+                terrain_tile_dir=terrain_tile_dir,
+                track_color=track_color
             ))
 
     # If we have basic parsing errors, raise now
@@ -254,7 +271,8 @@ def parse_config(config_path: str) -> VisualizationConfig:
         output_dir=Path(output_dir_str),
         regions=regions,
         colors=colors,
-        tile_based=tile_based
+        tile_based=tile_based,
+        initial_center=initial_center
     )
 
     # Validate that all files exist
@@ -314,6 +332,10 @@ tile_corrections = tile_corrections_socal.csv
 # are automatically derived from this path
 region_dir = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\Regions\\SouthernCA
 
+# (Optional) Initial map center as lat,lon (e.g., 34.9,-118.0)
+# If not specified, uses a default center
+# initial_center = 34.9,-118.0
+
 [region.mojave]
 # Human-readable name for this region
 display_name = Mojave Subdivision
@@ -331,12 +353,18 @@ terrain_tile_dir = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\
 # Whether this region is enabled by default when the map loads
 enabled_by_default = true
 
+# (Optional) Per-region track color - overrides the global track color
+# track_color = #0066cc
+
 [region.barstow]
 display_name = Barstow Subdivision
 route_prefix = 2
 directory = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\BNSF_BarstowSub
 # terrain_tile_dir can be omitted to use the default location
 enabled_by_default = false
+
+# (Optional) Per-region track color - overrides the global track color
+# track_color = #2266ff
 
 # Add more [region.*] sections as needed...
 

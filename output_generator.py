@@ -115,6 +115,10 @@ def generate_manifest(config: VisualizationConfig,
             "enabled_by_default": region_config.enabled_by_default,
         }
 
+        # Add per-region track color if specified
+        if region_config.track_color:
+            region_entry["track_color"] = region_config.track_color
+
         # Add bounds if available
         if region.bounds:
             region_entry["bounds"] = [

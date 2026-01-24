@@ -36,18 +36,23 @@ output/<name>/
 name = Southern California
 tile_corrections = tile_corrections.csv
 industry_db = C:\Run8Studios\...\Regions\SouthernCA\Config.ind
+# Optional: initial map center as lat,lon
+initial_center = 34.9,-118.0
 
 [region.mojave]
 display_name = Mojave Subdivision
 route_prefix = 100
 directory = C:\Run8Studios\...\BNSF_MojaveSub
 enabled_by_default = true
+# Optional: per-region track color (overrides global default)
+track_color = #0066cc
 
 [region.barstow]
 display_name = Barstow Subdivision
 route_prefix = 200
 directory = C:\Run8Studios\...\BNSF_BarstowSub
 enabled_by_default = false
+track_color = #2266ff
 
 [colors]
 # All colors are optional - defaults shown

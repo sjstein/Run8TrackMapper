@@ -558,13 +558,17 @@ def generate_javascript() -> str:
                 tileBoundaries: L.layerGroup()
             };
 
+            // Get region-specific track color (from manifest) or fall back to global default
+            const regionManifest = MapApp.manifest.regions.find(r => r.id === regionId);
+            const regionTrackColor = regionManifest?.track_color || COLORS.track;
+
             // Render sections
             for (const section of data.sections) {
                 // Each section may have multiple paths (especially switches)
                 const sectionGroup = L.featureGroup();
 
                 for (const path of section.paths) {
-                    const trackColor = section.is_switch ? COLORS.switch : COLORS.track;
+                    const trackColor = section.is_switch ? COLORS.switch : regionTrackColor;
                     const polyline = L.polyline(path, {
                         color: trackColor,
                         weight: 5,
@@ -632,7 +636,7 @@ def generate_javascript() -> str:
                 }
 
                 layers.sections.addLayer(sectionGroup);
-                const originalColor = section.is_switch ? COLORS.switch : COLORS.track;
+                const originalColor = section.is_switch ? COLORS.switch : regionTrackColor;
                 MapApp.sectionIndex.set(section.id, {region_id: regionId, polyline: sectionGroup, metadata: section, originalColor: originalColor});
             }
 
@@ -1474,12 +1478,16 @@ window.COLORS = {{
                 }}
             }}
 
+            // Get region-specific track color (from manifest) or fall back to global default
+            const regionManifest = MapApp.manifest.regions.find(r => r.id === regionId);
+            const regionTrackColor = regionManifest?.track_color || COLORS.track;
+
             // Render tracks
             for (const section of data.sections) {{
                 const isIndustry = MapApp.industrySectionIds.has(`${{regionId}}_${{section.id}}`);
-                const trackColor = section.is_switch ? COLORS.switch : COLORS.track;
+                const trackColor = section.is_switch ? COLORS.switch : regionTrackColor;
                 const color = section.is_switch ? COLORS.switch :
-                              (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : COLORS.track;
+                              (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : regionTrackColor;
 
                 // Use LayerGroup to collect all polylines for this section (like geographic mode)
                 const sectionGroup = L.layerGroup();
@@ -1504,7 +1512,7 @@ window.COLORS = {{
                     polyline.on('mouseout', () => {{
                         if (!MapApp.selectedSections.has(section.id)) {{
                             const c = section.is_switch ? COLORS.switch :
-                                      (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : COLORS.track;
+                                      (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : regionTrackColor;
                             sectionGroup.eachLayer(layer => layer.setStyle({{ color: c }}));
                         }}
                     }});
@@ -1940,9 +1948,11 @@ def generate_html(config: VisualizationConfig, output_path: Path, tile_based: bo
         return
 
     # Geographic mode - use Folium as before
-    # Calculate initial center from first region bounds in manifest
-    # For now, use default center
-    center = DEFAULT_CENTER
+    # Use initial_center from config if specified, otherwise use default
+    if config.initial_center:
+        center = list(config.initial_center)
+    else:
+        center = DEFAULT_CENTER
     zoom = DEFAULT_ZOOM
 
     # Create Folium map with canvas renderer and no default tiles
