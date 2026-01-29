@@ -1490,7 +1490,7 @@ window.COLORS = {{
                               (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : regionTrackColor;
 
                 // Use LayerGroup to collect all polylines for this section (like geographic mode)
-                const sectionGroup = L.layerGroup();
+                const sectionGroup = L.featureGroup();
 
                 for (const path of section.paths) {{
                     // In tile-based mode, coordinates are [x, y] (stored as [lat, lon] in data)
