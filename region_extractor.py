@@ -1099,26 +1099,49 @@ def extract_industries(industry_db_path: str,
             n1_seg = forward_nodes[1].num_segments
             if n0_seg == 1 and n1_seg == 0:
                 effective_end = forward_nodes[1].position
+                end_tile = forward_nodes[1].tile_index
             elif n1_seg == 1 and n0_seg == 0:
                 effective_end = forward_nodes[0].position
+                end_tile = forward_nodes[0].tile_index
             else:
                 effective_end = node.end_position
+                end_tile = find_end_tile(node, section, effective_end)
         else:
             effective_end = node.end_position
+            end_tile = find_end_tile(node, section, effective_end)
 
-        # Use midpoint of first node
-        x = (node.position[0] + effective_end[0]) / 2
-        z = (node.position[2] + effective_end[2]) / 2
-
+        # Convert start and end to world coordinates, then calculate midpoint
+        # This handles cross-tile sections correctly
         if use_tile_coords:
-            lat, lon = convert_run8_to_tile_coords(
-                x, z, tile,
+            start_x, start_y = convert_run8_to_tile_coords(
+                node.position[0], node.position[2], tile,
                 tile_based_config.home_tile,
                 tile_based_config.tile_width,
                 tile_based_config.tile_height
             )
+            end_x, end_y = convert_run8_to_tile_coords(
+                effective_end[0], effective_end[2], end_tile,
+                tile_based_config.home_tile,
+                tile_based_config.tile_width,
+                tile_based_config.tile_height
+            )
+            # Midpoint in world coordinates
+            lat = (start_x + end_x) / 2
+            lon = (start_y + end_y) / 2
         else:
-            lat, lon = convert_run8_to_latlon(x, z, bounds)
+            # For geographic mode, also handle cross-tile properly
+            if end_tile not in tile_geo_bounds:
+                end_tile = tile  # Fall back to start tile
+            start_lat, start_lon = convert_run8_to_latlon(
+                node.position[0], node.position[2], bounds
+            )
+            end_bounds = tile_geo_bounds.get(end_tile, bounds)
+            end_lat, end_lon = convert_run8_to_latlon(
+                effective_end[0], effective_end[2], end_bounds
+            )
+            # Midpoint in geographic coordinates
+            lat = (start_lat + end_lat) / 2
+            lon = (start_lon + end_lon) / 2
 
         industries.append(IndustryData(
             tag=industry.trk_sym,

@@ -2169,7 +2169,7 @@ window.COLORS = {{
                         type: 'industry',
                         id: item.data.tag,
                         label: `${{item.data.tag}} - ${{item.data.name}}`,
-                        region: item.regionId,
+                        region: item.region_id,
                         data: item
                     }});
                 }}
@@ -2181,7 +2181,7 @@ window.COLORS = {{
                         type: 'aiLocation',
                         id: item.data.id,
                         label: `${{item.data.name}} (${{item.data.type_name}})`,
-                        region: item.regionId,
+                        region: item.region_id,
                         data: item
                     }});
                 }}
@@ -2229,14 +2229,14 @@ window.COLORS = {{
                 data.marker.openTooltip();
             }}
         }} else if (type === 'industry') {{
-            const item = MapApp.industryIndex.find(i => i.data.tag === id && i.regionId === regionId);
+            const item = MapApp.industryIndex.find(i => i.data.tag === id && i.region_id === regionId);
             if (item) {{
-                MapApp.map.setView([item.data.lon, item.data.lat], 2);
+                MapApp.map.setView([item.data.lon, item.data.lat], 16);
             }}
         }} else if (type === 'aiLocation') {{
-            const item = MapApp.aiLocationIndex.find(i => i.data.id === id && i.regionId === regionId);
+            const item = MapApp.aiLocationIndex.find(i => i.data.id === id && i.region_id === regionId);
             if (item) {{
-                MapApp.map.setView([item.data.lon, item.data.lat], 2);
+                MapApp.map.setView([item.data.lon, item.data.lat], 16);
             }}
         }}
     }};
