@@ -85,6 +85,7 @@ class IndustryData:
     """Extracted industry data ready for JSON serialization"""
     tag: str
     name: str
+    local_name: str  # Local train symbol that services this industry
     lat: float
     lon: float
     track_sections: List[int] = field(default_factory=list)  # List of section IDs this industry occupies
@@ -1122,6 +1123,7 @@ def extract_industries(industry_db_path: str,
         industries.append(IndustryData(
             tag=industry.trk_sym,
             name=industry.name,
+            local_name=industry.local_name,
             lat=lat,
             lon=lon,
             track_sections=track_section_ids

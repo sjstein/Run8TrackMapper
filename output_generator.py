@@ -66,6 +66,7 @@ def industry_to_dict(ind: IndustryData) -> dict:
     return {
         "tag": ind.tag,
         "name": ind.name,
+        "local_name": ind.local_name,
         "lat": ind.lat,
         "lon": ind.lon,
         "track_sections": ind.track_sections

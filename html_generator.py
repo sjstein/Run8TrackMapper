@@ -58,6 +58,11 @@ def generate_javascript() -> str:
         aiLocationIndex: [],       // [{region_id, data}]
         industrySectionIds: new Set(),  // Set of "regionId_sectionId" keys for industry tracks
 
+        // Local symbol filtering state
+        localSymbolIndex: new Set(),    // Set of unique local symbols across all loaded regions
+        currentLocalFilter: null,       // Currently selected local symbol (null = ALL)
+        industryMarkers: new Map(),     // Map of "regionId_tag" -> {marker, data, regionId} for highlighting
+
         // Selection state
         selectedSections: new Map(),  // section_id -> polyline
         currentSelectionRegion: null,
@@ -260,6 +265,10 @@ def generate_javascript() -> str:
             <div id="region-list"></div>
             <h4>Overlays</h4>
             <div id="overlay-list"></div>
+            <h4>Local Filter</h4>
+            <select id="local-symbol-select" style="width:100%;padding:6px;margin-bottom:10px;border:1px solid #ddd;border-radius:4px;">
+                <option value="">-- All Industries --</option>
+            </select>
             <button class="search-btn" onclick="MapApp.openSearch()">Search</button>
             <div id="selection-info">
                 <strong>Selected:</strong> <span id="selection-count">0</span> sections<br>
@@ -328,6 +337,12 @@ def generate_javascript() -> str:
             const checkbox = item.querySelector('input');
             checkbox.addEventListener('change', () => toggleOverlay(overlay.id, checkbox.checked));
         }
+
+        // Setup local symbol filter dropdown
+        document.getElementById('local-symbol-select').addEventListener('change', (e) => {
+            MapApp.currentLocalFilter = e.target.value || null;
+            applyLocalSymbolHighlighting();
+        });
     }
 
     function createSearchDialog() {
@@ -696,18 +711,16 @@ def generate_javascript() -> str:
             }
 
             // Render industries and track industry section IDs
-            for (const industry of data.industries) {
+            for (let i = 0; i < data.industries.length; i++) {
+                const industry = data.industries[i];
                 const marker = L.marker([industry.lat, industry.lon], {
-                    icon: L.divIcon({
-                        className: 'industry-marker',
-                        html: `<div style="color:${COLORS.industryTrack};font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;">${industry.tag}</div>`,
-                        iconAnchor: [0, 0]
-                    })
+                    icon: createIndustryIcon(industry.tag, true, false)
                 });
 
                 // Build detailed industry popup
                 let industryPopup = `<b>${industry.name}</b><br>`;
                 industryPopup += `Tag: ${industry.tag}<br>`;
+                industryPopup += `Local: ${industry.local_name || 'N/A'}<br>`;
                 if (industry.track_sections && industry.track_sections.length > 0) {
                     industryPopup += `Track Sections: ${industry.track_sections.join(', ')}`;
                 }
@@ -716,6 +729,19 @@ def generate_javascript() -> str:
                 layers.industries.addLayer(marker);
                 MapApp.industryIndex.push({region_id: regionId, data: industry});
 
+                // Track marker for highlighting - use index to ensure unique keys
+                const compositeKey = `${regionId}_${i}`;
+                MapApp.industryMarkers.set(compositeKey, {
+                    marker: marker,
+                    data: industry,
+                    regionId: regionId
+                });
+
+                // Track unique local symbols for the filter dropdown
+                if (industry.local_name) {
+                    MapApp.localSymbolIndex.add(industry.local_name);
+                }
+
                 // Track which sections are industry tracks
                 if (industry.track_sections) {
                     for (const sectionId of industry.track_sections) {
@@ -723,6 +749,9 @@ def generate_javascript() -> str:
                     }
                 }
             }
+
+            // Update local symbol dropdown after loading industries
+            updateLocalSymbolDropdown();
 
             // Render AI locations
             for (const loc of data.ai_locations) {
@@ -825,8 +854,27 @@ def generate_javascript() -> str:
                 MapApp.signalIndex.delete(signalId);
             }
         }
+
+        // Remove industry markers for this region
+        for (const [compositeKey, entry] of MapApp.industryMarkers) {
+            if (entry.regionId === regionId) {
+                MapApp.industryMarkers.delete(compositeKey);
+            }
+        }
+
         MapApp.industryIndex = MapApp.industryIndex.filter(i => i.region_id !== regionId);
         MapApp.aiLocationIndex = MapApp.aiLocationIndex.filter(i => i.region_id !== regionId);
+
+        // Rebuild local symbol index from remaining industries
+        MapApp.localSymbolIndex.clear();
+        for (const item of MapApp.industryIndex) {
+            if (item.data.local_name) {
+                MapApp.localSymbolIndex.add(item.data.local_name);
+            }
+        }
+
+        // Update dropdown and clear filter if no longer valid
+        updateLocalSymbolDropdown();
 
         // Clear selection if it was in this region
         if (MapApp.currentSelectionRegion === regionId) {
@@ -876,9 +924,14 @@ def generate_javascript() -> str:
             }
         }
 
-        // When toggling industries, recolor industry tracks
+        // When toggling industries, recolor industry tracks and apply local filter highlighting
         if (overlayId === 'industries') {
-            updateIndustryTrackColors(enabled);
+            if (enabled && MapApp.currentLocalFilter) {
+                // Apply local filter highlighting if a filter is active
+                applyLocalSymbolHighlighting();
+            } else {
+                updateIndustryTrackColors(enabled);
+            }
         }
     }
 
@@ -905,6 +958,108 @@ def generate_javascript() -> str:
             }
         }
         return industries;
+    }
+
+    // ========================================
+    // Local Symbol Filtering
+    // ========================================
+    function createIndustryIcon(tag, isHighlighted, filterActive) {
+        let style;
+
+        if (!filterActive) {
+            // No filter active - normal style
+            style = `color:${COLORS.industryTrack};font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;`;
+        } else if (isHighlighted) {
+            // Filter active AND this matches - highlighted style
+            style = `color:#FF4500;font-size:14px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;background:rgba(255,255,0,0.3);padding:2px 4px;border-radius:3px;`;
+        } else {
+            // Filter active but doesn't match - dimmed style
+            style = `color:#888888;font-size:10px;font-weight:normal;white-space:nowrap;text-shadow:none;opacity:0.5;`;
+        }
+
+        return L.divIcon({
+            className: 'industry-marker',
+            html: `<div style="${style}">${tag}</div>`,
+            iconAnchor: [0, 0]
+        });
+    }
+
+    function updateLocalSymbolDropdown() {
+        const select = document.getElementById('local-symbol-select');
+        if (!select) return;
+
+        const currentValue = select.value;
+
+        // Clear existing options except "All"
+        while (select.options.length > 1) {
+            select.remove(1);
+        }
+
+        // Get sorted list of local symbols
+        const symbols = Array.from(MapApp.localSymbolIndex).sort();
+
+        // Add options
+        for (const symbol of symbols) {
+            const option = document.createElement('option');
+            option.value = symbol;
+            option.textContent = symbol;
+            select.appendChild(option);
+        }
+
+        // Restore previous selection if still valid
+        if (currentValue && MapApp.localSymbolIndex.has(currentValue)) {
+            select.value = currentValue;
+        } else if (MapApp.currentLocalFilter && !MapApp.localSymbolIndex.has(MapApp.currentLocalFilter)) {
+            // Filter is no longer valid, reset
+            MapApp.currentLocalFilter = null;
+            select.value = '';
+        }
+    }
+
+    function applyLocalSymbolHighlighting() {
+        const filterSymbol = MapApp.currentLocalFilter;
+        const filterActive = filterSymbol !== null;
+
+        // Update industry markers
+        for (const [compositeKey, entry] of MapApp.industryMarkers) {
+            const { marker, data, regionId } = entry;
+            const isMatch = filterSymbol ? (data.local_name === filterSymbol) : true;
+
+            // Update marker icon based on match status
+            const icon = createIndustryIcon(data.tag, isMatch, filterActive);
+            marker.setIcon(icon);
+        }
+
+        // Update track section colors if industries overlay is enabled
+        if (MapApp.overlayStates.industries) {
+            for (const [sectionId, data] of MapApp.sectionIndex) {
+                const compositeKey = `${data.region_id}_${sectionId}`;
+                if (!MapApp.industrySectionIds.has(compositeKey)) continue;
+                if (MapApp.selectedSections.has(sectionId)) continue;
+
+                // Find if any industry using this section matches the filter
+                const industries = getIndustriesForSection(data.region_id, sectionId);
+                let sectionMatches = false;
+                if (filterSymbol) {
+                    sectionMatches = industries.some(ind => ind.local_name === filterSymbol);
+                } else {
+                    sectionMatches = true;  // No filter = all match
+                }
+
+                let color;
+                if (!filterActive) {
+                    color = COLORS.industryTrack;
+                } else if (sectionMatches) {
+                    color = '#FF4500';  // Orange-red for highlighted
+                } else {
+                    color = '#CCCCCC';  // Gray for non-matching
+                }
+
+                data.polyline.eachLayer(layer => {
+                    if (layer.setStyle) layer.setStyle({ color: color });
+                });
+            }
+        }
     }
 
     // ========================================
@@ -1317,6 +1472,11 @@ def generate_tile_based_html(config: VisualizationConfig) -> str:
             <label><input type="checkbox" id="toggle-tiles"> Tile Boundaries</label>
         </div>
 
+        <h3>Local Filter</h3>
+        <select id="local-symbol-select" style="width:100%;padding:6px;margin-bottom:10px;border:1px solid #ddd;border-radius:4px;">
+            <option value="">-- All Industries --</option>
+        </select>
+
         <div class="selection-info" id="selection-info" style="display:none;">
             <strong>Selection</strong>
             <div id="selection-count">0 sections</div>
@@ -1360,7 +1520,11 @@ window.COLORS = {{
         signalLayers: [],
         industryLayers: [],
         aiLayers: [],
-        tileLayers: []
+        tileLayers: [],
+        // Local symbol filtering state
+        localSymbolIndex: new Set(),
+        currentLocalFilter: null,
+        industryMarkers: new Map()
     }};
 
     // Initialize map with L.CRS.Simple for tile-based coordinates
@@ -1454,6 +1618,12 @@ window.COLORS = {{
         document.getElementById('toggle-industries').onchange = (e) => toggleOverlay('industries', e.target.checked);
         document.getElementById('toggle-ai').onchange = (e) => toggleOverlay('aiLocations', e.target.checked);
         document.getElementById('toggle-tiles').onchange = (e) => toggleOverlay('tileBoundaries', e.target.checked);
+
+        // Local symbol filter dropdown
+        document.getElementById('local-symbol-select').addEventListener('change', (e) => {{
+            MapApp.currentLocalFilter = e.target.value || null;
+            applyLocalSymbolHighlighting();
+        }});
     }}
 
     async function loadRegion(regionId) {{
@@ -1535,25 +1705,36 @@ window.COLORS = {{
             }}
 
             // Render industries
-            for (const ind of data.industries) {{
+            for (let i = 0; i < data.industries.length; i++) {{
+                const ind = data.industries[i];
                 const marker = L.marker([ind.lon, ind.lat], {{  // [y, x]
-                    icon: L.divIcon({{
-                        className: 'industry-marker',
-                        html: `<div style="color:${{COLORS.industryTrack}};font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;">${{ind.tag}}</div>`,
-                        iconAnchor: [0, 0]
-                    }})
+                    icon: createIndustryIcon(ind.tag, true, false)
                 }}).addTo(layers.industries);
 
                 // Build detailed industry popup
                 let industryPopup = `<b>${{ind.name}}</b><br>`;
                 industryPopup += `Tag: ${{ind.tag}}<br>`;
+                industryPopup += `Local: ${{ind.local_name || 'N/A'}}<br>`;
                 if (ind.track_sections && ind.track_sections.length > 0) {{
                     industryPopup += `Track Sections: ${{ind.track_sections.join(', ')}}`;
                 }}
                 marker.bindPopup(industryPopup, {{maxWidth: 300}});
 
                 MapApp.industryLayers.push(marker);
-                MapApp.industryIndex.push({{ regionId, data: ind }});
+                MapApp.industryIndex.push({{ region_id: regionId, data: ind }});
+
+                // Track marker for highlighting - use index to ensure unique keys
+                const compositeKey = `${{regionId}}_${{i}}`;
+                MapApp.industryMarkers.set(compositeKey, {{
+                    marker: marker,
+                    data: ind,
+                    regionId: regionId
+                }});
+
+                // Track unique local symbols for the filter dropdown
+                if (ind.local_name) {{
+                    MapApp.localSymbolIndex.add(ind.local_name);
+                }}
 
                 // Track which sections are industry tracks
                 if (ind.track_sections) {{
@@ -1562,6 +1743,9 @@ window.COLORS = {{
                     }}
                 }}
             }}
+
+            // Update local symbol dropdown after loading industries
+            updateLocalSymbolDropdown();
 
             // Render AI locations
             for (const loc of data.ai_locations) {{
@@ -1724,6 +1908,10 @@ window.COLORS = {{
                 if (MapApp.overlayStates.aiLocations) region.layers.aiLocations.addTo(MapApp.map);
                 if (MapApp.overlayStates.tileBoundaries) region.layers.tiles.addTo(MapApp.map);
                 region.visible = true;
+
+                // Rebuild local symbol index when showing region
+                rebuildLocalSymbolIndex();
+                updateLocalSymbolDropdown();
             }}
         }} else {{
             const region = MapApp.loadedRegions.get(regionId);
@@ -1734,6 +1922,22 @@ window.COLORS = {{
                 MapApp.map.removeLayer(region.layers.aiLocations);
                 MapApp.map.removeLayer(region.layers.tiles);
                 region.visible = false;
+
+                // Rebuild local symbol index from visible regions only
+                rebuildLocalSymbolIndex();
+                updateLocalSymbolDropdown();
+            }}
+        }}
+    }}
+
+    function rebuildLocalSymbolIndex() {{
+        MapApp.localSymbolIndex.clear();
+        for (const [regionId, region] of MapApp.loadedRegions) {{
+            if (!region.visible) continue;
+            for (const item of MapApp.industryIndex) {{
+                if (item.region_id === regionId && item.data.local_name) {{
+                    MapApp.localSymbolIndex.add(item.data.local_name);
+                }}
             }}
         }}
     }}
@@ -1758,12 +1962,17 @@ window.COLORS = {{
 
         // Update track colors for industry overlay
         if (overlay === 'industries') {{
-            MapApp.sectionIndex.forEach((s) => {{
-                if (s.isIndustry && !MapApp.selectedSections.has(s.metadata.id)) {{
-                    const color = enabled ? COLORS.industryTrack : s.originalColor;
-                    s.polyline.eachLayer(layer => layer.setStyle({{ color: color }}));
-                }}
-            }});
+            if (enabled && MapApp.currentLocalFilter) {{
+                // Apply local filter highlighting if a filter is active
+                applyLocalSymbolHighlighting();
+            }} else {{
+                MapApp.sectionIndex.forEach((s) => {{
+                    if (s.isIndustry && !MapApp.selectedSections.has(s.metadata.id)) {{
+                        const color = enabled ? COLORS.industryTrack : s.originalColor;
+                        s.polyline.eachLayer(layer => layer.setStyle({{ color: color }}));
+                    }}
+                }});
+            }}
         }}
     }}
 
@@ -1779,6 +1988,117 @@ window.COLORS = {{
 
         if (bounds.length > 0) {{
             MapApp.map.fitBounds(bounds);
+        }}
+    }}
+
+    // Local Symbol Filtering Functions
+    function createIndustryIcon(tag, isHighlighted, filterActive) {{
+        let style;
+
+        if (!filterActive) {{
+            // No filter active - normal style
+            style = `color:${{COLORS.industryTrack}};font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;`;
+        }} else if (isHighlighted) {{
+            // Filter active AND this matches - highlighted style
+            style = `color:#FF4500;font-size:14px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;background:rgba(255,255,0,0.3);padding:2px 4px;border-radius:3px;`;
+        }} else {{
+            // Filter active but doesn't match - dimmed style
+            style = `color:#888888;font-size:10px;font-weight:normal;white-space:nowrap;text-shadow:none;opacity:0.5;`;
+        }}
+
+        return L.divIcon({{
+            className: 'industry-marker',
+            html: `<div style="${{style}}">${{tag}}</div>`,
+            iconAnchor: [0, 0]
+        }});
+    }}
+
+    function updateLocalSymbolDropdown() {{
+        const select = document.getElementById('local-symbol-select');
+        if (!select) return;
+
+        const currentValue = select.value;
+
+        // Clear existing options except "All"
+        while (select.options.length > 1) {{
+            select.remove(1);
+        }}
+
+        // Get sorted list of local symbols
+        const symbols = Array.from(MapApp.localSymbolIndex).sort();
+
+        // Add options
+        for (const symbol of symbols) {{
+            const option = document.createElement('option');
+            option.value = symbol;
+            option.textContent = symbol;
+            select.appendChild(option);
+        }}
+
+        // Restore previous selection if still valid
+        if (currentValue && MapApp.localSymbolIndex.has(currentValue)) {{
+            select.value = currentValue;
+        }} else if (MapApp.currentLocalFilter && !MapApp.localSymbolIndex.has(MapApp.currentLocalFilter)) {{
+            // Filter is no longer valid, reset
+            MapApp.currentLocalFilter = null;
+            select.value = '';
+        }}
+    }}
+
+    function getIndustriesForSection(regionId, sectionId) {{
+        const industries = [];
+        for (const item of MapApp.industryIndex) {{
+            if (item.region_id === regionId &&
+                item.data.track_sections &&
+                item.data.track_sections.includes(sectionId)) {{
+                industries.push(item.data);
+            }}
+        }}
+        return industries;
+    }}
+
+    function applyLocalSymbolHighlighting() {{
+        const filterSymbol = MapApp.currentLocalFilter;
+        const filterActive = filterSymbol !== null;
+
+        // Update industry markers
+        for (const [compositeKey, entry] of MapApp.industryMarkers) {{
+            const {{ marker, data, regionId }} = entry;
+            const isMatch = filterSymbol ? (data.local_name === filterSymbol) : true;
+
+            // Update marker icon based on match status
+            const icon = createIndustryIcon(data.tag, isMatch, filterActive);
+            marker.setIcon(icon);
+        }}
+
+        // Update track section colors if industries overlay is enabled
+        if (MapApp.overlayStates.industries) {{
+            for (const [sectionId, data] of MapApp.sectionIndex) {{
+                if (!data.isIndustry) continue;
+                if (MapApp.selectedSections.has(sectionId)) continue;
+
+                // Find if any industry using this section matches the filter
+                const industries = getIndustriesForSection(data.regionId, sectionId);
+                let sectionMatches = false;
+                if (filterSymbol) {{
+                    sectionMatches = industries.some(ind => ind.local_name === filterSymbol);
+                }} else {{
+                    sectionMatches = true;  // No filter = all match
+                }}
+
+                let color;
+                if (!filterActive) {{
+                    color = COLORS.industryTrack;
+                }} else if (sectionMatches) {{
+                    color = '#FF4500';  // Orange-red for highlighted
+                }} else {{
+                    color = '#CCCCCC';  // Gray for non-matching
+                }}
+
+                data.polyline.eachLayer(layer => {{
+                    if (layer.setStyle) layer.setStyle({{ color: color }});
+                }});
+            }}
         }}
     }}
 
