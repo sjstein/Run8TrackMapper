@@ -30,7 +30,8 @@ window.COLORS = {{
     signalAbsolute: '{colors.signal_absolute}',
     signalIntermediate: '{colors.signal_intermediate}',
     signalBorderSingle: '{colors.signal_border_single}',
-    signalBorderStacked: '{colors.signal_border_stacked}'
+    signalBorderStacked: '{colors.signal_border_stacked}',
+    areaLabel: '{colors.area_label}'
 }};
 </script>'''
 
@@ -272,7 +273,8 @@ def generate_javascript() -> str:
             <button class="search-btn" onclick="MapApp.openSearch()">Search</button>
             <div id="selection-info">
                 <strong>Selected:</strong> <span id="selection-count">0</span> sections<br>
-                <strong>Total Length:</strong> <span id="selection-length">0</span> ft<br>
+                <strong>Accumulated:</strong> <span id="selection-length">0</span> ft<br>
+                <span id="gradient-row" style="display:none"><strong>Avg Grade:</strong> <span id="selection-gradient"></span><br></span>
                 <button onclick="MapApp.clearSelection()" style="margin-top:5px;padding:4px 8px;font-size:12px;">Clear Selection</button>
             </div>
         `;
@@ -620,10 +622,14 @@ def generate_javascript() -> str:
 
                     // Click handler for selection and industry popups
                     polyline.on('click', (e) => {
-                        if (e.originalEvent.ctrlKey) {
-                            // Ctrl+click for multi-section selection
+                        if (e.originalEvent.shiftKey) {
+                            // Shift+click for multi-section selection
                             e.originalEvent.stopPropagation();
                             toggleSectionSelection(regionId, section.id, sectionGroup, section);
+                        } else if (e.originalEvent.ctrlKey) {
+                            // Ctrl+click for detailed section info popup
+                            e.originalEvent.stopPropagation();
+                            showDetailedSectionPopup(section, e.latlng);
                         } else if (MapApp.overlayStates.industries && MapApp.industrySectionIds.has(`${regionId}_${section.id}`)) {
                             // Industry overlay active and this is an industry track - show industry popup
                             e.originalEvent.stopPropagation();
@@ -1109,19 +1115,49 @@ def generate_javascript() -> str:
         const infoDiv = document.getElementById('selection-info');
         const countSpan = document.getElementById('selection-count');
         const lengthSpan = document.getElementById('selection-length');
+        const gradientRow = document.getElementById('gradient-row');
+        const gradientSpan = document.getElementById('selection-gradient');
 
         if (MapApp.selectedSections.size === 0) {
             infoDiv.classList.remove('visible');
+            if (gradientRow) gradientRow.style.display = 'none';
         } else {
             infoDiv.classList.add('visible');
             countSpan.textContent = MapApp.selectedSections.size;
 
-            let totalLength = 0;
+            let totalLengthFt = 0;
             for (const [sectionId, data] of MapApp.selectedSections) {
-                totalLength += data.metadata.length_ft;
+                totalLengthFt += data.metadata.length_ft;
             }
-            lengthSpan.textContent = totalLength.toFixed(1);
+            lengthSpan.textContent = totalLengthFt.toFixed(1);
+
+            // Gradient: elevation from first-clicked section start to last-clicked section end
+            const entries = Array.from(MapApp.selectedSections.values());
+            if (entries.length >= 2 && gradientRow && gradientSpan) {
+                const firstMeta = entries[0].metadata;
+                const lastMeta = entries[entries.length - 1].metadata;
+                const totalLengthM = totalLengthFt / 3.28084;
+                const elevDiff = lastMeta.elevation_end_m - firstMeta.elevation_start_m;
+                const gradientPct = totalLengthM > 0 ? (elevDiff / totalLengthM) * 100 : 0;
+                const sign = gradientPct > 0 ? '+' : '';
+                gradientSpan.textContent = `${sign}${gradientPct.toFixed(2)}%`;
+                gradientRow.style.display = 'inline';
+            } else if (gradientRow) {
+                gradientRow.style.display = 'none';
+            }
         }
+    }
+
+    // ========================================
+    // Detailed Section Popup (Alt+click)
+    // ========================================
+    function showDetailedSectionPopup(section, latlng) {
+        const sectionType = section.is_switch ? 'Switch/Turnout' : 'Track Section';
+        let content = `<b>Section ${section.id}</b> (${sectionType})<br>`;
+        content += `Length: ${section.length_ft.toFixed(1)} ft (${section.length_m.toFixed(1)} m)<br>`;
+        content += `Track Type: ${section.track_type}<br>`;
+        content += `Retarder: ${section.retarder_mph}`;
+        L.popup({maxWidth: 300}).setLatLng(latlng).setContent(content).openOn(MapApp.map);
     }
 
     // ========================================
@@ -1470,6 +1506,8 @@ def generate_tile_based_html(config: VisualizationConfig) -> str:
             <label><input type="checkbox" id="toggle-industries"> Industries</label>
             <label><input type="checkbox" id="toggle-signals"> Signals</label>
             <label><input type="checkbox" id="toggle-tiles"> Tile Boundaries</label>
+            <label><input type="checkbox" id="toggle-area-labels"> Area Labels</label>
+            <div style="font-size:11px;color:#666;margin-top:4px;">Shift+Click to place a label, then click along a track to set its angle (Esc = flat)</div>
         </div>
 
         <h3>Local Filter</h3>
@@ -1480,7 +1518,8 @@ def generate_tile_based_html(config: VisualizationConfig) -> str:
         <div class="selection-info" id="selection-info" style="display:none;">
             <strong>Selection</strong>
             <div id="selection-count">0 sections</div>
-            <div id="selection-length">0 m</div>
+            <div id="selection-length">0 ft</div>
+            <div id="gradient-row" style="display:none">Avg Grade: <span id="selection-gradient"></span></div>
             <button onclick="clearSelection()" style="margin-top:5px;padding:3px 8px;">Clear</button>
         </div>
     </div>
@@ -1498,7 +1537,8 @@ window.COLORS = {{
     signalAbsolute: '{colors.signal_absolute}',
     signalIntermediate: '{colors.signal_intermediate}',
     signalBorderSingle: '{colors.signal_border_single}',
-    signalBorderStacked: '{colors.signal_border_stacked}'
+    signalBorderStacked: '{colors.signal_border_stacked}',
+    areaLabel: '{colors.area_label}'
 }};
 
 (function() {{
@@ -1516,7 +1556,8 @@ window.COLORS = {{
         aiLocationIndex: [],
         industrySectionIds: new Set(),
         selectedSections: new Map(),
-        overlayStates: {{ signals: false, industries: false, aiLocations: false, tileBoundaries: false }},
+        areaLabelsLayer: null,   // global L.layerGroup for user-defined area labels
+        overlayStates: {{ signals: false, industries: false, aiLocations: false, tileBoundaries: false, areaLabels: false }},
         signalLayers: [],
         industryLayers: [],
         aiLayers: [],
@@ -1547,8 +1588,18 @@ window.COLORS = {{
             document.getElementById('mouse-position').textContent = `X: ${{x}}m, Y: ${{y}}m`;
         }});
 
+        // Shift+Click to capture an area label; the next click sets the angle.
+        MapApp.map.on('click', (e) => {{
+            if (MapApp.areaCapture && MapApp.areaCapture.pending) {{
+                finalizeAreaCapture(e.latlng);
+            }} else if (e.originalEvent && e.originalEvent.shiftKey) {{
+                startAreaCapture(e.latlng);
+            }}
+        }});
+
         // Update scale on zoom
         MapApp.map.on('zoomend', updateScale);
+        MapApp.map.on('zoomend', updateAreaLabelSizes);
 
         loadManifest();
     }}
@@ -1583,6 +1634,7 @@ window.COLORS = {{
             const response = await fetch('manifest.json');
             MapApp.manifest = await response.json();
             setupRegionControls();
+            buildAreaLabels();
 
             // Load enabled regions
             for (const region of MapApp.manifest.regions) {{
@@ -1592,6 +1644,8 @@ window.COLORS = {{
             }}
 
             fitBoundsToData();
+            MapApp.labelBaseZoom = MapApp.map.getZoom();
+            updateAreaLabelSizes();
             updateScale();
         }} catch (error) {{
             console.error('Failed to load manifest:', error);
@@ -1618,6 +1672,7 @@ window.COLORS = {{
         document.getElementById('toggle-industries').onchange = (e) => toggleOverlay('industries', e.target.checked);
         document.getElementById('toggle-ai').onchange = (e) => toggleOverlay('aiLocations', e.target.checked);
         document.getElementById('toggle-tiles').onchange = (e) => toggleOverlay('tileBoundaries', e.target.checked);
+        document.getElementById('toggle-area-labels').onchange = (e) => toggleOverlay('areaLabels', e.target.checked);
 
         // Local symbol filter dropdown
         document.getElementById('local-symbol-select').addEventListener('change', (e) => {{
@@ -1851,8 +1906,8 @@ window.COLORS = {{
     }}
 
     function handleTrackClick(e, section, regionId, sectionGroup) {{
-        if (e.originalEvent.ctrlKey) {{
-            // Toggle selection
+        if (e.originalEvent.shiftKey) {{
+            // Shift+click: toggle multi-section selection
             if (MapApp.selectedSections.has(section.id)) {{
                 MapApp.selectedSections.delete(section.id);
                 const color = section.is_switch ? COLORS.switch : COLORS.track;
@@ -1862,8 +1917,16 @@ window.COLORS = {{
                 sectionGroup.eachLayer(layer => layer.setStyle({{ color: COLORS.trackSelected }}));
             }}
             updateSelectionInfo();
+        }} else if (e.originalEvent.ctrlKey) {{
+            // Ctrl+click: detailed info popup
+            const sectionType = section.is_switch ? 'Switch/Turnout' : 'Track Section';
+            let content = `<b>Section ${{section.id}}</b> (${{sectionType}})<br>`;
+            content += `Length: ${{section.length_ft.toFixed(1)}} ft (${{section.length_m.toFixed(1)}} m)<br>`;
+            content += `Track Type: ${{section.track_type}}<br>`;
+            content += `Retarder: ${{section.retarder_mph}}`;
+            L.popup({{maxWidth: 300}}).setLatLng(e.latlng).setContent(content).openOn(MapApp.map);
         }} else {{
-            // Show popup
+            // Normal click: basic popup
             const content = `<b>Section ${{section.id}}</b><br>
                             Length: ${{section.length_m.toFixed(1)}}m (${{section.length_ft.toFixed(1)}}ft)<br>
                             ${{section.is_switch ? 'Switch/Turnout' : 'Track Section'}}`;
@@ -1874,18 +1937,36 @@ window.COLORS = {{
     function updateSelectionInfo() {{
         const count = MapApp.selectedSections.size;
         const info = document.getElementById('selection-info');
+        const gradientRow = document.getElementById('gradient-row');
+        const gradientSpan = document.getElementById('selection-gradient');
 
         if (count === 0) {{
             info.style.display = 'none';
+            if (gradientRow) gradientRow.style.display = 'none';
             return;
         }}
 
         info.style.display = 'block';
         document.getElementById('selection-count').textContent = `${{count}} section${{count > 1 ? 's' : ''}}`;
 
-        let totalLength = 0;
-        MapApp.selectedSections.forEach(s => totalLength += s.metadata.length_m);
-        document.getElementById('selection-length').textContent = `${{totalLength.toFixed(1)}} m`;
+        let totalLengthFt = 0;
+        MapApp.selectedSections.forEach(s => totalLengthFt += s.metadata.length_ft);
+        document.getElementById('selection-length').textContent = `${{totalLengthFt.toFixed(1)}} ft`;
+
+        // Gradient: elevation from first-clicked section start to last-clicked section end
+        const entries = Array.from(MapApp.selectedSections.values());
+        if (entries.length >= 2 && gradientRow && gradientSpan) {{
+            const firstMeta = entries[0].metadata;
+            const lastMeta = entries[entries.length - 1].metadata;
+            const totalLengthM = totalLengthFt / 3.28084;
+            const elevDiff = lastMeta.elevation_end_m - firstMeta.elevation_start_m;
+            const gradientPct = totalLengthM > 0 ? (elevDiff / totalLengthM) * 100 : 0;
+            const sign = gradientPct > 0 ? '+' : '';
+            gradientSpan.textContent = `${{sign}}${{gradientPct.toFixed(2)}}%`;
+            gradientRow.style.display = 'block';
+        }} else if (gradientRow) {{
+            gradientRow.style.display = 'none';
+        }}
     }}
 
     window.clearSelection = function() {{
@@ -1942,8 +2023,239 @@ window.COLORS = {{
         }}
     }}
 
+    // ========================================
+    // Area/place labels (user-defined)
+    // ========================================
+    function createAreaLabelIcon(area) {{
+        const color = area.color || COLORS.areaLabel;
+        const fontSize = area.font_size || 22;
+        let style = `display:inline-block;color:${{color}};font-size:${{fontSize}}px;font-weight:bold;white-space:nowrap;`;
+        if (area.box) {{
+            style += `background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:3px;text-shadow:0 1px 2px rgba(0,0,0,0.8);`;
+        }} else {{
+            // No box (default): dark outline keeps the text legible over the map.
+            style += `text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000;`;
+        }}
+        // Center the label on its point; rotate around that center if requested.
+        const rot = area.rotation ? ` rotate(${{area.rotation}}deg)` : '';
+        style += `transform:translate(-50%,-50%)${{rot}};`;
+        // iconSize:null lets the container shrink-wrap the text so the box (when
+        // enabled) covers the whole label and centering stays correct.
+        return L.divIcon({{
+            className: 'area-label-marker',
+            html: `<div style="${{style}}">${{area.label}}</div>`,
+            iconSize: null,
+            iconAnchor: [0, 0]
+        }});
+    }}
+
+    // Forward transform: tile + Run8 local coords -> world meters (matches
+    // convert_run8_to_tile_coords in region_extractor.py).
+    function areaToWorld(area, tp) {{
+        const homeX = tp.home_tile[0];
+        const homeZ = tp.home_tile[1];
+        const worldX = (area.tile_x - homeX) * tp.tile_width + area.local_x;
+        const worldY = (area.tile_z - homeZ) * tp.tile_height - area.local_z;
+        return [worldX, worldY];
+    }}
+
+    function buildAreaLabels() {{
+        MapApp.areaLabelsLayer = L.layerGroup();
+        MapApp.areaMarkers = [];
+        const areas = (MapApp.manifest && MapApp.manifest.areas) || [];
+        const tp = MapApp.manifest && MapApp.manifest.tile_params;
+        if (!tp) {{
+            if (areas.length > 0) console.warn('Area labels present but manifest has no tile_params; skipping.');
+            return;
+        }}
+        for (const area of areas) {{
+            const wc = areaToWorld(area, tp);
+            const marker = L.marker([wc[1], wc[0]], {{ icon: createAreaLabelIcon(area) }});
+            MapApp.areaLabelsLayer.addLayer(marker);
+            MapApp.areaMarkers.push({{ marker: marker, baseFont: area.font_size || 22 }});
+        }}
+        if (MapApp.overlayStates.areaLabels) MapApp.areaLabelsLayer.addTo(MapApp.map);
+        updateAreaLabelSizes();
+    }}
+
+    // Scale label text by absolute map scale (meters-per-pixel), matching the
+    // on-screen scale bar: full size at/below ~50 m scale, shrinking to a tiny
+    // floor at/above ~15 km. Interpolated on log(scale) since scale is
+    // exponential in zoom.
+    const AREA_LABEL_SCALE_MAX_M = 50;      // scale bar <= this -> full (baseFont) size
+    const AREA_LABEL_SCALE_MIN_M = 15000;   // scale bar >= this -> minimum size
+    const AREA_LABEL_MIN_PX = 6;            // "too small to read" floor
+    function updateAreaLabelSizes() {{
+        if (!MapApp.areaMarkers) return;
+        // Scale-bar meters ~= 100 px * meters-per-pixel; mpp = 2^-zoom in CRS.Simple.
+        const scaleM = 100 * Math.pow(2, -MapApp.map.getZoom());
+        const lo = Math.log(AREA_LABEL_SCALE_MAX_M), hi = Math.log(AREA_LABEL_SCALE_MIN_M);
+        let t = (Math.log(scaleM) - lo) / (hi - lo);
+        t = Math.max(0, Math.min(1, t));    // 0 at 50 m (zoomed in), 1 at 15 km (zoomed out)
+        for (const rec of MapApp.areaMarkers) {{
+            const el = rec.marker.getElement();
+            if (!el || !el.firstChild) continue;
+            const px = rec.baseFont + t * (AREA_LABEL_MIN_PX - rec.baseFont);
+            el.firstChild.style.fontSize = px.toFixed(1) + 'px';
+        }}
+    }}
+
+    // Shift+Click capture. First click sets the position (inverting the
+    // world-meter transform to recover tile + local coords); the next click sets
+    // the text angle along a track, or Esc leaves it horizontal.
+    function startAreaCapture(latlng) {{
+        const tp = MapApp.manifest && MapApp.manifest.tile_params;
+        if (!tp) {{
+            alert('Tile parameters are not available in this map, so a label position cannot be captured.');
+            return;
+        }}
+        const homeX = tp.home_tile[0];
+        const homeZ = tp.home_tile[1];
+        const worldX = latlng.lng;
+        const worldY = latlng.lat;
+        const tileX = homeX + Math.floor(worldX / tp.tile_width);
+        const tileZ = homeZ + Math.floor(worldY / tp.tile_height);
+        const localX = worldX - (tileX - homeX) * tp.tile_width;
+        const localZ = -(worldY - (tileZ - homeZ) * tp.tile_height);
+
+        MapApp.areaCapture = {{ pending: true, latlng: latlng, tileX: tileX, tileZ: tileZ, localX: localX, localZ: localZ }};
+
+        // Guide line from the anchor to the cursor while choosing the angle.
+        MapApp.areaGuide = L.polyline([latlng, latlng], {{ color: '#ffd11a', weight: 2, dashArray: '5,5' }}).addTo(MapApp.map);
+        MapApp._areaGuideMove = (ev) => {{ if (MapApp.areaGuide) MapApp.areaGuide.setLatLngs([latlng, ev.latlng]); }};
+        MapApp.map.on('mousemove', MapApp._areaGuideMove);
+
+        // Esc = leave the angle horizontal.
+        MapApp._areaEsc = (ev) => {{
+            if (ev.key === 'Escape' && MapApp.areaCapture && MapApp.areaCapture.pending) {{
+                ev.preventDefault();
+                finalizeAreaCapture(null);
+            }}
+        }};
+        document.addEventListener('keydown', MapApp._areaEsc);
+
+        showAreaHint('Click a second point along the track to set the text angle &nbsp;&middot;&nbsp; Esc = horizontal');
+    }}
+
+    function finalizeAreaCapture(secondLatLng) {{
+        const cap = MapApp.areaCapture;
+        if (!cap || !cap.pending) return;
+        cap.pending = false;
+
+        if (MapApp.areaGuide) {{ MapApp.map.removeLayer(MapApp.areaGuide); MapApp.areaGuide = null; }}
+        if (MapApp._areaGuideMove) {{ MapApp.map.off('mousemove', MapApp._areaGuideMove); MapApp._areaGuideMove = null; }}
+        if (MapApp._areaEsc) {{ document.removeEventListener('keydown', MapApp._areaEsc); MapApp._areaEsc = null; }}
+        hideAreaHint();
+
+        let rotation = 0;
+        if (secondLatLng) {{
+            const dx = secondLatLng.lng - cap.latlng.lng;
+            const dy = secondLatLng.lat - cap.latlng.lat;
+            if (dx !== 0 || dy !== 0) {{
+                // Screen is north-up; CSS rotate is clockwise with the y-axis pointing down.
+                let deg = Math.atan2(-dy, dx) * 180 / Math.PI;
+                // A track line has no direction, so fold to [-90, 90] to keep text upright.
+                if (deg > 90) deg -= 180;
+                if (deg < -90) deg += 180;
+                rotation = Math.round(deg);
+            }}
+        }}
+        openAreaLabelPopup(cap, rotation);
+    }}
+
+    function showAreaHint(html) {{
+        let el = document.getElementById('area-capture-hint');
+        if (!el) {{
+            el = document.createElement('div');
+            el.id = 'area-capture-hint';
+            el.style.cssText = 'position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:2500;'
+                + 'background:rgba(0,0,0,0.8);color:#fff;font-family:Arial,sans-serif;font-size:13px;'
+                + 'padding:6px 12px;border-radius:4px;pointer-events:none;';
+            document.body.appendChild(el);
+        }}
+        el.innerHTML = html;
+        el.style.display = 'block';
+    }}
+
+    function hideAreaHint() {{
+        const el = document.getElementById('area-capture-hint');
+        if (el) el.style.display = 'none';
+    }}
+
+    function openAreaLabelPopup(cap, rotation) {{
+        const tileX = cap.tileX, tileZ = cap.tileZ, localX = cap.localX, localZ = cap.localZ;
+        const html = `
+            <div style="min-width:230px;font-family:Arial,sans-serif;font-size:12px;">
+                <b>New Area Label</b><br>
+                <label style="display:block;margin:6px 0 2px;">Label text:</label>
+                <input id="al-text" type="text" placeholder="e.g. Barstow Yard"
+                       style="width:100%;box-sizing:border-box;padding:4px;">
+                <div style="margin-top:6px;color:#555;">
+                    tile ${{tileX}},${{tileZ}} &nbsp; local ${{localX.toFixed(1)}},${{localZ.toFixed(1)}} &nbsp; rot ${{rotation}}&deg;
+                </div>
+                <button id="al-gen" style="margin-top:8px;padding:4px 8px;cursor:pointer;">Generate INI</button>
+                <pre id="al-out" style="display:none;white-space:pre-wrap;background:#f4f4f4;padding:6px;margin-top:6px;border-radius:4px;font-size:11px;"></pre>
+                <button id="al-copy" style="display:none;margin-top:4px;padding:4px 8px;cursor:pointer;">Copy to clipboard</button>
+            </div>`;
+
+        L.popup({{ maxWidth: 340 }})
+            .setLatLng(cap.latlng)
+            .setContent(html)
+            .openOn(MapApp.map);
+
+        setTimeout(() => {{
+            const textEl = document.getElementById('al-text');
+            const genBtn = document.getElementById('al-gen');
+            const outEl = document.getElementById('al-out');
+            const copyBtn = document.getElementById('al-copy');
+            if (!textEl || !genBtn) return;
+            textEl.focus();
+
+            const generate = () => {{
+                const label = (textEl.value || '').trim();
+                let slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+                if (!slug) slug = `area_${{tileX}}_${{tileZ}}`;
+                let ini =
+                    `[area.${{slug}}]\n` +
+                    `label = ${{label || 'New Label'}}\n` +
+                    `tile = ${{tileX}},${{tileZ}}\n` +
+                    `local = ${{localX.toFixed(1)}},${{localZ.toFixed(1)}}`;
+                if (rotation) ini += `\nrotation = ${{rotation}}`;
+                outEl.textContent = ini;
+                outEl.style.display = 'block';
+                copyBtn.style.display = 'inline-block';
+            }};
+
+            genBtn.addEventListener('click', generate);
+            textEl.addEventListener('keydown', (ev) => {{ if (ev.key === 'Enter') {{ ev.preventDefault(); generate(); }} }});
+            copyBtn.addEventListener('click', () => {{
+                const text = outEl.textContent;
+                if (navigator.clipboard && navigator.clipboard.writeText) {{
+                    navigator.clipboard.writeText(text).then(() => {{
+                        copyBtn.textContent = 'Copied!';
+                        setTimeout(() => {{ copyBtn.textContent = 'Copy to clipboard'; }}, 1200);
+                    }});
+                }} else {{
+                    const range = document.createRange();
+                    range.selectNodeContents(outEl);
+                    const sel = window.getSelection();
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                }}
+            }});
+        }}, 0);
+    }}
+
     function toggleOverlay(overlay, enabled) {{
         MapApp.overlayStates[overlay] = enabled;
+
+        if (overlay === 'areaLabels') {{
+            if (MapApp.areaLabelsLayer) {{
+                if (enabled) {{ MapApp.areaLabelsLayer.addTo(MapApp.map); updateAreaLabelSizes(); }}
+                else MapApp.map.removeLayer(MapApp.areaLabelsLayer);
+            }}
+            return;
+        }}
 
         MapApp.loadedRegions.forEach((region) => {{
             if (!region.visible) return;
@@ -1985,6 +2297,16 @@ window.COLORS = {{
                 }});
             }});
         }});
+
+        // Include area labels so a newly-added label is within the initial view
+        // (regions are loaded selectively, so a label may sit outside the loaded track).
+        const tp = MapApp.manifest && MapApp.manifest.tile_params;
+        if (tp) {{
+            for (const area of (MapApp.manifest.areas || [])) {{
+                const wc = areaToWorld(area, tp);
+                bounds.push([wc[1], wc[0]]);  // [y, x]
+            }}
+        }}
 
         if (bounds.length > 0) {{
             MapApp.map.fitBounds(bounds);

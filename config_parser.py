@@ -57,6 +57,7 @@ class ColorConfig:
     signal_border_single: str = "#000000"  # Single head signal border (black)
     signal_border_stacked: str = "#87CEEB"  # Multiple head signal border (light blue)
     background: str = "#333333"         # Background color (tile-based mode)
+    area_label: str = "#ffd11a"         # Area/place label text color (gold)
 
 
 @dataclass
@@ -84,6 +85,24 @@ class RegionConfig:
 
 
 @dataclass
+class AreaLabel:
+    """A user-defined area/place label placed at a tile-local coordinate.
+
+    Positions are stored as a tile index plus Run8 local coordinates within
+    that tile, matching how track coordinates are captured. The renderer
+    converts these to world meters using the tile_based parameters.
+    """
+    id: str                          # from section name [area.<id>]
+    label: str                       # displayed text
+    tile: Tuple[int, int]            # (tile_x, tile_z)
+    local: Tuple[float, float]       # (local_x, local_z) Run8 local meters within the tile
+    color: Optional[str] = None      # overrides the global area_label color
+    font_size: Optional[int] = None  # overrides the default label font size
+    box: bool = False                # draw a background box behind the text
+    rotation: float = 0.0            # rotate text in degrees (clockwise), e.g. to align to a track
+
+
+@dataclass
 class VisualizationConfig:
     """Complete configuration for a multi-region visualization"""
     name: str
@@ -94,6 +113,7 @@ class VisualizationConfig:
     colors: ColorConfig = field(default_factory=ColorConfig)
     tile_based: Optional[TileBasedConfig] = None
     initial_center: Optional[Tuple[float, float]] = None  # (lat, lon) for initial map center
+    areas: List[AreaLabel] = field(default_factory=list)  # user-defined area/place labels
 
     @property
     def industry_db(self) -> Path:
@@ -109,6 +129,78 @@ class VisualizationConfig:
 class ConfigError(Exception):
     """Raised when configuration is invalid"""
     pass
+
+
+def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors: List[str]) -> List['AreaLabel']:
+    """Parse all [area.*] sections from a parser into AreaLabel objects.
+
+    Appends any problems to `errors`; `source` describes the origin (e.g. the
+    config or an areas_file path) for clearer messages. Shared by the main config
+    and any external areas_file so both accept identical syntax.
+    """
+    result = []
+    for section_name in (s for s in parser.sections() if s.startswith('area.')):
+        area_id = section_name[5:]  # Remove "area." prefix
+        area = parser[section_name]
+
+        label = area.get('label', '').strip()
+        if not label:
+            errors.append(f"[{section_name}] label is required ({source})")
+
+        tile_str = area.get('tile', '').strip()
+        tile = None
+        if not tile_str:
+            errors.append(f"[{section_name}] tile is required, format 'x,z' ({source})")
+        else:
+            try:
+                tp = tile_str.split(',')
+                tile = (int(tp[0].strip()), int(tp[1].strip()))
+            except (ValueError, IndexError):
+                errors.append(f"[{section_name}] tile must be format 'x,z' e.g. '209,-10' ({source})")
+
+        local_str = area.get('local', '').strip()
+        local = None
+        if not local_str:
+            errors.append(f"[{section_name}] local is required, format 'x,z' ({source})")
+        else:
+            try:
+                lp = local_str.split(',')
+                local = (float(lp[0].strip()), float(lp[1].strip()))
+            except (ValueError, IndexError):
+                errors.append(f"[{section_name}] local must be format 'x,z' e.g. '421.5,-500.2' ({source})")
+
+        color = area.get('color', '').strip() or None
+
+        font_size_str = area.get('font_size', '').strip()
+        font_size = None
+        if font_size_str:
+            try:
+                font_size = int(font_size_str)
+            except ValueError:
+                errors.append(f"[{section_name}] font_size must be an integer ({source})")
+
+        box = area.get('box', 'false').strip().lower() in ('true', 'yes', '1')
+
+        rotation_str = area.get('rotation', '').strip()
+        rotation = 0.0
+        if rotation_str:
+            try:
+                rotation = float(rotation_str)
+            except ValueError:
+                errors.append(f"[{section_name}] rotation must be a number in degrees ({source})")
+
+        if label and tile is not None and local is not None:
+            result.append(AreaLabel(
+                id=area_id,
+                label=label,
+                tile=tile,
+                local=local,
+                color=color,
+                font_size=font_size,
+                box=box,
+                rotation=rotation
+            ))
+    return result
 
 
 def parse_config(config_path: str) -> VisualizationConfig:
@@ -132,6 +224,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
     parser.read(config_path)
 
     errors = []
+    areas_file_str = ''  # optional; comma-separated external areas file(s)
 
     # Parse [visualization] section
     if 'visualization' not in parser:
@@ -141,6 +234,10 @@ def parse_config(config_path: str) -> VisualizationConfig:
         name = viz.get('name', '').strip()
         if not name:
             errors.append("[visualization] name is required")
+
+        # Optional external area-label file(s), comma-separated, resolved
+        # relative to this config's directory.
+        areas_file_str = viz.get('areas_file', '').strip()
 
         tile_corrections_str = viz.get('tile_corrections', '').strip()
         if not tile_corrections_str:
@@ -219,6 +316,34 @@ def parse_config(config_path: str) -> VisualizationConfig:
                 track_color=track_color
             ))
 
+    # Parse [area.*] sections: inline in this config, plus any external file(s)
+    # listed in [visualization] areas_file (comma-separated, resolved relative to
+    # the config's directory). Both sources use identical [area.*] syntax.
+    areas = _parse_area_sections(parser, 'config', errors)
+
+    config_dir = config_file.parent
+    for area_path_str in (p.strip() for p in areas_file_str.split(',') if p.strip()):
+        area_path = Path(area_path_str)
+        if not area_path.is_absolute():
+            area_path = config_dir / area_path
+        if not area_path.exists():
+            errors.append(f"[visualization] areas_file not found: {area_path}")
+            continue
+        ext_parser = configparser.ConfigParser()
+        try:
+            ext_parser.read(area_path)
+        except configparser.Error as e:
+            errors.append(f"[visualization] areas_file could not be parsed ({area_path}): {e}")
+            continue
+        areas.extend(_parse_area_sections(ext_parser, area_path.name, errors))
+
+    # Reject duplicate area ids across all sources (avoids silent overrides)
+    seen_area_ids = set()
+    for a in areas:
+        if a.id in seen_area_ids:
+            errors.append(f"Duplicate area id '{a.id}' (defined more than once across config and areas_file)")
+        seen_area_ids.add(a.id)
+
     # If we have basic parsing errors, raise now
     if errors:
         raise ConfigError("Configuration errors:\n  - " + "\n  - ".join(errors))
@@ -238,6 +363,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
             signal_border_single=color_section.get('signal_border_single', colors.signal_border_single).strip(),
             signal_border_stacked=color_section.get('signal_border_stacked', colors.signal_border_stacked).strip(),
             background=color_section.get('background', colors.background).strip(),
+            area_label=color_section.get('area_label', colors.area_label).strip(),
         )
 
     # Parse [tile_based_plot] section (optional)
@@ -272,7 +398,8 @@ def parse_config(config_path: str) -> VisualizationConfig:
         regions=regions,
         colors=colors,
         tile_based=tile_based,
-        initial_center=initial_center
+        initial_center=initial_center,
+        areas=areas
     )
 
     # Validate that all files exist
@@ -336,6 +463,13 @@ region_dir = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\Region
 # If not specified, uses a default center
 # initial_center = 34.9,-118.0
 
+# (Optional) External area-label file(s), comma-separated, resolved relative to
+# this config's directory. Use when you have many labels and don't want them
+# cluttering this file. Same [area.*] syntax as the inline example below; inline
+# and external labels are merged (duplicate ids are rejected).
+# areas_file = areas_socal.ini
+# areas_file = yards.ini, towns.ini
+
 [region.mojave]
 # Human-readable name for this region
 display_name = Mojave Subdivision
@@ -384,6 +518,23 @@ signal_absolute = #FF6B35
 signal_intermediate = #FFD700
 signal_border_single = #000000
 signal_border_stacked = #87CEEB
+
+# Default color for area/place labels (see [area.*] below)
+# area_label = #ffd11a
+
+# User-defined area/place labels (optional, tile-based mode).
+# Each [area.<id>] draws its text at a tile + local coordinate.
+# Tip: Shift+Click the rendered map to capture tile/local coords and get a
+# ready-to-paste [area.*] block.
+#
+# [area.barstow_yard]
+# label = Barstow Yard
+# tile = 209,-10           ; tile_x,tile_z
+# local = 421.5,-500.2     ; Run8 local_x,local_z within that tile
+# color = #ffd11a          ; optional, overrides area_label
+# font_size = 16           ; optional
+# box = true               ; optional, draw a background box behind the text (default: no box)
+# rotation = -30           ; optional, rotate text in degrees (clockwise) to align to a track/yard
 
 [output]
 # Directory where output files will be written

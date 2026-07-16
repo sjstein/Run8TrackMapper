@@ -69,6 +69,33 @@ signal_border_stacked = #87CEEB
 output_dir = ./output/socal/
 ```
 
+#### Area/Place Labels (tile-based mode)
+Optional `[area.*]` sections add always-on text labels (yards, towns, junctions,
+control points) at a tile + Run8 local coordinate. They may live inline in the config
+or in external file(s) referenced by `[visualization] areas_file = a.ini, b.ini`
+(comma-separated, resolved relative to the config dir); inline and external labels are
+merged and duplicate ids are rejected. Same syntax either way:
+```ini
+[area.barstow_yard]
+label = Barstow Yard
+tile = 209,-10           ; tile_x,tile_z
+local = 421.5,-500.2     ; Run8 local_x,local_z within that tile
+color = #ffd11a          ; optional (defaults to [colors] area_label)
+font_size = 16           ; optional (size at <=50 m scale; default 22)
+box = true               ; optional, background box behind the text (default: no box)
+rotation = -30           ; optional, rotate text in degrees clockwise (align to track/yard)
+```
+Labels scale with the map: full `font_size` at the 50 m scale-bar level, shrinking to
+a small floor by ~15 km (tunable in `updateAreaLabelSizes` in html_generator.py).
+Labels are emitted into `manifest.json` (`areas`) and rendered as a toggleable
+"Area Labels" overlay in the tile-based viewer. To capture coordinates, **Shift+Click**
+the map to place a label, then **click a second point along a track** to set the text
+angle (or press **Esc** to leave it horizontal). A popup then shows the tile/local/rotation
+and generates a ready-to-paste `[area.*]` block. Positions are converted to world meters
+via `convert_run8_to_tile_coords()` (region_extractor.py); the capture tool inverts that
+transform, and the angle is the screen bearing of the two clicks folded to [-90, 90] so
+text stays upright. Currently wired for tile-based output only (geographic mode not yet supported).
+
 #### Interactive Map Features
 - **Base Map Selection**: OpenStreetMap, Satellite (Esri), or None
 - **Region Toggle**: Enable/disable regions dynamically (data loaded on demand)
