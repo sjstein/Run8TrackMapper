@@ -28,7 +28,11 @@ def section_to_dict(section: SectionData) -> dict:
         "paths": section.paths,  # List of paths, each path is list of (lat, lon) tuples
         "length_ft": section.length_ft,
         "length_m": section.length_m,
-        "is_switch": section.is_switch
+        "is_switch": section.is_switch,
+        "track_type": section.track_type,
+        "retarder_mph": section.retarder_mph,
+        "elevation_start_m": section.elevation_start_m,
+        "elevation_end_m": section.elevation_end_m
     }
 
 
@@ -84,6 +88,27 @@ def tile_to_dict(tile: TileData) -> dict:
         "lon_west": tile.lon_west,
         "is_corrected": tile.is_corrected
     }
+
+
+def area_to_dict(area) -> dict:
+    """Convert an AreaLabel to a JSON-serializable dict"""
+    result = {
+        "id": area.id,
+        "label": area.label,
+        "tile_x": area.tile[0],
+        "tile_z": area.tile[1],
+        "local_x": area.local[0],
+        "local_z": area.local[1],
+    }
+    if area.color:
+        result["color"] = area.color
+    if area.font_size:
+        result["font_size"] = area.font_size
+    if area.box:
+        result["box"] = True
+    if area.rotation:
+        result["rotation"] = area.rotation
+    return result
 
 
 def region_to_dict(region: RegionData) -> dict:
@@ -144,7 +169,8 @@ def generate_manifest(config: VisualizationConfig,
         "name": config.name,
         "regions": regions_manifest,
         "tile_corrections": tile_corrections_list,
-        "coordinate_system": "tile_local" if tile_based else "geographic"
+        "coordinate_system": "tile_local" if tile_based else "geographic",
+        "areas": [area_to_dict(a) for a in config.areas]
     }
 
     # Add tile parameters if using tile-based coordinates
