@@ -32,6 +32,7 @@ from typing import List, Optional, Tuple
 TRACK_DB_FILENAME = "TrackDatabase.r8"
 SIGNAL_DB_FILENAME = "SignalHeadDatabase.r8"
 AI_LOCATIONS_FILENAME = "AiSpecialLocations.r8"
+MILEPOST_DB_FILENAME = "MilepostDatabase.r8"
 INDUSTRY_DB_FILENAME = "Config.ind"
 TERRAIN_DIR_NAME = "TerrainTiles"
 
@@ -82,6 +83,10 @@ class RegionConfig:
     @property
     def ai_locations_database(self) -> Path:
         return self.directory / AI_LOCATIONS_FILENAME
+
+    @property
+    def milepost_database(self) -> Path:
+        return self.directory / MILEPOST_DB_FILENAME
 
 
 @dataclass

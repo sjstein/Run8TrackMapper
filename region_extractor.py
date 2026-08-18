@@ -26,6 +26,10 @@ from config_parser import RegionConfig, VisualizationConfig, TileBasedConfig
 # Constants for coordinate conversion
 METERS_PER_DEGREE_LAT = 111139.0
 
+# Binary field widths (little-endian) used by the milepost parser
+INTLEN = 4
+FLTLEN = 4
+
 # Coordinate bounds for validation (CONUS)
 LON_MIN, LON_MAX = -130.0, -65.0
 LAT_MIN, LAT_MAX = 23.0, 50.0
@@ -51,6 +55,10 @@ class SectionData:
     length_ft: float
     length_m: float
     is_switch: bool = False
+    track_type: int = 0
+    retarder_mph: float = -1.0
+    elevation_start_m: float = 0.0
+    elevation_end_m: float = 0.0
 
 
 @dataclass
@@ -78,6 +86,18 @@ class AILocationData:
     lon: float
     type_id: int
     type_name: str
+
+
+@dataclass
+class MilepostData:
+    """Extracted milepost/marker data ready for JSON serialization"""
+    id: int
+    label: str        # display label (station name and/or mile value)
+    milepost: str     # raw mile value string (may be empty)
+    station: str      # raw station/marker name string (may be empty or "MP" placeholder)
+    lat: float
+    lon: float
+    elevation_m: float = 0.0
 
 
 @dataclass
@@ -111,6 +131,7 @@ class RegionData:
     sections: List[SectionData] = field(default_factory=list)
     signals: List[SignalData] = field(default_factory=list)
     ai_locations: List[AILocationData] = field(default_factory=list)
+    mileposts: List[MilepostData] = field(default_factory=list)
     industries: List[IndustryData] = field(default_factory=list)
     tiles: List[TileData] = field(default_factory=list)
     bounds: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None  # ((min_lat, min_lon), (max_lat, max_lon))
@@ -679,6 +700,9 @@ def extract_sections(db: TrackDatabase,
 
         all_paths = []  # List of paths, one per node
         total_length_m = 0.0
+        elevation_start_m = 0.0
+        elevation_end_m = 0.0
+        first_node_processed = False
 
         for node in nodes_to_plot:
             start_tile = node.tile_index
@@ -688,6 +712,12 @@ def extract_sections(db: TrackDatabase,
                 effective_end_position = partner_end_position[node]
             else:
                 effective_end_position = node.end_position
+
+            # Track start/end elevation (Y axis) for gradient calculation
+            if not first_node_processed:
+                elevation_start_m = node.position[1]
+                first_node_processed = True
+            elevation_end_m = effective_end_position[1]
 
             if use_tile_coords:
                 # Tile-based coordinate mode
@@ -777,13 +807,12 @@ def extract_sections(db: TrackDatabase,
                         path_points.append((world_x, world_y))
                     total_length_m += node.arcLen_meters
                 else:
-                    # Straight segment
+                    # Straight segment - compute distance from world coordinates,
+                    # not raw local tile positions (which break for cross-tile sections)
                     path_points = [(start_x, start_y), (end_x, end_y)]
-                    # Calculate straight-line distance
-                    dx = effective_end_position[0] - node.position[0]
-                    dy = effective_end_position[1] - node.position[1]
-                    dz = effective_end_position[2] - node.position[2]
-                    total_length_m += math.sqrt(dx*dx + dy*dy + dz*dz)
+                    dx = end_x - start_x
+                    dy = end_y - start_y
+                    total_length_m += math.sqrt(dx*dx + dy*dy)
 
                 if len(path_points) >= 2:
                     # Filter out zero-length paths (in meters now)
@@ -830,13 +859,13 @@ def extract_sections(db: TrackDatabase,
                     )
                     total_length_m += node.arcLen_meters
                 else:
-                    # Straight segment
+                    # Straight segment - compute distance from lat/lon endpoints,
+                    # not raw local tile positions (which break for cross-tile sections)
                     path_points = [(start_lat, start_lon), (end_lat, end_lon)]
-                    # Calculate straight-line distance
-                    dx = effective_end_position[0] - node.position[0]
-                    dy = effective_end_position[1] - node.position[1]
-                    dz = effective_end_position[2] - node.position[2]
-                    total_length_m += math.sqrt(dx*dx + dy*dy + dz*dz)
+                    center_lat = (start_lat + end_lat) / 2
+                    dlat_m = (end_lat - start_lat) * METERS_PER_DEGREE_LAT
+                    dlon_m = (end_lon - start_lon) * METERS_PER_DEGREE_LAT * math.cos(math.radians(center_lat))
+                    total_length_m += math.sqrt(dlat_m*dlat_m + dlon_m*dlon_m)
 
                 if len(path_points) >= 2:
                     # Filter out zero-length or near-zero-length paths (renders as circles)
@@ -856,7 +885,11 @@ def extract_sections(db: TrackDatabase,
                 paths=all_paths,
                 length_ft=round(length_ft, 1),
                 length_m=round(total_length_m, 1),
-                is_switch=is_switch(section)
+                is_switch=is_switch(section),
+                track_type=section.track_type,
+                retarder_mph=section.retarder_mph,
+                elevation_start_m=round(elevation_start_m, 2),
+                elevation_end_m=round(elevation_end_m, 2)
             ))
 
     return sections
@@ -1025,6 +1058,99 @@ def extract_ai_locations(ai_db_path: str,
     return locations
 
 
+def _decode_r8string(mem_map: bytes, offset: int) -> Tuple[str, int]:
+    """Decode an R8String (int32 byte-length + 4-bit-rotated UTF-16 payload).
+
+    Returns (decoded_string, next_offset). Mirrors the rotation used by the
+    SpawnPoint / Industry parsers in r8lib.
+    """
+    n = int.from_bytes(mem_map[offset:offset + INTLEN], 'little', signed=True)
+    offset += INTLEN
+    s = ''.join(chr(mem_map[k] << 4 | mem_map[k + 1] >> 4)
+                for k in range(offset, offset + n, 2))
+    return s, offset + n
+
+
+def _milepost_label(milepost: str, station: str) -> str:
+    """Build a display label from the two milepost strings.
+
+    Routes use these two fields inconsistently: some carry a numeric mile value
+    plus a real place name ("13.6" / "Hodge"), some use "MP" as a placeholder
+    station for a plain numbered post, and some leave the mile value empty and
+    put the whole label in the station field ("ANA599.6 South Braganza").
+    """
+    mp = milepost.strip()
+    st = station.strip()
+    if st and st.upper() != 'MP':
+        return f"{st} (MP {mp})" if mp else st
+    if mp:
+        return f"MP {mp}"
+    return st or "Milepost"
+
+
+def extract_mileposts(milepost_db_path: str,
+                      tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]] = None,
+                      tile_based_config: Optional[TileBasedConfig] = None) -> List[MilepostData]:
+    """Extract mileposts/markers from a MilepostDatabase.r8 file.
+
+    File format (see MilepostDatabase.md):
+        header: int32 reserved, int32 count
+        record: int32 reserved, R8String milepost, R8String station,
+                int32 tile_x, int32 tile_z, float x, float y, float z
+    The (x, z) pair is the Run8 local position within the tile (y is elevation).
+
+    Args:
+        milepost_db_path: Path to MilepostDatabase.r8
+        tile_geo_bounds: Geographic bounds for tiles (required for geographic mode)
+        tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
+    """
+    mileposts = []
+    use_tile_coords = tile_based_config is not None
+
+    with open(milepost_db_path, 'rb') as f:
+        mem_map = f.read()
+
+    ptr = INTLEN  # skip reserved
+    count = int.from_bytes(mem_map[ptr:ptr + INTLEN], 'little', signed=True)
+    ptr += INTLEN
+
+    for i in range(count):
+        ptr += INTLEN  # per-record reserved
+        milepost, ptr = _decode_r8string(mem_map, ptr)
+        station, ptr = _decode_r8string(mem_map, ptr)
+        tile_x = int.from_bytes(mem_map[ptr:ptr + INTLEN], 'little', signed=True)
+        ptr += INTLEN
+        tile_z = int.from_bytes(mem_map[ptr:ptr + INTLEN], 'little', signed=True)
+        ptr += INTLEN
+        x, y, z = struct.unpack('<fff', mem_map[ptr:ptr + FLTLEN * 3])
+        ptr += FLTLEN * 3
+
+        tile = (tile_x, tile_z)
+        if use_tile_coords:
+            lat, lon = convert_run8_to_tile_coords(
+                x, z, tile,
+                tile_based_config.home_tile,
+                tile_based_config.tile_width,
+                tile_based_config.tile_height
+            )
+        else:
+            if tile not in tile_geo_bounds:
+                continue
+            lat, lon = convert_run8_to_latlon(x, z, tile_geo_bounds[tile])
+
+        mileposts.append(MilepostData(
+            id=i,
+            label=_milepost_label(milepost, station),
+            milepost=milepost,
+            station=station,
+            lat=lat,
+            lon=lon,
+            elevation_m=round(y, 2)
+        ))
+
+    return mileposts
+
+
 def extract_industries(industry_db_path: str,
                        route_prefix: int,
                        section_map: Dict[int, TrackSection],
@@ -1158,7 +1284,8 @@ def extract_industries(industry_db_path: str,
 def calculate_bounds(sections: List[SectionData],
                      signals: List[SignalData],
                      ai_locations: List[AILocationData],
-                     industries: List[IndustryData]) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+                     industries: List[IndustryData],
+                     mileposts: List[MilepostData] = None) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
     """Calculate bounding box from all data points"""
     all_lats = []
     all_lons = []
@@ -1180,6 +1307,10 @@ def calculate_bounds(sections: List[SectionData],
     for ind in industries:
         all_lats.append(ind.lat)
         all_lons.append(ind.lon)
+
+    for mp in (mileposts or []):
+        all_lats.append(mp.lat)
+        all_lons.append(mp.lon)
 
     if not all_lats:
         return None
@@ -1269,6 +1400,10 @@ def extract_region(region_config: RegionConfig,
         print(f"  Extracted {len(ai_locations)} AI locations")
     else:
         print(f"  No AI locations database - skipping AI locations")
+
+    # NOTE: milepost extraction is intentionally not wired into the pipeline.
+    # The parser (extract_mileposts / MilepostData) is kept available for
+    # future use, but mileposts are not currently rendered on the map.
 
     # Extract industries
     print(f"  Extracting industries for route prefix {region_config.route_prefix}...")
