@@ -446,6 +446,69 @@ def parse_config(config_path: str) -> VisualizationConfig:
     return config
 
 
+def parse_areas_file(path) -> List[AreaLabel]:
+    """Parse the [area.*] sections from a single INI file into AreaLabels.
+
+    Lightweight (no file/region validation) so it can be reused by the live
+    authoring server (serve.py) to read the current labels in an areas file.
+    Raises ConfigError if any [area.*] section is malformed.
+    """
+    path = Path(path)
+    parser = configparser.ConfigParser()
+    parser.read(path)
+    errors: List[str] = []
+    areas = _parse_area_sections(parser, path.name, errors)
+    if errors:
+        raise ConfigError("Area file errors:\n  - " + "\n  - ".join(errors))
+    return areas
+
+
+def resolve_areas_files(config_path) -> List[Path]:
+    """Return the absolute paths of the external areas_file(s) named in a config.
+
+    Mirrors parse_config's resolution: comma-separated, relative to the config
+    directory. Does not check existence. Returns [] if none are configured.
+    """
+    config_file = Path(config_path)
+    parser = configparser.ConfigParser()
+    parser.read(config_file)
+    areas_file_str = ''
+    if 'visualization' in parser:
+        areas_file_str = parser['visualization'].get('areas_file', '').strip()
+    config_dir = config_file.parent
+    paths: List[Path] = []
+    for area_path_str in (p.strip() for p in areas_file_str.split(',') if p.strip()):
+        area_path = Path(area_path_str)
+        if not area_path.is_absolute():
+            area_path = config_dir / area_path
+        paths.append(area_path)
+    return paths
+
+
+def collect_areas(config_path) -> List[AreaLabel]:
+    """Merge all [area.*] labels for a config: inline plus every areas_file.
+
+    Matches parse_config's merge order (inline first, then each areas_file in
+    order) but performs no region/file validation, so the live authoring server
+    can recompute the authoritative label set cheaply after each edit. Missing
+    areas_file paths are skipped silently (an empty/absent file = no labels).
+    """
+    config_file = Path(config_path)
+    parser = configparser.ConfigParser()
+    parser.read(config_file)
+    errors: List[str] = []
+    areas = _parse_area_sections(parser, 'config', errors)
+    for area_path in resolve_areas_files(config_file):
+        if not area_path.exists():
+            continue
+        ext_parser = configparser.ConfigParser()
+        ext_parser.read(area_path)
+        areas.extend(_parse_area_sections(ext_parser, area_path.name, errors))
+    if errors:
+        raise ConfigError("Area errors:\n  - " + "\n  - ".join(errors))
+    return areas
+
+
 def generate_sample_config() -> str:
     """Generate a sample configuration file template"""
     return '''# Multi-Region Track Mapper Configuration

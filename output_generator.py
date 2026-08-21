@@ -9,6 +9,7 @@ Can also generate tile reports listing all tiles that tracks pass through.
 import argparse
 import json
 import os
+import shutil
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -223,8 +224,63 @@ def generate_tile_report(config: VisualizationConfig, output_path: str) -> None:
     print(f"Tile report saved to: {output_path}")
 
 
+def compute_align_seed(regions_data, tile_based_config, tile_dir: str):
+    """Pick a central track vertex and its real lat/lon (from the tile's .tr4)
+    to seed the manual-alignment transform."""
+    import math
+    from region_extractor import decompress_tr4, find_tile_bounds
+
+    HX, HZ = tile_based_config.home_tile
+    TW, TH = tile_based_config.tile_width, tile_based_config.tile_height
+    pts = [p for rd in regions_data for sec in rd.sections for path in sec.paths for p in path]
+    if not pts:
+        return None
+    cx = sum(p[0] for p in pts) / len(pts)
+    cy = sum(p[1] for p in pts) / len(pts)
+    pts.sort(key=lambda p: (p[0]-cx)**2 + (p[1]-cy)**2)
+
+    def nm(x, z):
+        xs = f"{x:06d}" if x < 0 else f"{x:05d}"
+        zs = f"{z:06d}" if z < 0 else f"{z:05d}"
+        return f"{xs}_{zs}.tr4"
+
+    for X, Y in pts[:5000]:
+        tx = HX + math.floor(X/TW); tz = HZ + math.floor(Y/TH)
+        fp = os.path.join(tile_dir, nm(tx, tz))
+        if not os.path.exists(fp):
+            continue
+        data = decompress_tr4(fp)
+        if not data:
+            continue
+        b = find_tile_bounds(data)
+        if not b:
+            continue
+        le, lw, ln, ls = b
+        lat = ls + ((Y-(tz-HZ)*TH)/TH)*(ln-ls)
+        lon = lw + ((X-(tx-HX)*TW)/TW)*(le-lw)
+        return {"X": round(float(X), 1), "Y": round(float(Y), 1),
+                "lat": lat, "lon": lon, "lat_ref": lat}
+    return None
+
+
+def copy_leaflet_assets(output_dir: Path) -> None:
+    """Copy the vendored Leaflet library into the output dir so the standalone
+    viewers load it same-origin instead of from the unpkg CDN. This removes an
+    external dependency from first load (a source of cold-start flakiness) and
+    yields real JS stack traces. The generated HTML references leaflet/leaflet.{js,css}
+    and falls back to the CDN at runtime if these files are ever missing."""
+    src = Path(__file__).resolve().parent / 'vendor' / 'leaflet'
+    if not src.exists():
+        print(f"  WARNING: vendored Leaflet not found at {src}; "
+              f"the viewer will fall back to the unpkg CDN at runtime")
+        return
+    dst = output_dir / 'leaflet'
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+    print(f"  Copied vendored Leaflet -> {dst}")
+
+
 def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_html: bool = True,
-                    tile_based: bool = False) -> None:
+                    tile_based: bool = False, align: bool = False, authoring: bool = True) -> None:
     """Generate all output files (manifest.json, per-region JSON files, and index.html)
 
     Args:
@@ -245,7 +301,7 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
 
     # Determine tile_based_config
     tile_based_config = None
-    if tile_based:
+    if tile_based or align:
         if config.tile_based:
             tile_based_config = config.tile_based
             print(f"\nUsing tile-based coordinates:")
@@ -257,9 +313,9 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
             from config_parser import TileBasedConfig
             tile_based_config = TileBasedConfig()
 
-    # Load tile corrections (still needed for geographic mode)
+    # Load tile corrections (geographic mode only; align uses the uniform grid)
     tile_corrections = {}
-    if not tile_based:
+    if not (tile_based or align):
         print(f"\nLoading tile corrections from: {config.tile_corrections}")
         tile_corrections = load_tile_corrections(str(config.tile_corrections))
 
@@ -296,16 +352,30 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
     manifest_file = output_dir / "manifest.json"
     print(f"\nWriting manifest: {manifest_file}")
 
-    manifest = generate_manifest(config, regions_data, tile_corrections, tile_based)
+    manifest = generate_manifest(config, regions_data, tile_corrections, tile_based or align)
+    if align:
+        seed = compute_align_seed(regions_data, tile_based_config, str(config.terrain_tile_dir))
+        if seed:
+            manifest["align"] = seed
+            print(f"  Align seed: {seed['lat']:.5f}, {seed['lon']:.5f}")
+        else:
+            print("  WARNING: could not compute align seed (no tile .tr4 found)")
     with open(manifest_file, 'w', encoding='utf-8') as f:
         json.dump(manifest, f, indent=2)
 
     # Generate HTML if requested
     if generate_html:
-        from html_generator import generate_html as gen_html
         html_file = output_dir / "index.html"
         print(f"\nGenerating HTML: {html_file}")
-        gen_html(config, html_file, tile_based=tile_based)
+        if align:
+            from html_generator import generate_align_html
+            generate_align_html(config, html_file, authoring=authoring)
+        else:
+            from html_generator import generate_html as gen_html
+            gen_html(config, html_file, tile_based=tile_based)
+        # Standalone viewers (align, tile-based) load Leaflet locally; copy it in.
+        if align or tile_based:
+            copy_leaflet_assets(output_dir)
 
     print(f"\nOutput generation complete!")
     print(f"  Manifest: {manifest_file}")
@@ -346,6 +416,27 @@ if __name__ == '__main__':
         dest='tile_based',
         help='Generate plot using tile-based coordinates instead of lat/lon'
     )
+    parser.add_argument(
+        '--minimal',
+        action='store_true',
+        dest='minimal',
+        help='Generate the minimal geographic viewer: per-tile bilinear georeference '
+             'with tile_corrections.csv applied (this was the previous default / no-flag behavior)'
+    )
+    parser.add_argument(
+        '--align',
+        action='store_true',
+        dest='align',
+        help='Manual-alignment viewer (this is now the DEFAULT with no flag): contiguous '
+             'tile-based track over a real OSM/Satellite/ORM map, draggable to align, with all overlays'
+    )
+    parser.add_argument(
+        '--production',
+        action='store_true',
+        dest='production',
+        help='Same as the default align viewer but WITHOUT the "Add Label" authoring button '
+             '(for hosting the map to end users)'
+    )
 
     args = parser.parse_args()
 
@@ -353,5 +444,11 @@ if __name__ == '__main__':
 
     if args.tile_report:
         generate_tile_report(config, args.tile_report)
+    elif args.tile_based:
+        generate_output(config, tile_based=True)
+    elif args.minimal:
+        generate_output(config)                 # minimal geographic (per-tile bilinear + corrections)
+    elif args.production:
+        generate_output(config, align=True, authoring=False)   # align viewer, no label authoring
     else:
-        generate_output(config, tile_based=args.tile_based)
+        generate_output(config, align=True)     # DEFAULT: manual-alignment viewer

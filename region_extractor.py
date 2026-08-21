@@ -26,6 +26,14 @@ from config_parser import RegionConfig, VisualizationConfig, TileBasedConfig
 # Constants for coordinate conversion
 METERS_PER_DEGREE_LAT = 111139.0
 
+# Run8 local tile size in meters (SW corner is local (0, 0); x increases east,
+# z decreases going north). Used to normalise local coords into a [0, 1]
+# fraction across a tile for bilinear lat/lon interpolation. Matches the
+# [tile_based_plot] defaults; kept here so geographic mode does not require a
+# TileBasedConfig. Override via convert_run8_to_latlon's tile_width/tile_height.
+LOCAL_TILE_WIDTH_M = 842.3
+LOCAL_TILE_HEIGHT_M = 1023.2
+
 # Binary field widths (little-endian) used by the milepost parser
 INTLEN = 4
 FLTLEN = 4
@@ -330,21 +338,33 @@ def load_tile_bounds(tiles_involved: Set[Tuple[int, int]],
     return tile_geo_bounds, corrected_tiles
 
 
-def convert_run8_to_latlon(x: float, z: float, tile_geo_bounds: Tuple[float, float, float, float]) -> Tuple[float, float]:
-    """Convert Run8 coordinates to lat/lon"""
+def convert_run8_to_latlon(x: float, z: float,
+                           tile_geo_bounds: Tuple[float, float, float, float],
+                           tile_width: float = LOCAL_TILE_WIDTH_M,
+                           tile_height: float = LOCAL_TILE_HEIGHT_M) -> Tuple[float, float]:
+    """Convert Run8 tile-local coordinates to lat/lon by bilinear interpolation
+    across the tile's four real corners.
+
+    ``x``/``z`` are Run8 local coordinates within the tile: the SW corner is
+    (0, 0), x increases east, and z decreases (goes negative) moving north.
+    The point is placed by its fractional position across the tile, so every
+    real corner is honoured exactly and adjacent tiles - which tessellate to
+    ~0 m in the .tr4 data - stay continuous across their shared edge. For a
+    point just past an edge the fraction falls slightly outside [0, 1] and is
+    linearly extrapolated into the neighbour, which is accurate because
+    neighbouring tiles share that edge.
+
+    This replaces the old SW-corner-anchored conversion, which used a single
+    assumed metres-per-degree scale and so drifted from the real geography
+    (validated against OSM: bilinear lands within ~10 m of real rails).
+    """
     lon_east, lon_west, lat_north, lat_south = tile_geo_bounds
 
-    origin_lat = lat_south
-    origin_lon = lon_west
+    frac_x = x / tile_width        # 0 at west edge, 1 at east edge
+    frac_y = -z / tile_height      # 0 at south edge, 1 at north edge (z < 0 north)
 
-    lat_offset_degrees = abs(z) / METERS_PER_DEGREE_LAT
-
-    center_lat = (lat_south + lat_north) / 2.0
-    meters_per_degree_lon = METERS_PER_DEGREE_LAT * math.cos(math.radians(center_lat))
-    lon_offset_degrees = x / meters_per_degree_lon
-
-    lat = origin_lat + lat_offset_degrees
-    lon = origin_lon + lon_offset_degrees
+    lat = lat_south + frac_y * (lat_north - lat_south)
+    lon = lon_west + frac_x * (lon_east - lon_west)
 
     return (lat, lon)
 

@@ -18,16 +18,28 @@ A web-based visualization system that supports multiple regions with dynamic loa
 
 **Usage:**
 ```bash
-python output_generator.py config_multiregion_sample.ini
+python output_generator.py <config.ini>
 ```
+
+**Output modes** (select with a flag; the default is the manual-alignment viewer):
+
+| Flag | Viewer |
+|------|--------|
+| *(none)* | **Manual-alignment viewer (default).** The contiguous tile-based track drawn over a real OSM / Satellite map (with an OpenRailwayMap overlay), draggable by eye to align a chosen area. Includes all overlays, search, the local-symbol filter, Area Label display, and Area Label authoring. |
+| `--production` | Same as the default, but hides the "Add Label" authoring button (for hosting the map to end users). |
+| `--minimal` | Geographic viewer using the per-tile bilinear georeference with `tile_corrections.csv` applied. This was the previous default (no-flag) behavior. |
+| `--tile-based` | Flat tile-based viewer (`L.CRS.Simple`) with no real-world basemap. |
+
+> **Why manual alignment is the default:** the Run8 route is a *topological* model — section lengths are compressed/stretched and a few tiles carry genuine route-designer defects — so no automatic transform georeferences the whole network. The default viewer instead renders the internally-consistent (contiguous) tile grid on a real map and lets you slide it into place per area of interest. See `openrailways_goals.txt` for background.
 
 **Output Structure:**
 ```
 output/<name>/
-├── index.html          # Interactive map viewer
-├── manifest.json       # Region metadata and tile corrections
+├── index.html          # Interactive map viewer (see Output modes above)
+├── manifest.json       # Region metadata, area labels, and mode-specific params
+│                       #   (align: alignment seed + tile params; minimal: tile corrections)
 └── data/
-    └── <region_id>.json  # Per-region track/signal/industry data
+    └── <region_id>.json  # Per-region track, signal, industry, AI, and tile data
 ```
 
 #### Multi-Region Configuration File
@@ -88,22 +100,74 @@ rotation = -30           ; optional, rotate text in degrees clockwise (align to 
 Labels scale with the map: full `font_size` at the 50 m scale-bar level, shrinking to
 a small floor by ~15 km (tunable in `updateAreaLabelSizes` in html_generator.py).
 Labels are emitted into `manifest.json` (`areas`) and rendered as a toggleable
-"Area Labels" overlay in the tile-based viewer. To capture coordinates, **Shift+Click**
-the map to place a label, then **click a second point along a track** to set the text
-angle (or press **Esc** to leave it horizontal). A popup then shows the tile/local/rotation
-and generates a ready-to-paste `[area.*]` block. Positions are converted to world meters
-via `convert_run8_to_tile_coords()` (region_extractor.py); the capture tool inverts that
-transform, and the angle is the screen bearing of the two clicks folded to [-90, 90] so
-text stays upright. Currently wired for tile-based output only (geographic mode not yet supported).
+"Area Labels" overlay in **both** the tile-based viewer and the manual-alignment
+(default) viewer.
+
+Authoring (capturing new labels):
+- **Tile-based viewer:** **Shift+Click** the map to place a label.
+- **Manual-alignment viewer:** toggle the **"Add Label"** button (mutually exclusive
+  with "Align mode"; hidden entirely under `--production`), then **click** to place.
+
+Then **click a second point along a track** to set the text angle (or press **Esc**
+to leave it horizontal). Positions are converted to world meters via
+`convert_run8_to_tile_coords()` (region_extractor.py); the capture tool inverts that
+transform (the align viewer additionally inverts its manual-alignment transform to
+recover world coords), and the angle is the screen bearing of the two clicks folded
+to [-90, 90] so text stays upright.
+
+##### Live authoring server (`serve.py`) — recommended for the align viewer
+Instead of hosting the output with `python -m http.server` (a static file server
+that can only hand out files), run the bundled **`serve.py`**, a stdlib-only server
+(no Flask/extra dependency) that serves the same output **and** accepts label edits:
+
+```bash
+python serve.py <config.ini> [--port 8000] [--host 127.0.0.1] [--areas-file FILE] [--no-authoring]
+```
+
+With it running, the manual-alignment viewer's authoring popups gain a **Save**
+button (new labels) and, on **click of any existing label**, an **edit popup**
+(text / color / font / rotation / box) with a **Delete** button — full add/edit/delete
+with no copy-paste and no regenerate. Existing labels can also be repositioned/rotated
+directly on the map: **drag** a label to move it, and **hold the mouse button on** a
+label while **scrolling the wheel** to rotate it (hold **Shift** for 1&deg; fine steps).
+Rotation only occurs while the button is held (the wheel is captured so the map does not
+zoom), and both gestures persist their change. Each change is written straight into the
+**writable areas file** (the first entry of `[visualization] areas_file`, or
+`--areas-file`), and the served `manifest.json` is kept in sync so a fresh reload
+matches. The INI file stays the source of truth, so a later `output_generator.py`
+run reproduces everything.
+
+- **Detection is automatic:** the viewer probes `GET /api/ping`; if there's no
+  backend (opened as a static file, or served by plain `http.server`) it silently
+  falls back to the old **Generate INI → copy/paste** popup for new labels, and
+  existing labels are non-interactive. `--production` (no "Add Label" button) is
+  unaffected either way.
+- **File safety:** writes are atomic (temp + replace) and back up the previous
+  contents to `<areas_file>.bak` before each change; only the exact `[area.<id>]`
+  block a mutation targets is rewritten, so comments/order elsewhere are preserved.
+  Editing/deleting is only allowed for labels that live in the writable areas file
+  (labels defined inline in the config or in another areas file return a clear error).
+- **Code:** `serve.py` (HTTP + REST API: `GET/POST /api/areas`, `PUT/DELETE
+  /api/areas/<id>`, `GET /api/ping`), `area_store.py` (formats/splices `[area.*]`
+  blocks with atomic write + backup), and `config_parser.collect_areas()` /
+  `parse_areas_file()` / `resolve_areas_files()` (merge/read the label set). Viewer
+  wiring lives in `ALIGN_JS` in `html_generator.py` (`detectBackend`, `apiArea`,
+  `openAreaEditor`, `addAreaMarker`/`replaceAreaMarker`/`removeAreaMarker`).
+
+Without the server, the flow is still: popup **Generate INI** → paste the `[area.*]`
+block into the areas file → re-run `output_generator.py`.
 
 #### Interactive Map Features
-- **Base Map Selection**: OpenStreetMap, Satellite (Esri), or None
-- **Region Toggle**: Enable/disable regions dynamically (data loaded on demand)
-- **Overlay Controls**: Toggle Signals, Industries, AI Locations, Tile Boundaries
+- **Base Map Selection**: OpenStreetMap, Satellite (Esri), or None, plus a toggleable **OpenRailwayMap** overlay
+- **Region Toggle**: Enable/disable regions dynamically (data loaded on demand); in the align viewer, enabling a region fits the map to it
+- **Overlay Controls**: Toggle Signals, Industries, AI Locations, Tile Boundaries, and Area Labels
 - **Search Function**: Search by track section, signal, industry tag, or AI location
 - **Ctrl+Click Selection**: Select multiple track sections to calculate total length
 - **Mouse Position**: Lat/lon display in lower right corner
-- **Background Opacity**: Slider to adjust base map transparency
+- **Right-click → Google Maps** *(align viewer)*: right-click any point to open Google Maps at that lat/lon (with the current zoom) in a new tab, for cross-checking against real-world imagery/streetview. The coordinate is the map position under the cursor, so in the align viewer it is only as accurate as the current manual alignment.
+- **Opacity Sliders**: Independent **Map Opacity** (base map + ORM) and **Track Opacity**
+- **Align mode** *(align viewer only)*: drag the track to slide it onto the real map; releasing commits the new alignment
+- **Add Label** *(align viewer only, hidden under `--production`)*: click to author a new area label and generate its `[area.*]` INI block
 
 #### Visual Elements
 - **Track Sections**: Configurable color, switches shown in different color
