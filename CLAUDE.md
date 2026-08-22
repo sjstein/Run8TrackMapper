@@ -92,16 +92,45 @@ merged and duplicate ids are rejected. Same syntax either way:
 label = Barstow Yard
 tile = 209,-10           ; tile_x,tile_z
 local = 421.5,-500.2     ; Run8 local_x,local_z within that tile
-color = #ffd11a          ; optional (defaults to [colors] area_label)
+color = bnsf             ; optional; a [color_presets] name or hex; defaults to the type's color, then [colors] area_label
 font_size = 16           ; optional (size at <=50 m scale; default 22)
 box = true               ; optional, background box behind the text (default: no box)
 rotation = -30           ; optional, rotate text in degrees clockwise (align to track/yard)
+type = yard              ; optional category: yard|cp|jct|region|notes|other (default other)
 ```
 Labels scale with the map: full `font_size` at the 50 m scale-bar level, shrinking to
 a small floor by ~15 km (tunable in `updateAreaLabelSizes` in html_generator.py).
 Labels are emitted into `manifest.json` (`areas`) and rendered as a toggleable
 "Area Labels" overlay in **both** the tile-based viewer and the manual-alignment
 (default) viewer.
+
+**Categories (`type`).** Each label has a category — `yard`, `cp` (control point),
+`jct` (junction), `region`, `notes`, or `other` (the default for untyped/legacy
+labels). A category implies a default text color (`[colors] area_yard`, `area_cp`,
+`area_jct`, `area_region`, `area_notes`, `area_other`; a label's own `color=` still
+wins) and drives per-category show/hide. In the **align viewer** the single "Area
+Labels" overlay becomes a master checkbox with one indented child (colour-swatched)
+per category, so you can show just control points, just yards, etc. The authoring
+add/edit popup (and the no-backend INI-generator popup) include a **Type** selector.
+The canonical category list + labels live in `AREA_TYPES`/`AREA_TYPE_LABELS`
+(config_parser.py) and the `AREA_TYPES` JS constant in `ALIGN_JS` (html_generator.py);
+default colors live in `ColorConfig` and are emitted to `window.COLORS.areaTypes`. The
+tile-based viewer color-codes by category but keeps a single "Area Labels" toggle.
+New labels placed in the align editor default to category **`cp`** (`AREA_TYPE_DEFAULT_NEW`
+in `ALIGN_JS`); the *data* default for untyped/legacy labels stays `other`.
+
+**Color presets (a palette).** A label `color` may be a **preset name** (e.g. `bnsf`)
+or a raw hex. Presets are a `name -> hex` map defined in an optional `[color_presets]`
+config section, merged over the built-ins `DEFAULT_COLOR_PRESETS` (`bnsf` `#f85d13`,
+`up` `#ffcc00`) in config_parser.py, exposed as `VisualizationConfig.color_presets` and
+emitted to `manifest.color_presets`. **The name is stored, not the hex** — kept raw in
+the INI / `AreaLabel.color` / REST payload and **resolved to hex at render time** by the
+viewer (`resolveColor` in `ALIGN_JS`; an inline lookup in the tile-based
+`createAreaLabelIcon`), so recoloring a preset updates every label that uses it. In the
+align editor the Color control is a dropdown — **Default** (the category color), the
+named presets, or **Custom** (a native RGB `<input type="color">`) — with a live swatch;
+Default stores no color, a preset stores its name, Custom stores hex. `config_parser.resolve_color()`
+is the Python-side resolver (used for tests / any server-side rendering).
 
 Authoring (capturing new labels):
 - **Tile-based viewer:** **Shift+Click** the map to place a label.

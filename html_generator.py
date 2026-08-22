@@ -31,7 +31,15 @@ window.COLORS = {{
     signalIntermediate: '{colors.signal_intermediate}',
     signalBorderSingle: '{colors.signal_border_single}',
     signalBorderStacked: '{colors.signal_border_stacked}',
-    areaLabel: '{colors.area_label}'
+    areaLabel: '{colors.area_label}',
+    areaTypes: {{
+        yard: '{colors.area_yard}',
+        cp: '{colors.area_cp}',
+        jct: '{colors.area_jct}',
+        region: '{colors.area_region}',
+        notes: '{colors.area_notes}',
+        other: '{colors.area_other}'
+    }}
 }};
 </script>'''
 
@@ -1565,7 +1573,15 @@ window.COLORS = {{
     signalIntermediate: '{colors.signal_intermediate}',
     signalBorderSingle: '{colors.signal_border_single}',
     signalBorderStacked: '{colors.signal_border_stacked}',
-    areaLabel: '{colors.area_label}'
+    areaLabel: '{colors.area_label}',
+    areaTypes: {{
+        yard: '{colors.area_yard}',
+        cp: '{colors.area_cp}',
+        jct: '{colors.area_jct}',
+        region: '{colors.area_region}',
+        notes: '{colors.area_notes}',
+        other: '{colors.area_other}'
+    }}
 }};
 
 (function() {{
@@ -2054,7 +2070,9 @@ window.COLORS = {{
     // Area/place labels (user-defined)
     // ========================================
     function createAreaLabelIcon(area) {{
-        const color = area.color || COLORS.areaLabel;
+        const _cp = (MapApp.manifest && MapApp.manifest.color_presets) || {{}};
+        const _resolved = area.color ? (_cp[String(area.color).trim().toLowerCase()] || String(area.color).trim()) : '';
+        const color = _resolved || (COLORS.areaTypes && COLORS.areaTypes[area.type || 'other']) || COLORS.areaLabel;
         const fontSize = area.font_size || 22;
         let style = `display:inline-block;color:${{color}};font-size:${{fontSize}}px;font-weight:bold;white-space:nowrap;`;
         if (area.box) {{
@@ -2714,7 +2732,7 @@ ALIGN_JS = r'''
 
     // ---- Area/place labels (ported from the tile-based viewer; placed via the transform) ----
     function createAreaLabelIcon(area){
-        const color = area.color || COLORS.areaLabel;
+        const color = resolveColor(area.color) || (COLORS.areaTypes && COLORS.areaTypes[area.type || 'other']) || COLORS.areaLabel;
         const fontSize = area.font_size || 22;
         let style = `display:inline-block;color:${color};font-size:${fontSize}px;font-weight:bold;white-space:nowrap;`;
         if (area.box) style += `background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:3px;text-shadow:0 1px 2px rgba(0,0,0,0.8);`;
@@ -2729,9 +2747,32 @@ ALIGN_JS = r'''
         return [ (area.tile_x - homeX)*tp.tile_width + area.local_x,
                  (area.tile_z - homeZ)*tp.tile_height - area.local_z ];
     }
+    // Label categories: [id, display]. Master "Area Labels" overlay contains one
+    // sub-layerGroup per category so each can be shown/hidden independently.
+    const AREA_TYPES = [['yard','Yard'],['cp','CP'],['jct','JCT'],['region','Region'],['notes','Notes'],['other','Other']];
+    const AREA_TYPE_DEFAULT_NEW = 'cp';   // preselected category when placing a new label
+    function areaTypeOf(area){ const t = area && area.type || 'other'; return AREA_TYPES.some(x=>x[0]===t) ? t : 'other'; }
+    // Color palette (name -> hex) from the config, emitted into the manifest.
+    // A label's color is stored as a preset NAME or a raw hex; resolve at render.
+    function areaColorPresets(){ return (MapApp.manifest && MapApp.manifest.color_presets) || {}; }
+    function resolveColor(c){
+        if (!c) return c;
+        return areaColorPresets()[String(c).trim().toLowerCase()] || String(c).trim();
+    }
+    function initAreaTypeVisible(){
+        if (MapApp.areaTypeVisible) return;
+        MapApp.areaTypeVisible = {}; for (const [id] of AREA_TYPES) MapApp.areaTypeVisible[id] = true;
+    }
     function buildAreaLabels(){
         MapApp.areaLabelsLayer = L.layerGroup();
         MapApp.areaMarkers = [];
+        MapApp.areaTypeLayers = {};
+        initAreaTypeVisible();
+        for (const [id] of AREA_TYPES){
+            const lg = L.layerGroup();
+            MapApp.areaTypeLayers[id] = lg;
+            if (MapApp.areaTypeVisible[id]) lg.addTo(MapApp.areaLabelsLayer);
+        }
         const areas = (MapApp.manifest && MapApp.manifest.areas) || [];
         const tp = MapApp.manifest && MapApp.manifest.tile_params;
         if (tp){ for (const area of areas) addAreaMarker(area); }
@@ -2792,15 +2833,18 @@ ALIGN_JS = r'''
                 el.addEventListener('mousedown', (ev)=> startLabelRotate(ev, rec));
             });
         }
-        MapApp.areaLabelsLayer.addLayer(marker);
+        rec.type = areaTypeOf(area);
+        (MapApp.areaTypeLayers && MapApp.areaTypeLayers[rec.type] || MapApp.areaLabelsLayer).addLayer(marker);
         MapApp.areaMarkers.push(rec);
         return rec;
     }
     function removeAreaMarker(id){
         if (!MapApp.areaMarkers) return;
         for (let i = MapApp.areaMarkers.length - 1; i >= 0; i--){
-            if (MapApp.areaMarkers[i].area.id === id){
-                MapApp.areaLabelsLayer.removeLayer(MapApp.areaMarkers[i].marker);
+            const rec = MapApp.areaMarkers[i];
+            if (rec.area.id === id){
+                const lg = MapApp.areaTypeLayers && MapApp.areaTypeLayers[rec.type];
+                (lg || MapApp.areaLabelsLayer).removeLayer(rec.marker);
                 MapApp.areaMarkers.splice(i, 1);
             }
         }
@@ -2815,6 +2859,22 @@ ALIGN_JS = r'''
         MapApp.overlayStates.areaLabels = true;
         const cb = document.getElementById('overlay-areaLabels'); if (cb) cb.checked = true;
         if (MapApp.areaLabelsLayer) MapApp.areaLabelsLayer.addTo(MapApp.map);
+    }
+    // Make a category visible (used after saving a label so it never lands hidden).
+    function ensureAreaTypeVisible(type){
+        const t = AREA_TYPES.some(x=>x[0]===type) ? type : 'other';
+        if (!MapApp.areaTypeVisible || MapApp.areaTypeVisible[t]) return;
+        setAreaTypeVisible(t, true);
+        const cb = document.getElementById('overlay-areaType-'+t); if (cb) cb.checked = true;
+    }
+    function setAreaTypeVisible(type, on){
+        if (!MapApp.areaTypeVisible) return;
+        MapApp.areaTypeVisible[type] = on;
+        const lg = MapApp.areaTypeLayers && MapApp.areaTypeLayers[type];
+        if (lg && MapApp.areaLabelsLayer){
+            if (on) MapApp.areaLabelsLayer.addLayer(lg); else MapApp.areaLabelsLayer.removeLayer(lg);
+        }
+        updateAreaLabelSizes();
     }
     // Hold-button + wheel rotation. mousedown on a label starts a rotate gesture:
     // while the button is held we capture wheel events at the window level (so the
@@ -2907,9 +2967,24 @@ ALIGN_JS = r'''
     function addAreaLabelToggle(){
         const list = document.getElementById('overlay-list');
         if (!list) return;
+        initAreaTypeVisible();
         const item = document.createElement('div'); item.className = 'overlay-item';
         item.innerHTML = '<input type="checkbox" id="overlay-areaLabels"><label for="overlay-areaLabels">Area Labels</label>';
         list.appendChild(item);
+        // Per-category children (indented), each with a colour swatch.
+        const children = document.createElement('div');
+        children.style.cssText = 'margin:1px 0 3px 18px;display:flex;flex-direction:column;gap:1px;';
+        for (const [id,label] of AREA_TYPES){
+            const dot = (COLORS.areaTypes && COLORS.areaTypes[id]) || COLORS.areaLabel;
+            const row = document.createElement('label');
+            row.style.cssText = 'font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer;';
+            row.innerHTML = '<input type="checkbox" id="overlay-areaType-'+id+'"'+(MapApp.areaTypeVisible[id]?' checked':'')+'>'
+                + '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:'+dot+';border:1px solid rgba(0,0,0,.4);"></span>'
+                + label;
+            children.appendChild(row);
+            row.querySelector('input').addEventListener('change', (e)=> setAreaTypeVisible(id, e.target.checked));
+        }
+        list.appendChild(children);
         item.querySelector('input').addEventListener('change', (e)=>{
             MapApp.overlayStates.areaLabels = e.target.checked;
             if (!MapApp.areaLabelsLayer) return;
@@ -2951,7 +3026,8 @@ ALIGN_JS = r'''
             }
         }
         const area = { label:'', tile_x: cap.tileX, tile_z: cap.tileZ,
-                       local_x: +cap.localX.toFixed(1), local_z: +cap.localZ.toFixed(1), rotation };
+                       local_x: +cap.localX.toFixed(1), local_z: +cap.localZ.toFixed(1),
+                       rotation, type: AREA_TYPE_DEFAULT_NEW };
         openAreaEditor(area, { isNew:true, latlng: cap.latlng });
     }
     function showAreaHint(html){
@@ -2968,17 +3044,32 @@ ALIGN_JS = r'''
     function openAreaEditor(area, opts){
         const isNew = !!opts.isNew;
         if (isNew && !MapApp.hasBackend){ openAreaIniPopup(area, opts.latlng); return; }
+        // Color control: Default (category color) / named presets / Custom (RGB).
+        // A preset stores its NAME; Custom stores hex; Default stores nothing.
+        const presets = areaColorPresets();
+        const presetNames = Object.keys(presets);
+        const curColor = (area.color || '').trim();
+        const curLower = curColor.toLowerCase();
+        const colorMode = !curColor ? '__default__' : (presetNames.indexOf(curLower) >= 0 ? curLower : '__custom__');
+        const customHex = (colorMode === '__custom__' && /^#[0-9a-fA-F]{6}$/.test(curColor)) ? curColor : '#ffd11a';
+        const colorOpts = ['<option value="__default__"' + (colorMode==='__default__'?' selected':'') + '>Default</option>']
+            .concat(presetNames.map(n => `<option value="${n}"${colorMode===n?' selected':''}>${n.toUpperCase()}</option>`))
+            .concat([`<option value="__custom__"${colorMode==='__custom__'?' selected':''}>Custom…</option>`])
+            .join('');
         const html = `<div style="min-width:250px;font:12px Arial;">
             <b>${isNew ? 'New' : 'Edit'} Area Label</b>
             <label style="display:block;margin:6px 0 2px;">Label text:</label>
             <input id="al-text" type="text" placeholder="e.g. Barstow Yard" value="${escapeHtml(area.label)}" style="width:100%;box-sizing:border-box;padding:4px;">
-            <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;">
+            <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
                 <label>Rotation&deg; <input id="al-rot" type="number" value="${area.rotation || 0}" style="width:60px;"></label>
-                <label>Color <input id="al-color" type="text" placeholder="#ffd11a" value="${escapeHtml(area.color || '')}" style="width:82px;"></label>
+                <label>Color <select id="al-color-sel" style="padding:2px;">${colorOpts}</select></label>
+                <span id="al-color-swatch" style="display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid rgba(0,0,0,.4);"></span>
+                <input id="al-color-custom" type="color" value="${customHex}" style="width:34px;height:22px;padding:0;display:${colorMode==='__custom__'?'inline-block':'none'};">
             </div>
             <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
                 <label>Font <input id="al-font" type="number" value="${area.font_size || ''}" placeholder="22" style="width:56px;"></label>
                 <label><input id="al-box" type="checkbox" ${area.box ? 'checked' : ''}> box</label>
+                <label>Type <select id="al-type" style="padding:2px;">${AREA_TYPES.map(([id,lbl])=>`<option value="${id}"${(area.type||'other')===id?' selected':''}>${lbl}</option>`).join('')}</select></label>
             </div>
             <div style="margin-top:6px;color:#555;">tile ${area.tile_x},${area.tile_z} &nbsp; local ${(+area.local_x).toFixed(1)},${(+area.local_z).toFixed(1)}</div>
             ${isNew ? '' : '<div style="margin-top:4px;color:#777;font-style:italic;">Tip: drag to move &middot; hold the mouse button on it and scroll to rotate.</div>'}
@@ -2996,15 +3087,35 @@ ALIGN_JS = r'''
             if (!textEl || !saveBtn) return;
             textEl.focus();
             const showErr = (m)=>{ if (errEl){ errEl.textContent = m; errEl.style.display = 'block'; } };
+            const colorSel = document.getElementById('al-color-sel');
+            const colorCustom = document.getElementById('al-color-custom');
+            const colorSwatch = document.getElementById('al-color-swatch');
+            const typeSel = document.getElementById('al-type');
+            const swatchColor = ()=>{
+                const v = colorSel ? colorSel.value : '__default__';
+                if (v === '__default__') return (COLORS.areaTypes && COLORS.areaTypes[typeSel.value]) || COLORS.areaLabel;
+                if (v === '__custom__') return colorCustom.value;
+                return presets[v] || COLORS.areaLabel;
+            };
+            const syncColorUI = ()=>{
+                if (colorCustom) colorCustom.style.display = (colorSel && colorSel.value === '__custom__') ? 'inline-block' : 'none';
+                if (colorSwatch) colorSwatch.style.background = swatchColor();
+            };
+            if (colorSel) colorSel.addEventListener('change', syncColorUI);
+            if (colorCustom) colorCustom.addEventListener('input', syncColorUI);
+            if (typeSel) typeSel.addEventListener('change', syncColorUI);  // Default swatch tracks the category
+            syncColorUI();
             const gather = ()=>{
-                const color = (document.getElementById('al-color').value || '').trim();
                 const font = (document.getElementById('al-font').value || '').trim();
+                const cv = colorSel ? colorSel.value : '__default__';
+                const color = (cv === '__default__') ? null : (cv === '__custom__' ? colorCustom.value : cv);
                 return {
                     label: (textEl.value || '').trim(),
                     rotation: Number(document.getElementById('al-rot').value) || 0,
-                    color: color || null,
+                    color: color,
                     font_size: font ? Number(font) : null,
-                    box: document.getElementById('al-box').checked
+                    box: document.getElementById('al-box').checked,
+                    type: typeSel ? typeSel.value : 'other'
                 };
             };
             const save = ()=>{
@@ -3021,7 +3132,7 @@ ALIGN_JS = r'''
                 saveBtn.disabled = true;
                 req.then(saved => {
                     if (isNew) addAreaMarker(saved); else replaceAreaMarker(saved);
-                    updateAreaLabelSizes(); ensureAreaOverlayVisible();
+                    updateAreaLabelSizes(); ensureAreaOverlayVisible(); ensureAreaTypeVisible(saved.type);
                     MapApp.map.closePopup();
                 }).catch(e => { saveBtn.disabled = false; showErr(e.message); });
             };
@@ -3044,6 +3155,7 @@ ALIGN_JS = r'''
             <b>New Area Label</b><br>
             <label style="display:block;margin:6px 0 2px;">Label text:</label>
             <input id="al-text" type="text" placeholder="e.g. Barstow Yard" style="width:100%;box-sizing:border-box;padding:4px;">
+            <label style="display:block;margin:6px 0 2px;">Type <select id="al-type" style="padding:2px;">${AREA_TYPES.map(([id,lbl])=>`<option value="${id}"${(area.type||'other')===id?' selected':''}>${lbl}</option>`).join('')}</select></label>
             <div style="margin-top:6px;color:#555;">tile ${tileX},${tileZ} &nbsp; local ${localX.toFixed(1)},${localZ.toFixed(1)} &nbsp; rot ${rotation}&deg;</div>
             <button id="al-gen" style="margin-top:8px;padding:4px 8px;cursor:pointer;">Generate INI</button>
             <pre id="al-out" style="display:none;white-space:pre-wrap;background:#f4f4f4;padding:6px;margin-top:6px;border-radius:4px;font-size:11px;"></pre>
@@ -3060,6 +3172,8 @@ ALIGN_JS = r'''
                 if (!slug) slug=`area_${tileX}_${tileZ}`;
                 let ini=`[area.${slug}]\nlabel = ${label||'New Label'}\ntile = ${tileX},${tileZ}\nlocal = ${localX.toFixed(1)},${localZ.toFixed(1)}`;
                 if (rotation) ini+=`\nrotation = ${rotation}`;
+                const atype=(document.getElementById('al-type')||{}).value;
+                if (atype && atype!=='other') ini+=`\ntype = ${atype}`;
                 outEl.textContent=ini; outEl.style.display='block'; copyBtn.style.display='inline-block';
             };
             genBtn.addEventListener('click', generate);

@@ -34,7 +34,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, unquote
 
-from config_parser import parse_config, collect_areas, resolve_areas_files
+from config_parser import (parse_config, collect_areas, resolve_areas_files,
+                            AREA_TYPES, AREA_TYPE_DEFAULT)
 from area_store import AreaStore, AreaStoreError, slugify, _area_to_dict
 
 
@@ -88,6 +89,7 @@ def _clean_common_fields(payload: dict, area: dict):
         area['label'] = label
 
     if 'color' in payload:
+        # Store the raw value (preset name or hex); resolved to hex at render time.
         color = (payload.get('color') or '').strip()
         if color:
             area['color'] = color
@@ -114,6 +116,15 @@ def _clean_common_fields(payload: dict, area: dict):
             area['rotation'] = rot
         else:
             area.pop('rotation', None)
+
+    if 'type' in payload:
+        t = (payload.get('type') or '').strip().lower()
+        if t and t not in AREA_TYPES:
+            raise ValueError("type must be one of " + ", ".join(AREA_TYPES))
+        if t and t != AREA_TYPE_DEFAULT:
+            area['type'] = t
+        else:
+            area.pop('type', None)
 
 
 def make_handler(state: AuthoringState, authoring: bool):

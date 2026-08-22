@@ -25,7 +25,7 @@ output_dir = ./output/socal/
 import configparser
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # Standard filenames within each region directory
@@ -45,6 +45,33 @@ class TileBasedConfig:
     tile_height: float = 1023.2          # Tile height in meters
 
 
+# Area/place label categories. Ordered as they appear in the overlay panel.
+# Labels with no (or an unrecognised) type fall back to AREA_TYPE_DEFAULT.
+AREA_TYPES = ("yard", "cp", "jct", "region", "notes", "other")
+AREA_TYPE_DEFAULT = "other"
+AREA_TYPE_LABELS = {
+    "yard": "Yard", "cp": "CP", "jct": "JCT",
+    "region": "Region", "notes": "Notes", "other": "Other",
+}
+
+# Built-in color presets, always available even without a [color_presets] section.
+# A label's `color` may be a preset NAME (e.g. "bnsf") or a raw hex value; the name
+# is stored as-is and resolved to hex at render time (viewer), so a preset can be
+# recoloured in one place. Keys are compared case-insensitively.
+DEFAULT_COLOR_PRESETS = {
+    "bnsf": "#f85d13",
+    "up": "#ffcc00",
+}
+
+
+def resolve_color(value, presets=None):
+    """Resolve a preset name to its hex; pass raw hex/other values through trimmed."""
+    if not value:
+        return value
+    table = presets if presets is not None else DEFAULT_COLOR_PRESETS
+    return table.get(value.strip().lower(), value.strip())
+
+
 @dataclass
 class ColorConfig:
     """Color configuration for visualization elements"""
@@ -58,7 +85,18 @@ class ColorConfig:
     signal_border_single: str = "#000000"  # Single head signal border (black)
     signal_border_stacked: str = "#87CEEB"  # Multiple head signal border (light blue)
     background: str = "#333333"         # Background color (tile-based mode)
-    area_label: str = "#ffd11a"         # Area/place label text color (gold)
+    area_label: str = "#ffd11a"         # Fallback area/place label text color (gold)
+    # Per-category default label colors (a label's own color= still wins).
+    area_yard: str = "#ffd11a"          # Yard (gold)
+    area_cp: str = "#ff6b35"            # Control point (orange)
+    area_jct: str = "#33c4d6"           # Junction (cyan)
+    area_region: str = "#ffffff"        # Region name (white)
+    area_notes: str = "#7ed957"         # Note (green)
+    area_other: str = "#ffd11a"         # Uncategorised (gold; matches legacy default)
+
+    def area_type_color(self, area_type: str) -> str:
+        """Default text color for a label category."""
+        return getattr(self, "area_" + (area_type or AREA_TYPE_DEFAULT), self.area_label)
 
 
 @dataclass
@@ -101,10 +139,11 @@ class AreaLabel:
     label: str                       # displayed text
     tile: Tuple[int, int]            # (tile_x, tile_z)
     local: Tuple[float, float]       # (local_x, local_z) Run8 local meters within the tile
-    color: Optional[str] = None      # overrides the global area_label color
+    color: Optional[str] = None      # overrides the per-type / global area_label color
     font_size: Optional[int] = None  # overrides the default label font size
     box: bool = False                # draw a background box behind the text
     rotation: float = 0.0            # rotate text in degrees (clockwise), e.g. to align to a track
+    type: str = AREA_TYPE_DEFAULT    # category (yard|cp|jct|region|notes|other); drives color + toggle group
 
 
 @dataclass
@@ -119,6 +158,8 @@ class VisualizationConfig:
     tile_based: Optional[TileBasedConfig] = None
     initial_center: Optional[Tuple[float, float]] = None  # (lat, lon) for initial map center
     areas: List[AreaLabel] = field(default_factory=list)  # user-defined area/place labels
+    color_presets: Dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_COLOR_PRESETS))  # name -> hex label-color palette
 
     @property
     def industry_db(self) -> Path:
@@ -174,6 +215,7 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
             except (ValueError, IndexError):
                 errors.append(f"[{section_name}] local must be format 'x,z' e.g. '421.5,-500.2' ({source})")
 
+        # Store the raw value (preset name or hex); resolved to hex at render time.
         color = area.get('color', '').strip() or None
 
         font_size_str = area.get('font_size', '').strip()
@@ -194,6 +236,14 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
             except ValueError:
                 errors.append(f"[{section_name}] rotation must be a number in degrees ({source})")
 
+        type_str = area.get('type', '').strip().lower()
+        area_type = AREA_TYPE_DEFAULT
+        if type_str:
+            if type_str in AREA_TYPES:
+                area_type = type_str
+            else:
+                errors.append(f"[{section_name}] type must be one of {', '.join(AREA_TYPES)} ({source})")
+
         if label and tile is not None and local is not None:
             result.append(AreaLabel(
                 id=area_id,
@@ -203,7 +253,8 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
                 color=color,
                 font_size=font_size,
                 box=box,
-                rotation=rotation
+                rotation=rotation,
+                type=area_type
             ))
     return result
 
@@ -369,7 +420,21 @@ def parse_config(config_path: str) -> VisualizationConfig:
             signal_border_stacked=color_section.get('signal_border_stacked', colors.signal_border_stacked).strip(),
             background=color_section.get('background', colors.background).strip(),
             area_label=color_section.get('area_label', colors.area_label).strip(),
+            area_yard=color_section.get('area_yard', colors.area_yard).strip(),
+            area_cp=color_section.get('area_cp', colors.area_cp).strip(),
+            area_jct=color_section.get('area_jct', colors.area_jct).strip(),
+            area_region=color_section.get('area_region', colors.area_region).strip(),
+            area_notes=color_section.get('area_notes', colors.area_notes).strip(),
+            area_other=color_section.get('area_other', colors.area_other).strip(),
         )
+
+    # Parse [color_presets] section (optional): name = hex, merged over the built-ins.
+    color_presets = dict(DEFAULT_COLOR_PRESETS)
+    if 'color_presets' in parser:
+        for name, value in parser['color_presets'].items():
+            hexval = (value or '').strip()
+            if hexval:
+                color_presets[name.strip().lower()] = hexval
 
     # Parse [tile_based_plot] section (optional)
     tile_based = None
@@ -404,7 +469,8 @@ def parse_config(config_path: str) -> VisualizationConfig:
         colors=colors,
         tile_based=tile_based,
         initial_center=initial_center,
-        areas=areas
+        areas=areas,
+        color_presets=color_presets
     )
 
     # Validate that all files exist

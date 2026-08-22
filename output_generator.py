@@ -109,6 +109,8 @@ def area_to_dict(area) -> dict:
         result["box"] = True
     if area.rotation:
         result["rotation"] = area.rotation
+    if getattr(area, "type", None):
+        result["type"] = area.type
     return result
 
 
@@ -171,7 +173,8 @@ def generate_manifest(config: VisualizationConfig,
         "regions": regions_manifest,
         "tile_corrections": tile_corrections_list,
         "coordinate_system": "tile_local" if tile_based else "geographic",
-        "areas": [area_to_dict(a) for a in config.areas]
+        "areas": [area_to_dict(a) for a in config.areas],
+        "color_presets": dict(getattr(config, "color_presets", {}) or {})
     }
 
     # Add tile parameters if using tile-based coordinates

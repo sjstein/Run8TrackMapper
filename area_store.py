@@ -28,7 +28,7 @@ _AREA_HEADER_RE = re.compile(r'^\s*\[area\.([^\]]+)\]\s*$')
 _ANY_HEADER_RE = re.compile(r'^\s*\[[^\]]+\]\s*$')
 # A recognized area key assignment (used to find where a block's data ends, so
 # trailing blank lines / comments after the block are left with the file).
-_AREA_KEY_RE = re.compile(r'^\s*(label|tile|local|color|font_size|box|rotation)\s*=', re.I)
+_AREA_KEY_RE = re.compile(r'^\s*(label|tile|local|color|font_size|box|rotation|type)\s*=', re.I)
 
 
 def slugify(text: str) -> str:
@@ -60,6 +60,8 @@ def format_area_block(area: Dict) -> str:
         lines.append("box = true")
     if area.get('rotation'):
         lines.append(f"rotation = {_fmt_num(area['rotation'])}")
+    if area.get('type') and area['type'] != 'other':
+        lines.append(f"type = {area['type']}")
     return "\n".join(lines) + "\n"
 
 
@@ -194,4 +196,6 @@ def _area_to_dict(area) -> Dict:
         d["box"] = True
     if area.rotation:
         d["rotation"] = area.rotation
+    if getattr(area, "type", None):
+        d["type"] = area.type
     return d
