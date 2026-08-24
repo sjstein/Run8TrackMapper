@@ -174,7 +174,9 @@ def generate_manifest(config: VisualizationConfig,
         "tile_corrections": tile_corrections_list,
         "coordinate_system": "tile_local" if tile_based else "geographic",
         "areas": [area_to_dict(a) for a in config.areas],
-        "color_presets": dict(getattr(config, "color_presets", {}) or {})
+        "color_presets": dict(getattr(config, "color_presets", {}) or {}),
+        "label_types": [{"id": t.id, "name": t.name, "color": t.color}
+                        for t in getattr(config, "label_types", []) or []]
     }
 
     # Add tile parameters if using tile-based coordinates

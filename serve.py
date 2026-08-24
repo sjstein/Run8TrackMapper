@@ -35,7 +35,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, unquote
 
 from config_parser import (parse_config, collect_areas, resolve_areas_files,
-                            AREA_TYPES, AREA_TYPE_DEFAULT)
+                            AREA_TYPE_DEFAULT)
 from area_store import AreaStore, AreaStoreError, slugify, _area_to_dict
 
 
@@ -118,9 +118,8 @@ def _clean_common_fields(payload: dict, area: dict):
             area.pop('rotation', None)
 
     if 'type' in payload:
+        # Any type is accepted; ones not in the config's [label_types] render white.
         t = (payload.get('type') or '').strip().lower()
-        if t and t not in AREA_TYPES:
-            raise ValueError("type must be one of " + ", ".join(AREA_TYPES))
         if t and t != AREA_TYPE_DEFAULT:
             area['type'] = t
         else:
