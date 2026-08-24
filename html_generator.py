@@ -31,15 +31,7 @@ window.COLORS = {{
     signalIntermediate: '{colors.signal_intermediate}',
     signalBorderSingle: '{colors.signal_border_single}',
     signalBorderStacked: '{colors.signal_border_stacked}',
-    areaLabel: '{colors.area_label}',
-    areaTypes: {{
-        yard: '{colors.area_yard}',
-        cp: '{colors.area_cp}',
-        jct: '{colors.area_jct}',
-        region: '{colors.area_region}',
-        notes: '{colors.area_notes}',
-        other: '{colors.area_other}'
-    }}
+    areaLabel: '{colors.area_label}'
 }};
 </script>'''
 
@@ -1573,15 +1565,7 @@ window.COLORS = {{
     signalIntermediate: '{colors.signal_intermediate}',
     signalBorderSingle: '{colors.signal_border_single}',
     signalBorderStacked: '{colors.signal_border_stacked}',
-    areaLabel: '{colors.area_label}',
-    areaTypes: {{
-        yard: '{colors.area_yard}',
-        cp: '{colors.area_cp}',
-        jct: '{colors.area_jct}',
-        region: '{colors.area_region}',
-        notes: '{colors.area_notes}',
-        other: '{colors.area_other}'
-    }}
+    areaLabel: '{colors.area_label}'
 }};
 
 (function() {{
@@ -2072,7 +2056,9 @@ window.COLORS = {{
     function createAreaLabelIcon(area) {{
         const _cp = (MapApp.manifest && MapApp.manifest.color_presets) || {{}};
         const _resolved = area.color ? (_cp[String(area.color).trim().toLowerCase()] || String(area.color).trim()) : '';
-        const color = _resolved || (COLORS.areaTypes && COLORS.areaTypes[area.type || 'other']) || COLORS.areaLabel;
+        const _lt = (MapApp.manifest && MapApp.manifest.label_types) || [];
+        const _tc = (_lt.find(x => x.id === String(area.type || '').toLowerCase()) || {{}}).color || '#ffffff';
+        const color = _resolved || _tc;
         const fontSize = area.font_size || 22;
         let style = `display:inline-block;color:${{color}};font-size:${{fontSize}}px;font-weight:bold;white-space:nowrap;`;
         if (area.box) {{
@@ -2732,7 +2718,7 @@ ALIGN_JS = r'''
 
     // ---- Area/place labels (ported from the tile-based viewer; placed via the transform) ----
     function createAreaLabelIcon(area){
-        const color = resolveColor(area.color) || (COLORS.areaTypes && COLORS.areaTypes[area.type || 'other']) || COLORS.areaLabel;
+        const color = resolveColor(area.color) || labelTypeColor(area.type);
         const fontSize = area.font_size || 22;
         let style = `display:inline-block;color:${color};font-size:${fontSize}px;font-weight:bold;white-space:nowrap;`;
         if (area.box) style += `background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:3px;text-shadow:0 1px 2px rgba(0,0,0,0.8);`;
@@ -2749,9 +2735,26 @@ ALIGN_JS = r'''
     }
     // Label categories: [id, display]. Master "Area Labels" overlay contains one
     // sub-layerGroup per category so each can be shown/hidden independently.
-    const AREA_TYPES = [['yard','Yard'],['cp','CP'],['jct','JCT'],['region','Region'],['notes','Notes'],['other','Other']];
-    const AREA_TYPE_DEFAULT_NEW = 'cp';   // preselected category when placing a new label
-    function areaTypeOf(area){ const t = area && area.type || 'other'; return AREA_TYPES.some(x=>x[0]===t) ? t : 'other'; }
+    // Label categories come from the config, emitted as manifest.label_types
+    // ([{id,name,color}], in order). A label whose type isn't defined renders white
+    // and groups under AREA_UNDEFINED (shown via an auto "Other" toggle when present).
+    const AREA_UNDEFINED = '__other__';
+    function labelTypes(){ return (MapApp.manifest && MapApp.manifest.label_types) || []; }
+    function labelTypeIds(){ return labelTypes().map(t=>t.id); }
+    function labelTypeColor(id){ const t=labelTypes().find(x=>x.id===String(id||'').toLowerCase()); return t ? t.color : '#ffffff'; }
+    function newLabelType(){ const ids=labelTypeIds(); return ids.indexOf('cp')>=0 ? 'cp' : (ids[0]||'other'); }
+    function areaGroupIds(){ return labelTypeIds().concat([AREA_UNDEFINED]); }
+    function areaTypeOf(area){ const t=String(area && area.type || '').toLowerCase(); return labelTypeIds().indexOf(t)>=0 ? t : AREA_UNDEFINED; }
+    function hasUndefinedLabels(){ const s=new Set(labelTypeIds());
+        return ((MapApp.manifest&&MapApp.manifest.areas)||[]).some(a=>!s.has(String(a.type||'').toLowerCase())); }
+    // <option>s for a Type <select>: the defined categories plus a trailing "Other"
+    // (undefined/white), with the current type preselected.
+    function areaTypeSelectOptions(selType){
+        const cur = String(selType||'').toLowerCase();
+        const defined = labelTypeIds().indexOf(cur) >= 0;
+        return labelTypes().map(t=>`<option value="${t.id}"${cur===t.id?' selected':''}>${t.name}</option>`).join('')
+             + `<option value="other"${defined?'':' selected'}>Other</option>`;
+    }
     // Color palette (name -> hex) from the config, emitted into the manifest.
     // A label's color is stored as a preset NAME or a raw hex; resolve at render.
     function areaColorPresets(){ return (MapApp.manifest && MapApp.manifest.color_presets) || {}; }
@@ -2760,15 +2763,15 @@ ALIGN_JS = r'''
         return areaColorPresets()[String(c).trim().toLowerCase()] || String(c).trim();
     }
     function initAreaTypeVisible(){
-        if (MapApp.areaTypeVisible) return;
-        MapApp.areaTypeVisible = {}; for (const [id] of AREA_TYPES) MapApp.areaTypeVisible[id] = true;
+        if (!MapApp.areaTypeVisible) MapApp.areaTypeVisible = {};
+        for (const id of areaGroupIds()) if (!(id in MapApp.areaTypeVisible)) MapApp.areaTypeVisible[id] = true;
     }
     function buildAreaLabels(){
         MapApp.areaLabelsLayer = L.layerGroup();
         MapApp.areaMarkers = [];
         MapApp.areaTypeLayers = {};
         initAreaTypeVisible();
-        for (const [id] of AREA_TYPES){
+        for (const id of areaGroupIds()){
             const lg = L.layerGroup();
             MapApp.areaTypeLayers[id] = lg;
             if (MapApp.areaTypeVisible[id]) lg.addTo(MapApp.areaLabelsLayer);
@@ -2862,7 +2865,7 @@ ALIGN_JS = r'''
     }
     // Make a category visible (used after saving a label so it never lands hidden).
     function ensureAreaTypeVisible(type){
-        const t = AREA_TYPES.some(x=>x[0]===type) ? type : 'other';
+        const t = areaGroupIds().indexOf(String(type||'').toLowerCase()) >= 0 ? String(type||'').toLowerCase() : AREA_UNDEFINED;
         if (!MapApp.areaTypeVisible || MapApp.areaTypeVisible[t]) return;
         setAreaTypeVisible(t, true);
         const cb = document.getElementById('overlay-areaType-'+t); if (cb) cb.checked = true;
@@ -2933,7 +2936,13 @@ ALIGN_JS = r'''
     // Probe for serve.py; sets MapApp.hasBackend. Fails closed to static mode.
     function detectBackend(){
         return fetch('api/ping').then(r => r.ok ? r.json() : null)
-            .then(j => { MapApp.hasBackend = !!(j && j.ok); })
+            .then(j => {
+                MapApp.hasBackend = !!(j && j.ok);
+                // Honor a read-only server (serve.py --no-authoring): hide the Add
+                // Label button and make existing labels non-interactive, even though
+                // the page was generated as an authoring build.
+                if (j && j.ok && j.authoring === false && MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();
+            })
             .catch(() => { MapApp.hasBackend = false; });
     }
     function apiArea(method, id, body){
@@ -2968,29 +2977,67 @@ ALIGN_JS = r'''
         const list = document.getElementById('overlay-list');
         if (!list) return;
         initAreaTypeVisible();
+        // Master "Area Labels" toggle + a "Filter" button that opens the per-category
+        // checkboxes in a popover (keeps the overlay panel tidy).
         const item = document.createElement('div'); item.className = 'overlay-item';
-        item.innerHTML = '<input type="checkbox" id="overlay-areaLabels"><label for="overlay-areaLabels">Area Labels</label>';
+        item.style.cssText = 'display:flex;align-items:center;gap:6px;';
+        item.innerHTML = '<input type="checkbox" id="overlay-areaLabels"><label for="overlay-areaLabels">Area Labels</label>'
+            + '<button id="area-filter-btn" type="button" title="Choose which label types to show"'
+            + ' style="margin-left:auto;font-size:11px;padding:1px 7px;cursor:pointer;">Filter</button>';
         list.appendChild(item);
-        // Per-category children (indented), each with a colour swatch.
-        const children = document.createElement('div');
-        children.style.cssText = 'margin:1px 0 3px 18px;display:flex;flex-direction:column;gap:1px;';
-        for (const [id,label] of AREA_TYPES){
-            const dot = (COLORS.areaTypes && COLORS.areaTypes[id]) || COLORS.areaLabel;
-            const row = document.createElement('label');
-            row.style.cssText = 'font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer;';
-            row.innerHTML = '<input type="checkbox" id="overlay-areaType-'+id+'"'+(MapApp.areaTypeVisible[id]?' checked':'')+'>'
-                + '<span style="display:inline-block;width:9px;height:9px;border-radius:2px;background:'+dot+';border:1px solid rgba(0,0,0,.4);"></span>'
-                + label;
-            children.appendChild(row);
-            row.querySelector('input').addEventListener('change', (e)=> setAreaTypeVisible(id, e.target.checked));
-        }
-        list.appendChild(children);
-        item.querySelector('input').addEventListener('change', (e)=>{
+        item.querySelector('#overlay-areaLabels').addEventListener('change', (e)=>{
             MapApp.overlayStates.areaLabels = e.target.checked;
             if (!MapApp.areaLabelsLayer) return;
             if (e.target.checked){ MapApp.areaLabelsLayer.addTo(MapApp.map); updateAreaLabelSizes(); }
             else MapApp.map.removeLayer(MapApp.areaLabelsLayer);
         });
+        item.querySelector('#area-filter-btn').addEventListener('click', (e)=>{ e.stopPropagation(); toggleAreaFilterPopover(e.currentTarget); });
+    }
+    // Popover listing the label-type checkboxes (built from the config's label types,
+    // plus an auto "Other" row when undefined labels exist). Toggles open/closed.
+    function closeAreaFilterPopover(){
+        const pop = document.getElementById('area-filter-popover');
+        if (pop) pop.remove();
+        document.removeEventListener('mousedown', areaFilterAway, true);
+    }
+    function areaFilterAway(e){
+        const pop = document.getElementById('area-filter-popover');
+        if (pop && !pop.contains(e.target) && e.target.id !== 'area-filter-btn') closeAreaFilterPopover();
+    }
+    function toggleAreaFilterPopover(anchorBtn){
+        if (document.getElementById('area-filter-popover')){ closeAreaFilterPopover(); return; }
+        const rows = labelTypes().map(t => [t.id, t.name, t.color]);
+        if (hasUndefinedLabels()) rows.push([AREA_UNDEFINED, 'Other', '#ffffff']);
+        const pop = document.createElement('div'); pop.id = 'area-filter-popover';
+        pop.style.cssText = 'position:fixed;z-index:3000;background:#fff;border:1px solid #888;border-radius:6px;'
+            + 'box-shadow:0 2px 12px rgba(0,0,0,.3);padding:8px 10px;font:12px Arial;min-width:150px;';
+        pop.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;">Show label types</div>';
+        for (const [id,label,color] of rows){
+            const row = document.createElement('label');
+            row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;';
+            row.innerHTML = '<input type="checkbox" id="overlay-areaType-'+id+'"'+(MapApp.areaTypeVisible[id]?' checked':'')+'>'
+                + '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+(color||'#ffffff')+';border:1px solid rgba(0,0,0,.4);"></span>'
+                + label;
+            pop.appendChild(row);
+            row.querySelector('input').addEventListener('change', (e)=> setAreaTypeVisible(id, e.target.checked));
+        }
+        const btns = document.createElement('div'); btns.style.cssText = 'margin-top:7px;display:flex;gap:6px;';
+        btns.innerHTML = '<button type="button" id="af-all" style="font-size:11px;padding:1px 7px;cursor:pointer;">All</button>'
+            + '<button type="button" id="af-none" style="font-size:11px;padding:1px 7px;cursor:pointer;">None</button>';
+        pop.appendChild(btns);
+        const setAll = (on)=> rows.forEach(([id])=>{
+            const cb = pop.querySelector('#overlay-areaType-'+id); if (cb) cb.checked = on;
+            setAreaTypeVisible(id, on);
+        });
+        btns.querySelector('#af-all').addEventListener('click', ()=> setAll(true));
+        btns.querySelector('#af-none').addEventListener('click', ()=> setAll(false));
+        document.body.appendChild(pop);
+        const r = anchorBtn.getBoundingClientRect();
+        const pw = pop.offsetWidth;
+        let left = r.left; if (left + pw > window.innerWidth - 6) left = window.innerWidth - 6 - pw;
+        pop.style.top = (r.bottom + 4) + 'px';
+        pop.style.left = Math.max(6, left) + 'px';
+        setTimeout(()=> document.addEventListener('mousedown', areaFilterAway, true), 0);
     }
 
     // ---- Area-label authoring (click to place; second click sets the angle) ----
@@ -3027,7 +3074,7 @@ ALIGN_JS = r'''
         }
         const area = { label:'', tile_x: cap.tileX, tile_z: cap.tileZ,
                        local_x: +cap.localX.toFixed(1), local_z: +cap.localZ.toFixed(1),
-                       rotation, type: AREA_TYPE_DEFAULT_NEW };
+                       rotation, type: newLabelType() };
         openAreaEditor(area, { isNew:true, latlng: cap.latlng });
     }
     function showAreaHint(html){
@@ -3069,7 +3116,7 @@ ALIGN_JS = r'''
             <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
                 <label>Font <input id="al-font" type="number" value="${area.font_size || ''}" placeholder="22" style="width:56px;"></label>
                 <label><input id="al-box" type="checkbox" ${area.box ? 'checked' : ''}> box</label>
-                <label>Type <select id="al-type" style="padding:2px;">${AREA_TYPES.map(([id,lbl])=>`<option value="${id}"${(area.type||'other')===id?' selected':''}>${lbl}</option>`).join('')}</select></label>
+                <label>Type <select id="al-type" style="padding:2px;">${areaTypeSelectOptions(area.type)}</select></label>
             </div>
             <div style="margin-top:6px;color:#555;">tile ${area.tile_x},${area.tile_z} &nbsp; local ${(+area.local_x).toFixed(1)},${(+area.local_z).toFixed(1)}</div>
             ${isNew ? '' : '<div style="margin-top:4px;color:#777;font-style:italic;">Tip: drag to move &middot; hold the mouse button on it and scroll to rotate.</div>'}
@@ -3093,7 +3140,7 @@ ALIGN_JS = r'''
             const typeSel = document.getElementById('al-type');
             const swatchColor = ()=>{
                 const v = colorSel ? colorSel.value : '__default__';
-                if (v === '__default__') return (COLORS.areaTypes && COLORS.areaTypes[typeSel.value]) || COLORS.areaLabel;
+                if (v === '__default__') return labelTypeColor(typeSel.value);
                 if (v === '__custom__') return colorCustom.value;
                 return presets[v] || COLORS.areaLabel;
             };
@@ -3155,7 +3202,7 @@ ALIGN_JS = r'''
             <b>New Area Label</b><br>
             <label style="display:block;margin:6px 0 2px;">Label text:</label>
             <input id="al-text" type="text" placeholder="e.g. Barstow Yard" style="width:100%;box-sizing:border-box;padding:4px;">
-            <label style="display:block;margin:6px 0 2px;">Type <select id="al-type" style="padding:2px;">${AREA_TYPES.map(([id,lbl])=>`<option value="${id}"${(area.type||'other')===id?' selected':''}>${lbl}</option>`).join('')}</select></label>
+            <label style="display:block;margin:6px 0 2px;">Type <select id="al-type" style="padding:2px;">${areaTypeSelectOptions(area.type)}</select></label>
             <div style="margin-top:6px;color:#555;">tile ${tileX},${tileZ} &nbsp; local ${localX.toFixed(1)},${localZ.toFixed(1)} &nbsp; rot ${rotation}&deg;</div>
             <button id="al-gen" style="margin-top:8px;padding:4px 8px;cursor:pointer;">Generate INI</button>
             <pre id="al-out" style="display:none;white-space:pre-wrap;background:#f4f4f4;padding:6px;margin-top:6px;border-radius:4px;font-size:11px;"></pre>
@@ -3235,6 +3282,10 @@ ALIGN_JS = r'''
             updL(); }
         btn.onclick=()=> setAlign(!aligning);
         if(lbl) lbl.onclick=()=> setLabel(!MapApp.labelMode);
+        // Let a read-only backend (serve.py --no-authoring) drop the authoring UI:
+        // detectBackend() calls this when /api/ping reports authoring:false.
+        MapApp.addLabelBtn = lbl;
+        MapApp.disableAuthoringUI = function(){ MapApp.authoring = false; if(lbl){ setLabel(false); lbl.style.display='none'; } };
         // align-mode drag
         MapApp.map.on('mousedown', e=>{ if(!aligning) return;
             drag={ p:MapApp.map.mouseEventToContainerPoint(e.originalEvent), a:e.latlng, last:e.latlng }; });
