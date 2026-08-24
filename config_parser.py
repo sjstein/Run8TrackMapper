@@ -25,7 +25,7 @@ output_dir = ./output/socal/
 import configparser
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # Standard filenames within each region directory
@@ -45,6 +45,28 @@ class TileBasedConfig:
     tile_height: float = 1023.2          # Tile height in meters
 
 
+# Area/place label categories are defined entirely by the config's [label_types]
+# section (id = Display Name, #color) — no categories are baked into the code. A
+# label with no type, or a type not present in [label_types], is treated as
+# "undefined": rendered in UNDEFINED_TYPE_COLOR (white) and grouped as AREA_TYPE_DEFAULT.
+AREA_TYPE_DEFAULT = "other"
+UNDEFINED_TYPE_COLOR = "#ffffff"
+
+# Color presets are defined entirely by the config's [color_presets] section
+# (no railroad-specific colors are baked into the code). A label's `color` may be a
+# preset NAME (e.g. "bnsf") or a raw hex value; the name is stored as-is and resolved
+# to hex at render time (viewer). Keys are compared case-insensitively.
+DEFAULT_COLOR_PRESETS = {}
+
+
+def resolve_color(value, presets=None):
+    """Resolve a preset name to its hex; pass raw hex/other values through trimmed."""
+    if not value:
+        return value
+    table = presets if presets is not None else DEFAULT_COLOR_PRESETS
+    return table.get(value.strip().lower(), value.strip())
+
+
 @dataclass
 class ColorConfig:
     """Color configuration for visualization elements"""
@@ -58,7 +80,15 @@ class ColorConfig:
     signal_border_single: str = "#000000"  # Single head signal border (black)
     signal_border_stacked: str = "#87CEEB"  # Multiple head signal border (light blue)
     background: str = "#333333"         # Background color (tile-based mode)
-    area_label: str = "#ffd11a"         # Area/place label text color (gold)
+    area_label: str = "#ffd11a"         # Legacy generic label color (kept for compatibility)
+
+
+@dataclass
+class LabelType:
+    """A user-defined area-label category, from the config's [label_types] section."""
+    id: str            # slug used in a label's `type =` (lowercase)
+    name: str          # display name shown in the filter / editor
+    color: str         # default text color (a label's own color= still wins)
 
 
 @dataclass
@@ -101,10 +131,11 @@ class AreaLabel:
     label: str                       # displayed text
     tile: Tuple[int, int]            # (tile_x, tile_z)
     local: Tuple[float, float]       # (local_x, local_z) Run8 local meters within the tile
-    color: Optional[str] = None      # overrides the global area_label color
+    color: Optional[str] = None      # overrides the per-type / global area_label color
     font_size: Optional[int] = None  # overrides the default label font size
     box: bool = False                # draw a background box behind the text
     rotation: float = 0.0            # rotate text in degrees (clockwise), e.g. to align to a track
+    type: str = AREA_TYPE_DEFAULT    # category id (must match a [label_types] entry, else rendered white)
 
 
 @dataclass
@@ -119,6 +150,9 @@ class VisualizationConfig:
     tile_based: Optional[TileBasedConfig] = None
     initial_center: Optional[Tuple[float, float]] = None  # (lat, lon) for initial map center
     areas: List[AreaLabel] = field(default_factory=list)  # user-defined area/place labels
+    color_presets: Dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_COLOR_PRESETS))  # name -> hex label-color palette
+    label_types: List[LabelType] = field(default_factory=list)  # from [label_types], ordered
 
     @property
     def industry_db(self) -> Path:
@@ -174,6 +208,7 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
             except (ValueError, IndexError):
                 errors.append(f"[{section_name}] local must be format 'x,z' e.g. '421.5,-500.2' ({source})")
 
+        # Store the raw value (preset name or hex); resolved to hex at render time.
         color = area.get('color', '').strip() or None
 
         font_size_str = area.get('font_size', '').strip()
@@ -194,6 +229,9 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
             except ValueError:
                 errors.append(f"[{section_name}] rotation must be a number in degrees ({source})")
 
+        # Any type string is accepted; ones not defined in [label_types] render white.
+        area_type = area.get('type', '').strip().lower() or AREA_TYPE_DEFAULT
+
         if label and tile is not None and local is not None:
             result.append(AreaLabel(
                 id=area_id,
@@ -203,7 +241,8 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
                 color=color,
                 font_size=font_size,
                 box=box,
-                rotation=rotation
+                rotation=rotation,
+                type=area_type
             ))
     return result
 
@@ -371,6 +410,28 @@ def parse_config(config_path: str) -> VisualizationConfig:
             area_label=color_section.get('area_label', colors.area_label).strip(),
         )
 
+    # Parse [label_types] section (optional): `id = Display Name, #color` per line,
+    # in order. The id is the value stored in a label's `type =`; the display name
+    # shows in the filter/editor; the color is the category default (a label's own
+    # color= still wins). Missing color -> undefined/white; missing name -> id.
+    label_types = []
+    if 'label_types' in parser:
+        for tid, raw in parser['label_types'].items():
+            t_name, t_color = raw, ''
+            if ',' in raw:
+                t_name, t_color = raw.rsplit(',', 1)
+            t_name = t_name.strip() or tid.strip()
+            t_color = t_color.strip() or UNDEFINED_TYPE_COLOR
+            label_types.append(LabelType(id=tid.strip().lower(), name=t_name, color=t_color))
+
+    # Parse [color_presets] section (optional): name = hex, merged over the built-ins.
+    color_presets = dict(DEFAULT_COLOR_PRESETS)
+    if 'color_presets' in parser:
+        for preset_name, value in parser['color_presets'].items():
+            hexval = (value or '').strip()
+            if hexval:
+                color_presets[preset_name.strip().lower()] = hexval
+
     # Parse [tile_based_plot] section (optional)
     tile_based = None
     if 'tile_based_plot' in parser:
@@ -404,7 +465,9 @@ def parse_config(config_path: str) -> VisualizationConfig:
         colors=colors,
         tile_based=tile_based,
         initial_center=initial_center,
-        areas=areas
+        areas=areas,
+        color_presets=color_presets,
+        label_types=label_types
     )
 
     # Validate that all files exist
@@ -444,6 +507,69 @@ def parse_config(config_path: str) -> VisualizationConfig:
         raise ConfigError("Missing files:\n  - " + "\n  - ".join(file_errors))
 
     return config
+
+
+def parse_areas_file(path) -> List[AreaLabel]:
+    """Parse the [area.*] sections from a single INI file into AreaLabels.
+
+    Lightweight (no file/region validation) so it can be reused by the live
+    authoring server (serve.py) to read the current labels in an areas file.
+    Raises ConfigError if any [area.*] section is malformed.
+    """
+    path = Path(path)
+    parser = configparser.ConfigParser()
+    parser.read(path)
+    errors: List[str] = []
+    areas = _parse_area_sections(parser, path.name, errors)
+    if errors:
+        raise ConfigError("Area file errors:\n  - " + "\n  - ".join(errors))
+    return areas
+
+
+def resolve_areas_files(config_path) -> List[Path]:
+    """Return the absolute paths of the external areas_file(s) named in a config.
+
+    Mirrors parse_config's resolution: comma-separated, relative to the config
+    directory. Does not check existence. Returns [] if none are configured.
+    """
+    config_file = Path(config_path)
+    parser = configparser.ConfigParser()
+    parser.read(config_file)
+    areas_file_str = ''
+    if 'visualization' in parser:
+        areas_file_str = parser['visualization'].get('areas_file', '').strip()
+    config_dir = config_file.parent
+    paths: List[Path] = []
+    for area_path_str in (p.strip() for p in areas_file_str.split(',') if p.strip()):
+        area_path = Path(area_path_str)
+        if not area_path.is_absolute():
+            area_path = config_dir / area_path
+        paths.append(area_path)
+    return paths
+
+
+def collect_areas(config_path) -> List[AreaLabel]:
+    """Merge all [area.*] labels for a config: inline plus every areas_file.
+
+    Matches parse_config's merge order (inline first, then each areas_file in
+    order) but performs no region/file validation, so the live authoring server
+    can recompute the authoritative label set cheaply after each edit. Missing
+    areas_file paths are skipped silently (an empty/absent file = no labels).
+    """
+    config_file = Path(config_path)
+    parser = configparser.ConfigParser()
+    parser.read(config_file)
+    errors: List[str] = []
+    areas = _parse_area_sections(parser, 'config', errors)
+    for area_path in resolve_areas_files(config_file):
+        if not area_path.exists():
+            continue
+        ext_parser = configparser.ConfigParser()
+        ext_parser.read(area_path)
+        areas.extend(_parse_area_sections(ext_parser, area_path.name, errors))
+    if errors:
+        raise ConfigError("Area errors:\n  - " + "\n  - ".join(errors))
+    return areas
 
 
 def generate_sample_config() -> str:

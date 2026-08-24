@@ -26,6 +26,14 @@ from config_parser import RegionConfig, VisualizationConfig, TileBasedConfig
 # Constants for coordinate conversion
 METERS_PER_DEGREE_LAT = 111139.0
 
+# Run8 local tile size in meters (SW corner is local (0, 0); x increases east,
+# z decreases going north). Used to normalise local coords into a [0, 1]
+# fraction across a tile for bilinear lat/lon interpolation. Matches the
+# [tile_based_plot] defaults; kept here so geographic mode does not require a
+# TileBasedConfig. Override via convert_run8_to_latlon's tile_width/tile_height.
+LOCAL_TILE_WIDTH_M = 842.3
+LOCAL_TILE_HEIGHT_M = 1023.2
+
 # Binary field widths (little-endian) used by the milepost parser
 INTLEN = 4
 FLTLEN = 4
@@ -330,21 +338,33 @@ def load_tile_bounds(tiles_involved: Set[Tuple[int, int]],
     return tile_geo_bounds, corrected_tiles
 
 
-def convert_run8_to_latlon(x: float, z: float, tile_geo_bounds: Tuple[float, float, float, float]) -> Tuple[float, float]:
-    """Convert Run8 coordinates to lat/lon"""
+def convert_run8_to_latlon(x: float, z: float,
+                           tile_geo_bounds: Tuple[float, float, float, float],
+                           tile_width: float = LOCAL_TILE_WIDTH_M,
+                           tile_height: float = LOCAL_TILE_HEIGHT_M) -> Tuple[float, float]:
+    """Convert Run8 tile-local coordinates to lat/lon by bilinear interpolation
+    across the tile's four real corners.
+
+    ``x``/``z`` are Run8 local coordinates within the tile: the SW corner is
+    (0, 0), x increases east, and z decreases (goes negative) moving north.
+    The point is placed by its fractional position across the tile, so every
+    real corner is honoured exactly and adjacent tiles - which tessellate to
+    ~0 m in the .tr4 data - stay continuous across their shared edge. For a
+    point just past an edge the fraction falls slightly outside [0, 1] and is
+    linearly extrapolated into the neighbour, which is accurate because
+    neighbouring tiles share that edge.
+
+    This replaces the old SW-corner-anchored conversion, which used a single
+    assumed metres-per-degree scale and so drifted from the real geography
+    (validated against OSM: bilinear lands within ~10 m of real rails).
+    """
     lon_east, lon_west, lat_north, lat_south = tile_geo_bounds
 
-    origin_lat = lat_south
-    origin_lon = lon_west
+    frac_x = x / tile_width        # 0 at west edge, 1 at east edge
+    frac_y = -z / tile_height      # 0 at south edge, 1 at north edge (z < 0 north)
 
-    lat_offset_degrees = abs(z) / METERS_PER_DEGREE_LAT
-
-    center_lat = (lat_south + lat_north) / 2.0
-    meters_per_degree_lon = METERS_PER_DEGREE_LAT * math.cos(math.radians(center_lat))
-    lon_offset_degrees = x / meters_per_degree_lon
-
-    lat = origin_lat + lat_offset_degrees
-    lon = origin_lon + lon_offset_degrees
+    lat = lat_south + frac_y * (lat_north - lat_south)
+    lon = lon_west + frac_x * (lon_east - lon_west)
 
     return (lat, lon)
 
@@ -661,6 +681,171 @@ def find_end_tile(node: TrackNode, section: TrackSection,
     return end_tile
 
 
+# ---------------------------------------------------------------------------
+# Cross-tile switch-leg reconstruction (tangent-based) -- see below.
+#
+# A switch's short curved (diverging) leg often ends in the *neighbouring* tile.
+# That far endpoint is stored in the neighbour tile's local frame and stitched
+# back with a single global tile height; right on a block-boundary seam the
+# stitch can be a few metres off. Because a diverging leg only travels a few
+# metres itself, that error can flip it so it appears to head the wrong way
+# (see the SanBernardino 10034 case). The stored per-node tangent bearings are
+# self-consistent within one tile, so we rebuild the leg from the throat (a
+# reliable in-tile anchor) using those bearings, and -- per "option B" -- also
+# snap the connecting neighbour's shared endpoint to the rebuilt far end so the
+# joint stays closed. On mid-tile switches this reproduces the stored geometry
+# to < 0.01 m, so it is a no-op there and only corrects genuine cross-tile legs.
+# ---------------------------------------------------------------------------
+
+def _norm180(angle: float) -> float:
+    """Fold an angle (degrees) into (-180, 180]."""
+    while angle > 180.0:
+        angle -= 360.0
+    while angle <= -180.0:
+        angle += 360.0
+    return angle
+
+
+def _bearing_dxdz(bearing_deg: float) -> Tuple[float, float]:
+    """Compass bearing (north = -z, east = +x, clockwise) -> unit (dx, dz)."""
+    r = math.radians(bearing_deg)
+    return math.sin(r), -math.cos(r)
+
+
+def _reconstruct_arc(anchor_xz: Tuple[float, float], start_bearing: float,
+                     sweep_deg: float, arc_len: float, n: int) -> List[Tuple[float, float]]:
+    """Forward-integrate a circular arc from an anchor, returning local (x, z) points.
+
+    The arc starts at ``anchor_xz`` heading ``start_bearing`` and turns a total of
+    ``sweep_deg`` (signed) over ``arc_len`` metres. Points are in the anchor's
+    tile-local frame.
+    """
+    n = max(8, int(n))
+    x, z = anchor_xz
+    heading = start_bearing + (sweep_deg / n) / 2.0
+    ds = arc_len / n
+    dtheta = sweep_deg / n
+    pts = [(x, z)]
+    for _ in range(n):
+        dx, dz = _bearing_dxdz(heading)
+        x += ds * dx
+        z += ds * dz
+        pts.append((x, z))
+        heading += dtheta
+    return pts
+
+
+def _pt2(pos) -> Tuple[float, float]:
+    """(x, y, z) local position -> (x, z)."""
+    return (pos[0], pos[2])
+
+
+def _d2(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+
+def compute_switch_leg_fixes(db: TrackDatabase) -> Tuple[Dict, Dict]:
+    """Rebuild cross-tile switch legs from throat anchor + tangent bearings.
+
+    Returns:
+        leg_recon: {id(node): (throat_tile, [(x, z), ...], arc_len_m)}
+            rebuilt leg points in the throat tile's local frame, for the caller
+            to convert with whichever coordinate mode is active.
+        point_fix: [(far_tile, far_x, far_z, new_tile, new_x, new_z), ...]
+            for each rebuilt leg, the shared far endpoint (original local coords)
+            and its corrected local coords; the caller converts both to world and
+            snaps any neighbour endpoint that lands on the original so the joint
+            closes. Coords are kept unrounded so the world match is exact.
+    """
+    leg_recon: Dict[int, Tuple] = {}
+    point_fix: List[Tuple] = []
+
+    for section in db.sections:
+        if not is_switch(section):
+            continue
+
+        switch_nodes = [n for n in section.nodes if n.is_switch_node]
+        if not switch_nodes:
+            continue
+        switch_point = _pt2(switch_nodes[0].position)
+
+        # Every drawn (forward) leg that emanates from the throat and crosses a
+        # tile boundary -- straight *and* curved (both can hit the seam error).
+        for node in section.nodes:
+            if node.is_reverse_path:
+                continue
+
+            p2, e2 = _pt2(node.position), _pt2(node.end_position)
+            d_p, d_e = _d2(p2, switch_point), _d2(e2, switch_point)
+            if min(d_p, d_e) > 1.0:
+                continue  # neither end is the switch point -> not a throat leg
+
+            if d_p <= d_e:
+                throat_xz, throat_tile = p2, node.tile_index
+                far_xz, far_tile = e2, find_end_tile(node, section, node.end_position)
+                node_pos_is_throat = True
+            else:
+                throat_xz, throat_tile = e2, find_end_tile(node, section, node.end_position)
+                far_xz, far_tile = p2, node.tile_index
+                node_pos_is_throat = False
+
+            # Only cross-tile legs are affected by the seam-stitch error.
+            if throat_tile == far_tile:
+                continue
+
+            is_curved = node.radius_meters > 1.0
+
+            # throat->far bearing at the throat (this node's tangent points
+            # position -> end_position; reverse it if position is the far end).
+            throat_bearing = (node.tan_deg[1] if node_pos_is_throat
+                              else _norm180(node.tan_deg[1] + 180.0))
+
+            if is_curved:
+                # A curved leg needs the far-end bearing too, to get the signed
+                # sweep. Find the companion node covering the same leg (its
+                # forward/reverse twin) and read a bearing at each end.
+                comp = None
+                for m in section.nodes:
+                    if m is node:
+                        continue
+                    if (abs(m.radius_meters - node.radius_meters) < 0.5 and
+                            abs(m.arcLen_meters - node.arcLen_meters) < 0.5):
+                        mp, me = _pt2(m.position), _pt2(m.end_position)
+                        if (_d2(mp, throat_xz) < 1.0 and _d2(me, far_xz) < 1.0) or \
+                           (_d2(mp, far_xz) < 1.0 and _d2(me, throat_xz) < 1.0):
+                            comp = m
+                            break
+                if comp is None:
+                    continue
+                tb = fb = None
+                for N in (node, comp):
+                    npos = _pt2(N.position)
+                    if _d2(npos, throat_xz) <= _d2(npos, far_xz):
+                        tb = N.tan_deg[1]
+                    else:
+                        fb = _norm180(N.tan_deg[1] + 180.0)
+                if tb is None or fb is None:
+                    continue
+                throat_bearing = tb
+                sweep = _norm180(fb - tb)
+                # Sanity: the swept angle must match the stored curve degrees.
+                if abs(abs(sweep) - abs(node.curve_deg)) > 3.0:
+                    continue
+            else:
+                sweep = 0.0
+
+            n_pts = max(24, int(node.num_segments) * 3) if is_curved else 1
+            recon = _reconstruct_arc(throat_xz, throat_bearing, sweep,
+                                     node.arcLen_meters, n_pts)
+
+            leg_recon[id(node)] = (throat_tile, recon, node.arcLen_meters)
+            far_end = recon[-1]
+            point_fix.append((far_tile, far_xz[0], far_xz[1],
+                              throat_tile, far_end[0], far_end[1]))
+
+    return leg_recon, point_fix
+
+
 def extract_sections(db: TrackDatabase,
                      tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]] = None,
                      tile_based_config: Optional[TileBasedConfig] = None) -> List[SectionData]:
@@ -676,6 +861,56 @@ def extract_sections(db: TrackDatabase,
     """
     sections = []
     use_tile_coords = tile_based_config is not None
+
+    # Tangent-based rebuild of cross-tile switch legs (+ neighbour endpoint snap).
+    leg_recon, point_fix = compute_switch_leg_fixes(db)
+
+    def _to_world(tile, x, z):
+        """Local (tile, x, z) -> world/lat-lon in the active coord mode (or None)."""
+        if use_tile_coords:
+            return convert_run8_to_tile_coords(
+                x, z, tile, tile_based_config.home_tile,
+                tile_based_config.tile_width, tile_based_config.tile_height)
+        if tile not in tile_geo_bounds:
+            return None
+        return convert_run8_to_latlon(x, z, tile_geo_bounds[tile])
+
+    def _leg_to_path(throat_tile, local_pts):
+        """Convert a rebuilt leg's local (x, z) points to the active coord mode."""
+        out = [_to_world(throat_tile, px, pz) for (px, pz) in local_pts]
+        return None if any(p is None for p in out) else out
+
+    # World-space snap map: original shared far endpoint -> corrected location.
+    # Applied (tapered) to any neighbour path that ends/starts on that point so
+    # the joint closes without disturbing the neighbour's opposite end.
+    def _wround(pt):
+        return (round(pt[0], 2), round(pt[1], 2)) if use_tile_coords \
+            else (round(pt[0], 6), round(pt[1], 6))
+
+    point_fix_world = {}
+    for (kt, kx, kz, vt, vx, vz) in point_fix:
+        orig_w = _to_world(kt, kx, kz)
+        corr_w = _to_world(vt, vx, vz)
+        if orig_w is not None and corr_w is not None:
+            point_fix_world[_wround(orig_w)] = corr_w
+
+    def _snap_path_endpoints(path):
+        """Taper a path so a matching end lands on its corrected location."""
+        n = len(path)
+        if n < 2:
+            return
+        corr = point_fix_world.get(_wround(path[-1]))
+        if corr is not None:
+            dx, dy = corr[0] - path[-1][0], corr[1] - path[-1][1]
+            for i in range(n):
+                f = i / (n - 1)
+                path[i] = (path[i][0] + dx * f, path[i][1] + dy * f)
+        corr = point_fix_world.get(_wround(path[0]))
+        if corr is not None:
+            dx, dy = corr[0] - path[0][0], corr[1] - path[0][1]
+            for i in range(n):
+                f = 1.0 - i / (n - 1)
+                path[i] = (path[i][0] + dx * f, path[i][1] + dy * f)
 
     for section in db.sections:
         # Select which nodes to plot
@@ -718,6 +953,17 @@ def extract_sections(db: TrackDatabase,
                 elevation_start_m = node.position[1]
                 first_node_processed = True
             elevation_end_m = effective_end_position[1]
+
+            # Cross-tile switch leg: draw the tangent-rebuilt geometry instead of
+            # the seam-stitched endpoint (fixes "backward" diverging legs at tile
+            # edges). Neighbour joints are closed by _snap_path_endpoints below.
+            if id(node) in leg_recon:
+                throat_tile, local_pts, arc_len = leg_recon[id(node)]
+                path_points = _leg_to_path(throat_tile, local_pts)
+                if path_points and len(path_points) >= 2:
+                    total_length_m += arc_len
+                    all_paths.append(path_points)
+                continue
 
             if use_tile_coords:
                 # Tile-based coordinate mode
@@ -876,6 +1122,11 @@ def extract_sections(db: TrackDatabase,
                     # Only add if segment length is meaningful (> ~1 meter in degrees)
                     if seg_length > 0.00001:
                         all_paths.append(path_points)
+
+        # Close joints: snap any endpoint that lands on a rebuilt switch far point.
+        if point_fix_world:
+            for path in all_paths:
+                _snap_path_endpoints(path)
 
         if all_paths:
             length_ft = total_length_m * 3.28084

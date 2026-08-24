@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+"""Read/write area-label ([area.*]) blocks in a single INI file.
+
+This backs the live authoring server (serve.py). It deliberately does NOT use
+configparser for writing: configparser drops comments and reorders/reformats a
+file when it rewrites it. Instead we splice only the exact [area.<id>] block a
+mutation targets, leaving every other line (comments, spacing, ordering) intact.
+
+Reading is done with config_parser.parse_areas_file (which does use configparser)
+so the syntax accepted here is identical to what the rest of the app parses.
+
+A single dict shape is used throughout, matching output_generator.area_to_dict:
+    {id, label, tile_x, tile_z, local_x, local_z,
+     color?, font_size?, box?, rotation?}
+"""
+
+import os
+import re
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from config_parser import parse_areas_file
+
+# A section header line: [area.<id>] or any other [section]
+_AREA_HEADER_RE = re.compile(r'^\s*\[area\.([^\]]+)\]\s*$')
+_ANY_HEADER_RE = re.compile(r'^\s*\[[^\]]+\]\s*$')
+# A recognized area key assignment (used to find where a block's data ends, so
+# trailing blank lines / comments after the block are left with the file).
+_AREA_KEY_RE = re.compile(r'^\s*(label|tile|local|color|font_size|box|rotation|type)\s*=', re.I)
+
+
+def slugify(text: str) -> str:
+    """Turn a label into a safe [area.<id>] slug (lowercase, underscores)."""
+    slug = re.sub(r'[^a-z0-9]+', '_', (text or '').lower()).strip('_')
+    return slug
+
+
+def _fmt_num(value) -> str:
+    """Format a coordinate for INI output: integers stay integer, floats keep
+    up to 3 significant decimals (trailing zeros trimmed)."""
+    f = float(value)
+    if f == int(f):
+        return str(int(f))
+    return f"{round(f, 3):g}"
+
+
+def format_area_block(area: Dict) -> str:
+    """Render one area dict as an [area.<id>] INI block (trailing newline)."""
+    lines = [f"[area.{area['id']}]",
+             f"label = {area['label']}",
+             f"tile = {_fmt_num(area['tile_x'])},{_fmt_num(area['tile_z'])}",
+             f"local = {_fmt_num(area['local_x'])},{_fmt_num(area['local_z'])}"]
+    if area.get('color'):
+        lines.append(f"color = {area['color']}")
+    if area.get('font_size'):
+        lines.append(f"font_size = {int(area['font_size'])}")
+    if area.get('box'):
+        lines.append("box = true")
+    if area.get('rotation'):
+        lines.append(f"rotation = {_fmt_num(area['rotation'])}")
+    if area.get('type') and area['type'] != 'other':
+        lines.append(f"type = {area['type']}")
+    return "\n".join(lines) + "\n"
+
+
+class AreaStoreError(Exception):
+    """Raised for add/update/delete problems (missing id, duplicate id, etc.)."""
+    pass
+
+
+class AreaStore:
+    """Add/edit/delete [area.*] blocks in one INI file, preserving the rest."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    # ---- reading -------------------------------------------------------
+    def read(self) -> List[Dict]:
+        """Return the file's area labels as dicts (empty if file is absent)."""
+        if not self.path.exists():
+            return []
+        return [_area_to_dict(a) for a in parse_areas_file(self.path)]
+
+    def ids(self) -> List[str]:
+        return [a['id'] for a in self.read()]
+
+    def _read_lines(self) -> List[str]:
+        if not self.path.exists():
+            return []
+        with open(self.path, 'r', encoding='utf-8') as f:
+            return f.read().splitlines()
+
+    def _find_block(self, lines: List[str], area_id: str) -> Optional[tuple]:
+        """Return (start, end) line indices [start, end) covering the
+        [area.<id>] header through its last non-blank value line, or None."""
+        start = None
+        for i, ln in enumerate(lines):
+            m = _AREA_HEADER_RE.match(ln)
+            if m and m.group(1) == area_id:
+                start = i
+                break
+        if start is None:
+            return None
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            if _ANY_HEADER_RE.match(lines[j]):
+                end = j
+                break
+        # Back off past trailing blank lines and comments so they stay in the
+        # file: a block owns only its header through its last key = value line.
+        while end - 1 > start and not _AREA_KEY_RE.match(lines[end - 1]):
+            end -= 1
+        return (start, end)
+
+    # ---- writing -------------------------------------------------------
+    def add(self, area: Dict) -> Dict:
+        """Append a new area block. Raises if the id already exists in this file."""
+        area_id = area['id']
+        lines = self._read_lines()
+        if self._find_block(lines, area_id) is not None:
+            raise AreaStoreError(f"Area id '{area_id}' already exists in {self.path.name}")
+        block = format_area_block(area).splitlines()
+        if lines and lines[-1].strip() != '':
+            lines.append('')          # blank separator before the new block
+        lines.extend(block)
+        self._write_lines(lines)
+        return area
+
+    def update(self, area_id: str, area: Dict) -> Dict:
+        """Replace the [area.<id>] block in place. Raises if not found here."""
+        lines = self._read_lines()
+        span = self._find_block(lines, area_id)
+        if span is None:
+            raise AreaStoreError(
+                f"Area id '{area_id}' is not in {self.path.name} "
+                f"(it may be defined inline in the config or another areas file)")
+        start, end = span
+        new_block = format_area_block(area).splitlines()
+        lines[start:end] = new_block
+        self._write_lines(lines)
+        return area
+
+    def delete(self, area_id: str) -> None:
+        """Remove the [area.<id>] block. Raises if not found here."""
+        lines = self._read_lines()
+        span = self._find_block(lines, area_id)
+        if span is None:
+            raise AreaStoreError(
+                f"Area id '{area_id}' is not in {self.path.name}")
+        start, end = span
+        del lines[start:end]
+        # Collapse a doubled blank line left behind by the removal.
+        if (start < len(lines) and lines[start].strip() == ''
+                and (start == 0 or lines[start - 1].strip() == '')):
+            del lines[start]
+        self._write_lines(lines)
+
+    def _write_lines(self, lines: List[str]) -> None:
+        """Atomically write the file (temp + replace), backing up the previous
+        contents to <file>.bak first so a bad edit is always recoverable."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            shutil.copy2(self.path, self.path.with_suffix(self.path.suffix + '.bak'))
+        text = "\n".join(lines)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        fd, tmp = tempfile.mkstemp(dir=str(self.path.parent),
+                                   prefix=self.path.name, suffix='.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                f.write(text)
+            os.replace(tmp, self.path)
+        except Exception:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
+
+
+def _area_to_dict(area) -> Dict:
+    """AreaLabel -> dict (same shape as output_generator.area_to_dict)."""
+    d = {
+        "id": area.id,
+        "label": area.label,
+        "tile_x": area.tile[0],
+        "tile_z": area.tile[1],
+        "local_x": area.local[0],
+        "local_z": area.local[1],
+    }
+    if area.color:
+        d["color"] = area.color
+    if area.font_size:
+        d["font_size"] = area.font_size
+    if area.box:
+        d["box"] = True
+    if area.rotation:
+        d["rotation"] = area.rotation
+    if getattr(area, "type", None):
+        d["type"] = area.type
+    return d

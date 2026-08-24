@@ -138,6 +138,16 @@ def generate_javascript() -> str:
         );
         MapApp.baseLayers['None'] = L.tileLayer('', {attribution: 'None', maxZoom: 22});
 
+        // OpenRailwayMap: a transparent railway-line overlay rendered from the
+        // same OSM data. It sits above the base map but below the track vectors
+        // (tilePane is under overlayPane), so Run8 track draws on top of the
+        // real rails for direct comparison. Toggled from the Base Map section.
+        MapApp.railOverlay = L.tileLayer(
+            'https://{s}.tiles.openrailwaymap.org/standard/{z}/{x}/{y}.png',
+            {attribution: 'OpenRailwayMap | &copy; OpenStreetMap contributors',
+             subdomains: 'abc', maxZoom: 19, opacity: 0.8}
+        );
+
         // Remove any existing base tile layers that Folium added
         MapApp.map.eachLayer(layer => {
             if (layer._url !== undefined) {
@@ -261,6 +271,10 @@ def generate_javascript() -> str:
                     <input type="radio" name="basemap" id="basemap-none" value="None">
                     <label for="basemap-none">None</label>
                 </div>
+                <div class="basemap-item" style="margin-top:6px;border-top:1px solid #eee;padding-top:6px;">
+                    <input type="checkbox" id="basemap-orm">
+                    <label for="basemap-orm">OpenRailwayMap overlay</label>
+                </div>
             </div>
             <h4>Regions</h4>
             <div id="region-list"></div>
@@ -301,6 +315,18 @@ def generate_javascript() -> str:
                 MapApp.currentBaseLayer = selectedName;
             });
         });
+
+        // OpenRailwayMap overlay toggle
+        const ormToggle = document.getElementById('basemap-orm');
+        if (ormToggle) {
+            ormToggle.addEventListener('change', (e) => {
+                if (e.target.checked) {
+                    MapApp.railOverlay.addTo(MapApp.map);
+                } else {
+                    MapApp.map.removeLayer(MapApp.railOverlay);
+                }
+            });
+        }
 
         // Build region checkboxes
         const regionList = document.getElementById('region-list');
@@ -1344,8 +1370,9 @@ def generate_tile_based_html(config: VisualizationConfig) -> str:
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{config.name} - Tile-Based View</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="leaflet/leaflet.css" />
+    <script src="leaflet/leaflet.js"></script>
+    <script>window.L||document.write('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>')</script>
     <style>
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
         html, body {{ height: 100%; width: 100%; }}
@@ -2027,7 +2054,11 @@ window.COLORS = {{
     // Area/place labels (user-defined)
     // ========================================
     function createAreaLabelIcon(area) {{
-        const color = area.color || COLORS.areaLabel;
+        const _cp = (MapApp.manifest && MapApp.manifest.color_presets) || {{}};
+        const _resolved = area.color ? (_cp[String(area.color).trim().toLowerCase()] || String(area.color).trim()) : '';
+        const _lt = (MapApp.manifest && MapApp.manifest.label_types) || [];
+        const _tc = (_lt.find(x => x.id === String(area.type || '').toLowerCase()) || {{}}).color || '#ffffff';
+        const color = _resolved || _tc;
         const fontSize = area.font_size || 22;
         let style = `display:inline-block;color:${{color}};font-size:${{fontSize}}px;font-weight:bold;white-space:nowrap;`;
         if (area.box) {{
@@ -2617,6 +2648,769 @@ def generate_html(config: VisualizationConfig, output_path: Path, tile_based: bo
     # Save the map
     m.save(str(output_path))
     print(f"Generated HTML: {output_path}")
+
+
+ALIGN_JS = r'''
+    // ================= Manual alignment (contiguous tile-based track over real map) =================
+    MapApp.align = null; MapApp._raw = {}; MapApp.trackOpacity = 0.8;
+    function applyTrackOpacity(){
+        const op = MapApp.trackOpacity;
+        for (const [id, reg] of MapApp.loadedRegions){
+            if (reg.layers && reg.layers.sections){
+                reg.layers.sections.eachLayer(sg => {
+                    if (sg.eachLayer) sg.eachLayer(pl => { if (pl.setStyle) pl.setStyle({opacity: op}); });
+                    else if (sg.setStyle) sg.setStyle({opacity: op});
+                });
+            }
+        }
+    }
+    function addTrackOpacitySlider(){
+        const ctl = document.getElementById('opacity-control');
+        if (!ctl) return;
+        const div = document.createElement('div');
+        div.style.marginTop = '4px';
+        div.innerHTML = '<label>Track Opacity: <input type="range" id="track-opacity-slider" min="0" max="100" value="80"></label>';
+        ctl.appendChild(div);
+        document.getElementById('track-opacity-slider').addEventListener('input', (e)=>{
+            MapApp.trackOpacity = e.target.value/100; applyTrackOpacity();
+        });
+    }
+    function alignInit(){
+        const a = MapApp.manifest.align;
+        if (!a) return;   // not an alignment build -> behave as a normal geographic viewer
+        MapApp.align = { X0:a.X, Y0:a.Y, lat:a.lat, lon:a.lon, cosRef:Math.cos(a.lat_ref*Math.PI/180), scale:1 };
+        MapApp.worldToLatLon = function(X, Y){
+            const A = MapApp.align, s = A.scale;
+            return [ A.lat + s*(Y - A.Y0)/111320, A.lon + s*(X - A.X0)/(111320*A.cosRef) ];
+        };
+        MapApp.latLngToWorld = function(ll){   // inverse of worldToLatLon (for label capture)
+            const A = MapApp.align, s = A.scale;
+            return { x: A.X0 + (ll.lng - A.lon)*111320*A.cosRef/s,
+                     y: A.Y0 + (ll.lat - A.lat)*111320/s };
+        };
+        MapApp.transformData = function(d){
+            const T = MapApp.worldToLatLon;
+            for (const sec of d.sections) for (const p of sec.paths)
+                for (let i=0;i<p.length;i++){ const q=T(p[i][0],p[i][1]); p[i]=[q[0],q[1]]; }
+            for (const s of (d.signals||[]))     { const q=T(s.lat,s.lon); s.lat=q[0]; s.lon=q[1]; }
+            for (const x of (d.ai_locations||[])){ const q=T(x.lat,x.lon); x.lat=q[0]; x.lon=q[1]; }
+            for (const x of (d.industries||[]))  { const q=T(x.lat,x.lon); x.lat=q[0]; x.lon=q[1]; }
+            for (const t of (d.tiles||[])){
+                const sw=T(t.lon_west,t.lat_south), ne=T(t.lon_east,t.lat_north);
+                t.lat_south=sw[0]; t.lon_west=sw[1]; t.lat_north=ne[0]; t.lon_east=ne[1];
+            }
+        };
+        MapApp.map.setView([a.lat, a.lon], 12);
+        MapApp.authoring = (typeof window.__run8_authoring === 'undefined') ? true : !!window.__run8_authoring;
+        MapApp.hasBackend = false;
+        buildAlignUI();
+        addTrackOpacitySlider();
+        MapApp.overlayStates.areaLabels = false;
+        addAreaLabelToggle();
+        buildAreaLabels();
+        // Probe for the optional authoring backend (serve.py) without blocking the
+        // initial render; if present, rebuild the labels so their markers become
+        // interactive/draggable for editing.
+        detectBackend().then(() => { if (MapApp.hasBackend) rebuildAreaLabels(); });
+        MapApp.map.on('zoomend', updateAreaLabelSizes);
+        MapApp.map.on('contextmenu', onMapContextMenu);   // right-click -> Google Maps
+    }
+
+    // ---- Area/place labels (ported from the tile-based viewer; placed via the transform) ----
+    function createAreaLabelIcon(area){
+        const color = resolveColor(area.color) || labelTypeColor(area.type);
+        const fontSize = area.font_size || 22;
+        let style = `display:inline-block;color:${color};font-size:${fontSize}px;font-weight:bold;white-space:nowrap;`;
+        if (area.box) style += `background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:3px;text-shadow:0 1px 2px rgba(0,0,0,0.8);`;
+        else style += `text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000;`;
+        const rot = area.rotation ? ` rotate(${area.rotation}deg)` : '';
+        style += `transform:translate(-50%,-50%)${rot};`;
+        return L.divIcon({ className:'area-label-marker',
+            html:`<div style="${style}">${area.label}</div>`, iconSize:null, iconAnchor:[0,0] });
+    }
+    function areaToWorld(area, tp){   // tile + Run8 local -> world metres (matches convert_run8_to_tile_coords)
+        const homeX = tp.home_tile[0], homeZ = tp.home_tile[1];
+        return [ (area.tile_x - homeX)*tp.tile_width + area.local_x,
+                 (area.tile_z - homeZ)*tp.tile_height - area.local_z ];
+    }
+    // Label categories: [id, display]. Master "Area Labels" overlay contains one
+    // sub-layerGroup per category so each can be shown/hidden independently.
+    // Label categories come from the config, emitted as manifest.label_types
+    // ([{id,name,color}], in order). A label whose type isn't defined renders white
+    // and groups under AREA_UNDEFINED (shown via an auto "Other" toggle when present).
+    const AREA_UNDEFINED = '__other__';
+    function labelTypes(){ return (MapApp.manifest && MapApp.manifest.label_types) || []; }
+    function labelTypeIds(){ return labelTypes().map(t=>t.id); }
+    function labelTypeColor(id){ const t=labelTypes().find(x=>x.id===String(id||'').toLowerCase()); return t ? t.color : '#ffffff'; }
+    function newLabelType(){ const ids=labelTypeIds(); return ids.indexOf('cp')>=0 ? 'cp' : (ids[0]||'other'); }
+    function areaGroupIds(){ return labelTypeIds().concat([AREA_UNDEFINED]); }
+    function areaTypeOf(area){ const t=String(area && area.type || '').toLowerCase(); return labelTypeIds().indexOf(t)>=0 ? t : AREA_UNDEFINED; }
+    function hasUndefinedLabels(){ const s=new Set(labelTypeIds());
+        return ((MapApp.manifest&&MapApp.manifest.areas)||[]).some(a=>!s.has(String(a.type||'').toLowerCase())); }
+    // <option>s for a Type <select>: the defined categories plus a trailing "Other"
+    // (undefined/white), with the current type preselected.
+    function areaTypeSelectOptions(selType){
+        const cur = String(selType||'').toLowerCase();
+        const defined = labelTypeIds().indexOf(cur) >= 0;
+        return labelTypes().map(t=>`<option value="${t.id}"${cur===t.id?' selected':''}>${t.name}</option>`).join('')
+             + `<option value="other"${defined?'':' selected'}>Other</option>`;
+    }
+    // Color palette (name -> hex) from the config, emitted into the manifest.
+    // A label's color is stored as a preset NAME or a raw hex; resolve at render.
+    function areaColorPresets(){ return (MapApp.manifest && MapApp.manifest.color_presets) || {}; }
+    function resolveColor(c){
+        if (!c) return c;
+        return areaColorPresets()[String(c).trim().toLowerCase()] || String(c).trim();
+    }
+    function initAreaTypeVisible(){
+        if (!MapApp.areaTypeVisible) MapApp.areaTypeVisible = {};
+        for (const id of areaGroupIds()) if (!(id in MapApp.areaTypeVisible)) MapApp.areaTypeVisible[id] = true;
+    }
+    function buildAreaLabels(){
+        MapApp.areaLabelsLayer = L.layerGroup();
+        MapApp.areaMarkers = [];
+        MapApp.areaTypeLayers = {};
+        initAreaTypeVisible();
+        for (const id of areaGroupIds()){
+            const lg = L.layerGroup();
+            MapApp.areaTypeLayers[id] = lg;
+            if (MapApp.areaTypeVisible[id]) lg.addTo(MapApp.areaLabelsLayer);
+        }
+        const areas = (MapApp.manifest && MapApp.manifest.areas) || [];
+        const tp = MapApp.manifest && MapApp.manifest.tile_params;
+        if (tp){ for (const area of areas) addAreaMarker(area); }
+        if (MapApp.overlayStates.areaLabels) MapApp.areaLabelsLayer.addTo(MapApp.map);
+        updateAreaLabelSizes();
+    }
+    // Build one label marker; when the authoring backend is present its markers
+    // are clickable to open the edit/delete popup (otherwise non-interactive so
+    // they never intercept align-drag clicks).
+    // Invert the world + alignment transforms to recover the tile/local coords of
+    // a lat/lon (shared by new-label capture and drag-to-move).
+    function latLngToTileLocal(latlng){
+        const tp = MapApp.manifest && MapApp.manifest.tile_params; if (!tp) return null;
+        const homeX = tp.home_tile[0], homeZ = tp.home_tile[1];
+        const w = MapApp.latLngToWorld(latlng);
+        const tileX = homeX + Math.floor(w.x / tp.tile_width);
+        const tileZ = homeZ + Math.floor(w.y / tp.tile_height);
+        const localX = w.x - (tileX - homeX) * tp.tile_width;
+        const localZ = -(w.y - (tileZ - homeZ) * tp.tile_height);
+        return { tile_x: tileX, tile_z: tileZ, local_x: localX, local_z: localZ };
+    }
+    function addAreaMarker(area){
+        const tp = MapApp.manifest && MapApp.manifest.tile_params; if (!tp) return null;
+        const w = areaToWorld(area, tp);
+        const editable = MapApp.authoring && MapApp.hasBackend;
+        const marker = L.marker(MapApp.worldToLatLon(w[0], w[1]),
+            { icon: createAreaLabelIcon(area), interactive: editable, draggable: editable });
+        const rec = { marker, baseFont: area.font_size || 22, world: w, area };
+        if (editable){
+            marker.on('click', (ev)=>{
+                if (MapApp._suppressLabelClick){ MapApp._suppressLabelClick = false; return; }   // trailing click after a rotate
+                if (MapApp.areaCapture && MapApp.areaCapture.pending) return;   // mid-placement of a new label
+                L.DomEvent.stopPropagation(ev);
+                openAreaEditor(Object.assign({}, rec.area), { isNew:false, latlng: marker.getLatLng() });
+            });
+            // Drag to move: PUT the new tile/local, keeping all other fields. On
+            // failure snap back to where the drag started.
+            let dragFrom = null;
+            marker.on('dragstart', ()=>{ dragFrom = marker.getLatLng(); MapApp.map.closePopup(); });
+            marker.on('dragend', ()=>{
+                const tl = latLngToTileLocal(marker.getLatLng());
+                if (!tl){ if (dragFrom) marker.setLatLng(dragFrom); return; }
+                apiArea('PUT', rec.area.id, tl).then(saved => {
+                    rec.area = saved;
+                    rec.world = areaToWorld(saved, MapApp.manifest.tile_params);
+                    marker.setLatLng(MapApp.worldToLatLon(rec.world[0], rec.world[1]));
+                    updateAreaLabelSizes();
+                }).catch(e => { if (dragFrom) marker.setLatLng(dragFrom); alert('Could not move label: ' + e.message); });
+            });
+            // Rotate: HOLD the mouse button on the label and scroll the wheel
+            // (Shift = 1 deg fine steps). Rotation only happens while the button is
+            // held, and the wheel is captured at the window level during the hold so
+            // the map never zooms. Bound to the icon element on each (re)add.
+            marker.on('add', ()=>{
+                const el = marker.getElement();
+                if (!el || el.__rotBound) return;
+                el.__rotBound = true;
+                el.addEventListener('mousedown', (ev)=> startLabelRotate(ev, rec));
+            });
+        }
+        rec.type = areaTypeOf(area);
+        (MapApp.areaTypeLayers && MapApp.areaTypeLayers[rec.type] || MapApp.areaLabelsLayer).addLayer(marker);
+        MapApp.areaMarkers.push(rec);
+        return rec;
+    }
+    function removeAreaMarker(id){
+        if (!MapApp.areaMarkers) return;
+        for (let i = MapApp.areaMarkers.length - 1; i >= 0; i--){
+            const rec = MapApp.areaMarkers[i];
+            if (rec.area.id === id){
+                const lg = MapApp.areaTypeLayers && MapApp.areaTypeLayers[rec.type];
+                (lg || MapApp.areaLabelsLayer).removeLayer(rec.marker);
+                MapApp.areaMarkers.splice(i, 1);
+            }
+        }
+    }
+    function replaceAreaMarker(area){ removeAreaMarker(area.id); addAreaMarker(area); updateAreaLabelSizes(); }
+    function rebuildAreaLabels(){   // re-create markers (e.g. after backend detection upgrades them to editable)
+        if (MapApp.areaLabelsLayer) MapApp.map.removeLayer(MapApp.areaLabelsLayer);
+        buildAreaLabels();
+    }
+    function ensureAreaOverlayVisible(){
+        if (MapApp.overlayStates.areaLabels) return;
+        MapApp.overlayStates.areaLabels = true;
+        const cb = document.getElementById('overlay-areaLabels'); if (cb) cb.checked = true;
+        if (MapApp.areaLabelsLayer) MapApp.areaLabelsLayer.addTo(MapApp.map);
+    }
+    // Make a category visible (used after saving a label so it never lands hidden).
+    function ensureAreaTypeVisible(type){
+        const t = areaGroupIds().indexOf(String(type||'').toLowerCase()) >= 0 ? String(type||'').toLowerCase() : AREA_UNDEFINED;
+        if (!MapApp.areaTypeVisible || MapApp.areaTypeVisible[t]) return;
+        setAreaTypeVisible(t, true);
+        const cb = document.getElementById('overlay-areaType-'+t); if (cb) cb.checked = true;
+    }
+    function setAreaTypeVisible(type, on){
+        if (!MapApp.areaTypeVisible) return;
+        MapApp.areaTypeVisible[type] = on;
+        const lg = MapApp.areaTypeLayers && MapApp.areaTypeLayers[type];
+        if (lg && MapApp.areaLabelsLayer){
+            if (on) MapApp.areaLabelsLayer.addLayer(lg); else MapApp.areaLabelsLayer.removeLayer(lg);
+        }
+        updateAreaLabelSizes();
+    }
+    // Hold-button + wheel rotation. mousedown on a label starts a rotate gesture:
+    // while the button is held we capture wheel events at the window level (so the
+    // map does not zoom) and adjust the label's rotation live; mouseup commits one
+    // PUT. If the gesture rotated, the trailing click is suppressed (no editor).
+    function startLabelRotate(ev, rec){
+        if (!(MapApp.authoring && MapApp.hasBackend)) return;
+        if (ev.button !== 0) return;   // left button only
+        const st = { rec, wheeled: false };
+        const onWheel = (we)=>{
+            we.preventDefault(); we.stopPropagation();
+            st.wheeled = true;
+            const step = we.shiftKey ? 1 : 5;
+            let rot = (rec.area.rotation || 0) + (we.deltaY > 0 ? step : -step);
+            while (rot > 180) rot -= 360;
+            while (rot <= -180) rot += 360;
+            rec.area.rotation = rot;
+            const el = rec.marker.getElement();
+            if (el && el.firstChild) el.firstChild.style.transform = `translate(-50%,-50%) rotate(${rot}deg)`;
+            showRotHint(rot);
+        };
+        const onUp = ()=>{
+            window.removeEventListener('wheel', onWheel, { capture: true });
+            window.removeEventListener('mouseup', onUp, { capture: true });
+            if (st.wheeled){
+                MapApp._suppressLabelClick = true;
+                setTimeout(()=>{ MapApp._suppressLabelClick = false; }, 50);   // safety net if no click follows
+                apiArea('PUT', rec.area.id, { rotation: rec.area.rotation })
+                    .then(saved => { rec.area = saved; })
+                    .catch(e => alert('Could not rotate label: ' + e.message));
+            }
+        };
+        window.addEventListener('wheel', onWheel, { passive: false, capture: true });
+        window.addEventListener('mouseup', onUp, { capture: true });
+    }
+    function showRotHint(rot){
+        showAreaHint(`Rotation: ${rot}&deg; &nbsp;&middot;&nbsp; hold + scroll to adjust, Shift = 1&deg;`);
+        if (MapApp._rotHintTimer) clearTimeout(MapApp._rotHintTimer);
+        MapApp._rotHintTimer = setTimeout(hideAreaHint, 900);
+    }
+    // Right-click anywhere -> open that spot in Google Maps in a new tab, carrying
+    // the current zoom. Uses the map lat/lon under the cursor (in the align viewer
+    // that is the manually-aligned position, so it is only as accurate as the
+    // current alignment). Suppresses the browser's native context menu.
+    function openInGoogleMaps(latlng){
+        const zoom = Math.max(1, Math.min(21, Math.round(MapApp.map.getZoom())));
+        const lat = latlng.lat.toFixed(6), lon = latlng.lng.toFixed(6);
+        // data=!3m1!1e3 forces the satellite base layer (Google's own satellite toggle).
+        const url = `https://www.google.com/maps/place/${lat},${lon}/@${lat},${lon},${zoom}z/data=!3m1!1e3`;
+        window.open(url, '_blank', 'noopener');
+    }
+    function onMapContextMenu(e){
+        if (e.originalEvent) L.DomEvent.preventDefault(e.originalEvent);
+        openInGoogleMaps(e.latlng);
+    }
+    // Probe for serve.py; sets MapApp.hasBackend. Fails closed to static mode.
+    function detectBackend(){
+        return fetch('api/ping').then(r => r.ok ? r.json() : null)
+            .then(j => {
+                MapApp.hasBackend = !!(j && j.ok);
+                // Honor a read-only server (serve.py --no-authoring): hide the Add
+                // Label button and make existing labels non-interactive, even though
+                // the page was generated as an authoring build.
+                if (j && j.ok && j.authoring === false && MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();
+            })
+            .catch(() => { MapApp.hasBackend = false; });
+    }
+    function apiArea(method, id, body){
+        const url = 'api/areas' + (id != null ? '/' + encodeURIComponent(id) : '');
+        return fetch(url, { method, headers: {'Content-Type':'application/json'},
+                            body: body ? JSON.stringify(body) : undefined })
+            .then(async r => { const t = await r.text(); let j = {};
+                try { j = t ? JSON.parse(t) : {}; } catch(e){}
+                if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status)); return j; });
+    }
+    function escapeHtml(s){ return String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+    function repositionAreaLabels(){   // called after a drag changes the transform
+        if (!MapApp.areaMarkers) return;
+        for (const rec of MapApp.areaMarkers) rec.marker.setLatLng(MapApp.worldToLatLon(rec.world[0], rec.world[1]));
+    }
+    // Font scales with map scale (metres-per-pixel), like the scale bar: full size
+    // at/below ~50 m, shrinking to a small floor by ~15 km. Web-Mercator mpp here.
+    const AREA_LABEL_SCALE_MAX_M = 50, AREA_LABEL_SCALE_MIN_M = 15000, AREA_LABEL_MIN_PX = 6;
+    function updateAreaLabelSizes(){
+        if (!MapApp.areaMarkers) return;
+        const mpp = 156543.03392 * Math.cos(MapApp.map.getCenter().lat*Math.PI/180) / Math.pow(2, MapApp.map.getZoom());
+        const scaleM = 100 * mpp;
+        const lo = Math.log(AREA_LABEL_SCALE_MAX_M), hi = Math.log(AREA_LABEL_SCALE_MIN_M);
+        let t = (Math.log(scaleM) - lo) / (hi - lo); t = Math.max(0, Math.min(1, t));
+        for (const rec of MapApp.areaMarkers){
+            const el = rec.marker.getElement(); if (!el || !el.firstChild) continue;
+            el.firstChild.style.fontSize = (rec.baseFont + t*(AREA_LABEL_MIN_PX - rec.baseFont)).toFixed(1) + 'px';
+        }
+    }
+    function addAreaLabelToggle(){
+        const list = document.getElementById('overlay-list');
+        if (!list) return;
+        initAreaTypeVisible();
+        // Master "Area Labels" toggle + a "Filter" button that opens the per-category
+        // checkboxes in a popover (keeps the overlay panel tidy).
+        const item = document.createElement('div'); item.className = 'overlay-item';
+        item.style.cssText = 'display:flex;align-items:center;gap:6px;';
+        item.innerHTML = '<input type="checkbox" id="overlay-areaLabels"><label for="overlay-areaLabels">Area Labels</label>'
+            + '<button id="area-filter-btn" type="button" title="Choose which label types to show"'
+            + ' style="margin-left:auto;font-size:11px;padding:1px 7px;cursor:pointer;">Filter</button>';
+        list.appendChild(item);
+        item.querySelector('#overlay-areaLabels').addEventListener('change', (e)=>{
+            MapApp.overlayStates.areaLabels = e.target.checked;
+            if (!MapApp.areaLabelsLayer) return;
+            if (e.target.checked){ MapApp.areaLabelsLayer.addTo(MapApp.map); updateAreaLabelSizes(); }
+            else MapApp.map.removeLayer(MapApp.areaLabelsLayer);
+        });
+        item.querySelector('#area-filter-btn').addEventListener('click', (e)=>{ e.stopPropagation(); toggleAreaFilterPopover(e.currentTarget); });
+    }
+    // Popover listing the label-type checkboxes (built from the config's label types,
+    // plus an auto "Other" row when undefined labels exist). Toggles open/closed.
+    function closeAreaFilterPopover(){
+        const pop = document.getElementById('area-filter-popover');
+        if (pop) pop.remove();
+        document.removeEventListener('mousedown', areaFilterAway, true);
+    }
+    function areaFilterAway(e){
+        const pop = document.getElementById('area-filter-popover');
+        if (pop && !pop.contains(e.target) && e.target.id !== 'area-filter-btn') closeAreaFilterPopover();
+    }
+    function toggleAreaFilterPopover(anchorBtn){
+        if (document.getElementById('area-filter-popover')){ closeAreaFilterPopover(); return; }
+        const rows = labelTypes().map(t => [t.id, t.name, t.color]);
+        if (hasUndefinedLabels()) rows.push([AREA_UNDEFINED, 'Other', '#ffffff']);
+        const pop = document.createElement('div'); pop.id = 'area-filter-popover';
+        pop.style.cssText = 'position:fixed;z-index:3000;background:#fff;border:1px solid #888;border-radius:6px;'
+            + 'box-shadow:0 2px 12px rgba(0,0,0,.3);padding:8px 10px;font:12px Arial;min-width:150px;';
+        pop.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;">Show label types</div>';
+        for (const [id,label,color] of rows){
+            const row = document.createElement('label');
+            row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;';
+            row.innerHTML = '<input type="checkbox" id="overlay-areaType-'+id+'"'+(MapApp.areaTypeVisible[id]?' checked':'')+'>'
+                + '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+(color||'#ffffff')+';border:1px solid rgba(0,0,0,.4);"></span>'
+                + label;
+            pop.appendChild(row);
+            row.querySelector('input').addEventListener('change', (e)=> setAreaTypeVisible(id, e.target.checked));
+        }
+        const btns = document.createElement('div'); btns.style.cssText = 'margin-top:7px;display:flex;gap:6px;';
+        btns.innerHTML = '<button type="button" id="af-all" style="font-size:11px;padding:1px 7px;cursor:pointer;">All</button>'
+            + '<button type="button" id="af-none" style="font-size:11px;padding:1px 7px;cursor:pointer;">None</button>';
+        pop.appendChild(btns);
+        const setAll = (on)=> rows.forEach(([id])=>{
+            const cb = pop.querySelector('#overlay-areaType-'+id); if (cb) cb.checked = on;
+            setAreaTypeVisible(id, on);
+        });
+        btns.querySelector('#af-all').addEventListener('click', ()=> setAll(true));
+        btns.querySelector('#af-none').addEventListener('click', ()=> setAll(false));
+        document.body.appendChild(pop);
+        const r = anchorBtn.getBoundingClientRect();
+        const pw = pop.offsetWidth;
+        let left = r.left; if (left + pw > window.innerWidth - 6) left = window.innerWidth - 6 - pw;
+        pop.style.top = (r.bottom + 4) + 'px';
+        pop.style.left = Math.max(6, left) + 'px';
+        setTimeout(()=> document.addEventListener('mousedown', areaFilterAway, true), 0);
+    }
+
+    // ---- Area-label authoring (click to place; second click sets the angle) ----
+    function startAreaCapture(latlng){
+        const tl = latLngToTileLocal(latlng);
+        if (!tl){ alert('Tile parameters are not available, so a label position cannot be captured.'); return; }
+        MapApp.areaCapture = { pending:true, latlng, tileX: tl.tile_x, tileZ: tl.tile_z, localX: tl.local_x, localZ: tl.local_z };
+        MapApp.areaGuide = L.polyline([latlng, latlng], { color:'#ffd11a', weight:2, dashArray:'5,5' }).addTo(MapApp.map);
+        MapApp._areaGuideMove = (ev)=>{ if (MapApp.areaGuide) MapApp.areaGuide.setLatLngs([latlng, ev.latlng]); };
+        MapApp.map.on('mousemove', MapApp._areaGuideMove);
+        MapApp._areaEsc = (ev)=>{ if (ev.key==='Escape' && MapApp.areaCapture && MapApp.areaCapture.pending){ ev.preventDefault(); finalizeAreaCapture(null); } };
+        document.addEventListener('keydown', MapApp._areaEsc);
+        showAreaHint('Click a second point along the track to set the text angle &nbsp;&middot;&nbsp; Esc = horizontal');
+    }
+    function finalizeAreaCapture(secondLatLng){
+        const cap = MapApp.areaCapture;
+        if (!cap || !cap.pending) return;
+        cap.pending = false;
+        if (MapApp.areaGuide){ MapApp.map.removeLayer(MapApp.areaGuide); MapApp.areaGuide = null; }
+        if (MapApp._areaGuideMove){ MapApp.map.off('mousemove', MapApp._areaGuideMove); MapApp._areaGuideMove = null; }
+        if (MapApp._areaEsc){ document.removeEventListener('keydown', MapApp._areaEsc); MapApp._areaEsc = null; }
+        hideAreaHint();
+        let rotation = 0;
+        if (secondLatLng){
+            const p1 = MapApp.map.latLngToContainerPoint(cap.latlng);
+            const p2 = MapApp.map.latLngToContainerPoint(secondLatLng);
+            const dx = p2.x - p1.x, dy = p2.y - p1.y;   // container y is down => CSS-clockwise
+            if (dx!==0 || dy!==0){
+                let deg = Math.atan2(dy, dx) * 180 / Math.PI;
+                if (deg > 90) deg -= 180;
+                if (deg < -90) deg += 180;
+                rotation = Math.round(deg);
+            }
+        }
+        const area = { label:'', tile_x: cap.tileX, tile_z: cap.tileZ,
+                       local_x: +cap.localX.toFixed(1), local_z: +cap.localZ.toFixed(1),
+                       rotation, type: newLabelType() };
+        openAreaEditor(area, { isNew:true, latlng: cap.latlng });
+    }
+    function showAreaHint(html){
+        let el = document.getElementById('area-capture-hint');
+        if (!el){ el = document.createElement('div'); el.id='area-capture-hint';
+            el.style.cssText='position:absolute;top:46px;left:50%;transform:translateX(-50%);z-index:2500;'
+              +'background:rgba(0,0,0,0.8);color:#fff;font:13px Arial;padding:6px 12px;border-radius:4px;pointer-events:none;';
+            document.body.appendChild(el); }
+        el.innerHTML = html; el.style.display='block';
+    }
+    function hideAreaHint(){ const el=document.getElementById('area-capture-hint'); if (el) el.style.display='none'; }
+    // Unified label editor. New labels POST; existing labels PUT / DELETE. With
+    // no backend, new labels fall back to the copy-paste INI popup below.
+    function openAreaEditor(area, opts){
+        const isNew = !!opts.isNew;
+        if (isNew && !MapApp.hasBackend){ openAreaIniPopup(area, opts.latlng); return; }
+        // Color control: Default (category color) / named presets / Custom (RGB).
+        // A preset stores its NAME; Custom stores hex; Default stores nothing.
+        const presets = areaColorPresets();
+        const presetNames = Object.keys(presets);
+        const curColor = (area.color || '').trim();
+        const curLower = curColor.toLowerCase();
+        const colorMode = !curColor ? '__default__' : (presetNames.indexOf(curLower) >= 0 ? curLower : '__custom__');
+        const customHex = (colorMode === '__custom__' && /^#[0-9a-fA-F]{6}$/.test(curColor)) ? curColor : '#ffd11a';
+        const colorOpts = ['<option value="__default__"' + (colorMode==='__default__'?' selected':'') + '>Default</option>']
+            .concat(presetNames.map(n => `<option value="${n}"${colorMode===n?' selected':''}>${n.toUpperCase()}</option>`))
+            .concat([`<option value="__custom__"${colorMode==='__custom__'?' selected':''}>Custom…</option>`])
+            .join('');
+        const html = `<div style="min-width:250px;font:12px Arial;">
+            <b>${isNew ? 'New' : 'Edit'} Area Label</b>
+            <label style="display:block;margin:6px 0 2px;">Label text:</label>
+            <input id="al-text" type="text" placeholder="e.g. Barstow Yard" value="${escapeHtml(area.label)}" style="width:100%;box-sizing:border-box;padding:4px;">
+            <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
+                <label>Rotation&deg; <input id="al-rot" type="number" value="${area.rotation || 0}" style="width:60px;"></label>
+                <label>Color <select id="al-color-sel" style="padding:2px;">${colorOpts}</select></label>
+                <span id="al-color-swatch" style="display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid rgba(0,0,0,.4);"></span>
+                <input id="al-color-custom" type="color" value="${customHex}" style="width:34px;height:22px;padding:0;display:${colorMode==='__custom__'?'inline-block':'none'};">
+            </div>
+            <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
+                <label>Font <input id="al-font" type="number" value="${area.font_size || ''}" placeholder="22" style="width:56px;"></label>
+                <label><input id="al-box" type="checkbox" ${area.box ? 'checked' : ''}> box</label>
+                <label>Type <select id="al-type" style="padding:2px;">${areaTypeSelectOptions(area.type)}</select></label>
+            </div>
+            <div style="margin-top:6px;color:#555;">tile ${area.tile_x},${area.tile_z} &nbsp; local ${(+area.local_x).toFixed(1)},${(+area.local_z).toFixed(1)}</div>
+            ${isNew ? '' : '<div style="margin-top:4px;color:#777;font-style:italic;">Tip: drag to move &middot; hold the mouse button on it and scroll to rotate.</div>'}
+            <div style="margin-top:8px;">
+                <button id="al-save" style="padding:4px 10px;cursor:pointer;">Save</button>
+                ${isNew ? '' : '<button id="al-del" style="margin-left:8px;padding:4px 10px;cursor:pointer;color:#b00;">Delete</button>'}
+            </div>
+            <div id="al-err" style="color:#b00;margin-top:6px;display:none;"></div></div>`;
+        L.popup({ maxWidth: 360 }).setLatLng(opts.latlng).setContent(html).openOn(MapApp.map);
+        setTimeout(()=>{
+            const textEl = document.getElementById('al-text');
+            const saveBtn = document.getElementById('al-save');
+            const delBtn = document.getElementById('al-del');
+            const errEl = document.getElementById('al-err');
+            if (!textEl || !saveBtn) return;
+            textEl.focus();
+            const showErr = (m)=>{ if (errEl){ errEl.textContent = m; errEl.style.display = 'block'; } };
+            const colorSel = document.getElementById('al-color-sel');
+            const colorCustom = document.getElementById('al-color-custom');
+            const colorSwatch = document.getElementById('al-color-swatch');
+            const typeSel = document.getElementById('al-type');
+            const swatchColor = ()=>{
+                const v = colorSel ? colorSel.value : '__default__';
+                if (v === '__default__') return labelTypeColor(typeSel.value);
+                if (v === '__custom__') return colorCustom.value;
+                return presets[v] || COLORS.areaLabel;
+            };
+            const syncColorUI = ()=>{
+                if (colorCustom) colorCustom.style.display = (colorSel && colorSel.value === '__custom__') ? 'inline-block' : 'none';
+                if (colorSwatch) colorSwatch.style.background = swatchColor();
+            };
+            if (colorSel) colorSel.addEventListener('change', syncColorUI);
+            if (colorCustom) colorCustom.addEventListener('input', syncColorUI);
+            if (typeSel) typeSel.addEventListener('change', syncColorUI);  // Default swatch tracks the category
+            syncColorUI();
+            const gather = ()=>{
+                const font = (document.getElementById('al-font').value || '').trim();
+                const cv = colorSel ? colorSel.value : '__default__';
+                const color = (cv === '__default__') ? null : (cv === '__custom__' ? colorCustom.value : cv);
+                return {
+                    label: (textEl.value || '').trim(),
+                    rotation: Number(document.getElementById('al-rot').value) || 0,
+                    color: color,
+                    font_size: font ? Number(font) : null,
+                    box: document.getElementById('al-box').checked,
+                    type: typeSel ? typeSel.value : 'other'
+                };
+            };
+            const save = ()=>{
+                const body = gather();
+                if (!body.label){ showErr('Label text is required.'); return; }
+                let req;
+                if (isNew){
+                    Object.assign(body, { tile_x: area.tile_x, tile_z: area.tile_z,
+                                          local_x: area.local_x, local_z: area.local_z });
+                    req = apiArea('POST', null, body);
+                } else {
+                    req = apiArea('PUT', area.id, body);
+                }
+                saveBtn.disabled = true;
+                req.then(saved => {
+                    if (isNew) addAreaMarker(saved); else replaceAreaMarker(saved);
+                    updateAreaLabelSizes(); ensureAreaOverlayVisible(); ensureAreaTypeVisible(saved.type);
+                    MapApp.map.closePopup();
+                }).catch(e => { saveBtn.disabled = false; showErr(e.message); });
+            };
+            saveBtn.addEventListener('click', save);
+            textEl.addEventListener('keydown', (ev)=>{ if (ev.key === 'Enter'){ ev.preventDefault(); save(); } });
+            if (delBtn){
+                delBtn.addEventListener('click', ()=>{
+                    if (!confirm('Delete this label?')) return;
+                    delBtn.disabled = true;
+                    apiArea('DELETE', area.id).then(()=>{ removeAreaMarker(area.id); MapApp.map.closePopup(); })
+                        .catch(e => { delBtn.disabled = false; showErr(e.message); });
+                });
+            }
+        }, 0);
+    }
+    // Fallback for authoring without the backend: paste-ready INI block (legacy flow).
+    function openAreaIniPopup(area, latlng){
+        const tileX=area.tile_x, tileZ=area.tile_z, localX=area.local_x, localZ=area.local_z, rotation=area.rotation||0;
+        const html = `<div style="min-width:230px;font:12px Arial;">
+            <b>New Area Label</b><br>
+            <label style="display:block;margin:6px 0 2px;">Label text:</label>
+            <input id="al-text" type="text" placeholder="e.g. Barstow Yard" style="width:100%;box-sizing:border-box;padding:4px;">
+            <label style="display:block;margin:6px 0 2px;">Type <select id="al-type" style="padding:2px;">${areaTypeSelectOptions(area.type)}</select></label>
+            <div style="margin-top:6px;color:#555;">tile ${tileX},${tileZ} &nbsp; local ${localX.toFixed(1)},${localZ.toFixed(1)} &nbsp; rot ${rotation}&deg;</div>
+            <button id="al-gen" style="margin-top:8px;padding:4px 8px;cursor:pointer;">Generate INI</button>
+            <pre id="al-out" style="display:none;white-space:pre-wrap;background:#f4f4f4;padding:6px;margin-top:6px;border-radius:4px;font-size:11px;"></pre>
+            <button id="al-copy" style="display:none;margin-top:4px;padding:4px 8px;cursor:pointer;">Copy to clipboard</button></div>`;
+        L.popup({ maxWidth:340 }).setLatLng(latlng).setContent(html).openOn(MapApp.map);
+        setTimeout(()=>{
+            const textEl=document.getElementById('al-text'), genBtn=document.getElementById('al-gen'),
+                  outEl=document.getElementById('al-out'), copyBtn=document.getElementById('al-copy');
+            if (!textEl || !genBtn) return;
+            textEl.focus();
+            const generate = ()=>{
+                const label=(textEl.value||'').trim();
+                let slug=label.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+                if (!slug) slug=`area_${tileX}_${tileZ}`;
+                let ini=`[area.${slug}]\nlabel = ${label||'New Label'}\ntile = ${tileX},${tileZ}\nlocal = ${localX.toFixed(1)},${localZ.toFixed(1)}`;
+                if (rotation) ini+=`\nrotation = ${rotation}`;
+                const atype=(document.getElementById('al-type')||{}).value;
+                if (atype && atype!=='other') ini+=`\ntype = ${atype}`;
+                outEl.textContent=ini; outEl.style.display='block'; copyBtn.style.display='inline-block';
+            };
+            genBtn.addEventListener('click', generate);
+            textEl.addEventListener('keydown', (ev)=>{ if (ev.key==='Enter'){ ev.preventDefault(); generate(); } });
+            copyBtn.addEventListener('click', ()=>{
+                const text=outEl.textContent;
+                if (navigator.clipboard && navigator.clipboard.writeText){
+                    navigator.clipboard.writeText(text).then(()=>{ copyBtn.textContent='Copied!'; setTimeout(()=>{copyBtn.textContent='Copy to clipboard';},1200); });
+                }
+            });
+        }, 0);
+    }
+    function rerenderAlign(){
+        const ids = [...MapApp.loadedRegions.keys()];
+        for (const id of ids) {
+            unloadRegion(id);
+            MapApp.loadedRegions.delete(id);   // force loadRegion to rebuild (not just show old layers)
+        }
+        for (const id of ids) loadRegion(id);
+    }
+    function fitToRegion(regionId){
+        // Enabling a region pans/zooms to it (its track can span 100+ mi; the map
+        // does not otherwise move, so a newly-enabled region may be off-screen).
+        const reg = MapApp.loadedRegions.get(regionId);
+        if (!reg || !reg.data) return;
+        let mnLa=90,mxLa=-90,mnLo=180,mxLo=-180, any=false;
+        for (const sec of reg.data.sections) for (const p of sec.paths) for (const q of p){
+            any=true;
+            if(q[0]<mnLa)mnLa=q[0]; if(q[0]>mxLa)mxLa=q[0];
+            if(q[1]<mnLo)mnLo=q[1]; if(q[1]>mxLo)mxLo=q[1];
+        }
+        if (any) { MapApp.map.invalidateSize(); MapApp.map.fitBounds([[mnLa,mnLo],[mxLa,mxLo]], {padding:[40,40]}); }
+    }
+    function buildAlignUI(){
+        const bs='position:absolute;top:10px;z-index:1500;padding:6px 10px;cursor:pointer;'+
+          'background:#fff;border:1px solid #888;border-radius:6px;box-shadow:0 1px 6px rgba(0,0,0,.3);font:13px Arial';
+        const authoring = (typeof window.__run8_authoring === 'undefined') ? true : !!window.__run8_authoring;
+        const btn=document.createElement('button'); btn.textContent='Align mode: OFF'; btn.style.cssText=bs+';left:52px';
+        document.body.appendChild(btn);
+        let lbl=null;
+        if (authoring){
+            lbl=document.createElement('button'); lbl.textContent='Add Label: OFF'; lbl.style.cssText=bs+';left:170px';
+            document.body.appendChild(lbl);
+        }
+        const panes = MapApp.map.getPanes();
+        function setT(t){ panes.overlayPane.style.transform=t;
+            if(panes.markerPane) panes.markerPane.style.transform=t;
+            if(panes.shadowPane) panes.shadowPane.style.transform=t; }
+        let aligning=false, drag=null; MapApp.labelMode=false;
+        function updA(){ btn.textContent='Align mode: '+(aligning?'ON':'OFF'); btn.style.background=aligning?'#1560d0':'#fff'; btn.style.color=aligning?'#fff':'#000'; }
+        function updL(){ if(!lbl) return; lbl.textContent='Add Label: '+(MapApp.labelMode?'ON':'OFF'); lbl.style.background=MapApp.labelMode?'#1a9a4a':'#fff'; lbl.style.color=MapApp.labelMode?'#fff':'#000'; }
+        function setAlign(on){ aligning=on;
+            if(on){ MapApp.labelMode=false; updL(); MapApp.map.dragging.disable(); }
+            else { MapApp.map.dragging.enable(); drag=null; setT(''); }
+            updA(); }
+        function setLabel(on){ if(!authoring) return; MapApp.labelMode=on;
+            if(on){ aligning=false; updA(); MapApp.map.dragging.enable(); drag=null; setT(''); }
+            else if(MapApp.areaCapture && MapApp.areaCapture.pending){ finalizeAreaCapture(null); }
+            updL(); }
+        btn.onclick=()=> setAlign(!aligning);
+        if(lbl) lbl.onclick=()=> setLabel(!MapApp.labelMode);
+        // Let a read-only backend (serve.py --no-authoring) drop the authoring UI:
+        // detectBackend() calls this when /api/ping reports authoring:false.
+        MapApp.addLabelBtn = lbl;
+        MapApp.disableAuthoringUI = function(){ MapApp.authoring = false; if(lbl){ setLabel(false); lbl.style.display='none'; } };
+        // align-mode drag
+        MapApp.map.on('mousedown', e=>{ if(!aligning) return;
+            drag={ p:MapApp.map.mouseEventToContainerPoint(e.originalEvent), a:e.latlng, last:e.latlng }; });
+        MapApp.map.on('mousemove', e=>{ if(!aligning||!drag) return;
+            const p=MapApp.map.mouseEventToContainerPoint(e.originalEvent);
+            setT(`translate3d(${p.x-drag.p.x}px,${p.y-drag.p.y}px,0)`); drag.last=e.latlng; });
+        MapApp.map.on('mouseup', ()=>{ if(!aligning||!drag) return; const d=drag; drag=null; setT('');
+            MapApp.align.lat += (d.last.lat - d.a.lat); MapApp.align.lon += (d.last.lng - d.a.lng);
+            rerenderAlign(); repositionAreaLabels(); setTimeout(applyTrackOpacity, 600); });
+        // label-mode capture: first click = position, second = angle (Esc = horizontal)
+        MapApp.map.on('click', e=>{ if(!authoring || !MapApp.labelMode) return; MapApp.map.closePopup();
+            if(MapApp.areaCapture && MapApp.areaCapture.pending) finalizeAreaCapture(e.latlng);
+            else startAreaCapture(e.latlng); });
+    }
+
+'''
+
+_INIT_ORIG = """    function init() {
+        // Find the map object (Folium creates it with a specific name)
+        const mapContainer = document.querySelector('.folium-map');
+        if (!mapContainer) {
+            setTimeout(init, 100);
+            return;
+        }
+
+        // Get map variable name from container id
+        const mapId = mapContainer.id;
+        MapApp.map = window[mapId];
+
+        if (!MapApp.map || typeof MapApp.map.eachLayer !== 'function') {
+            setTimeout(init, 100);
+            return;
+        }
+
+        console.log('Map initialized, loading manifest...');
+        loadManifest();
+    }"""
+
+_INIT_DIRECT = """    function init() {
+        MapApp.map = window.__run8map;
+        console.log('Map initialized, loading manifest...');
+        loadManifest();
+    }"""
+
+_FETCH_ORIG = """            const response = await fetch(`data/${regionId}.json`);
+            const data = await response.json();"""
+
+_FETCH_ALIGN = """            let data;
+            if (MapApp.align && MapApp._raw[regionId]) {
+                data = JSON.parse(JSON.stringify(MapApp._raw[regionId]));
+            } else {
+                // Retry transient failures (e.g. a request racing a just-started
+                // server) and treat a non-OK HTTP status as an error, so a region
+                // is not silently dropped on first load.
+                for (let attempt = 1; ; attempt++) {
+                    try {
+                        const response = await fetch(`data/${regionId}.json`);
+                        if (!response.ok) throw new Error(`HTTP ${response.status} fetching ${regionId}.json`);
+                        data = await response.json();
+                        break;
+                    } catch (e) {
+                        if (attempt >= 3) throw e;
+                        await new Promise(r => setTimeout(r, 300 * attempt));
+                    }
+                }
+                if (MapApp.align) MapApp._raw[regionId] = JSON.parse(JSON.stringify(data));
+            }
+            if (MapApp.align) MapApp.transformData(data);"""
+
+
+def generate_align_html(config: VisualizationConfig, output_path: Path, authoring: bool = True) -> None:
+    """Generate a standalone (no-Folium) geographic viewer with manual-alignment
+    drag. Reuses the geographic viewer's feature code verbatim; the map is created
+    directly and the tile-based track is placed via a client-side transform.
+    authoring=False hides the "Add Label" button (for hosting to end users)."""
+    js = generate_javascript()
+    # patch: direct map instead of Folium lookup
+    js = js.replace(_INIT_ORIG, _INIT_DIRECT)
+    # patch: seed the transform (alignInit) after UI is built, before regions load
+    js = js.replace("            setupUI();\n            loadDefaultRegions();",
+                    "            setupUI();\n            alignInit();\n            loadDefaultRegions();")
+    # patch: cache raw world-coord data + transform on load
+    js = js.replace(_FETCH_ORIG, _FETCH_ALIGN)
+    # append the align module inside the IIFE, just before the public API
+    js = js.replace("    window.MapApp = {\n        openSearch,",
+                    ALIGN_JS + "    window.MapApp = {\n        openSearch,")
+    # patch: enabling a region pans/zooms the map to it
+    js = js.replace(
+        "    function toggleRegion(regionId, enabled) {\n"
+        "        if (enabled) {\n"
+        "            loadRegion(regionId);\n"
+        "        } else {\n"
+        "            unloadRegion(regionId);\n"
+        "        }\n"
+        "    }",
+        "    async function toggleRegion(regionId, enabled) {\n"
+        "        if (enabled) {\n"
+        "            await loadRegion(regionId);\n"
+        "            if (MapApp.align) { fitToRegion(regionId); applyTrackOpacity(); }\n"
+        "        } else {\n"
+        "            unloadRegion(regionId);\n"
+        "        }\n"
+        "    }")
+
+    color_config = generate_color_config(config.colors)
+    authoring_js = 'true' if authoring else 'false'
+    html = f'''<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>{config.name} - manual alignment</title>
+<link rel="icon" href="data:,"/>
+<link rel="stylesheet" href="leaflet/leaflet.css"/>
+<script src="leaflet/leaflet.js"></script>
+<script>window.L||document.write('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>')</script>
+<style>html,body{{margin:0;height:100%}}#map{{position:absolute;inset:0}}</style>
+</head><body>
+<div id="map"></div>
+{color_config}
+<script>window.__run8_authoring = {authoring_js}; window.__run8map = L.map('map', {{preferCanvas:true, maxZoom:22, zoomControl:true}}).setView([35,-117.8],9);</script>
+{js}
+</body></html>'''
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+    print(f"Generated HTML (align): {output_path}")
 
 
 if __name__ == '__main__':
