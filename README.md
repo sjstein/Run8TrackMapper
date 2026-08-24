@@ -73,8 +73,9 @@ the generated output and exposes a small REST API the viewer uses.
 - **Move:** **drag** a label.
 - **Rotate:** **hold the mouse button on a label and scroll the wheel** (Shift = 1°
   fine steps).
-- **Show/hide by category:** the **Area Labels** overlay has a master checkbox with
-  one child per category, so you can show just control points, just yards, etc.
+- **Show/hide by category:** next to the **Area Labels** checkbox, the **Filter**
+  button opens a popover of per-category checkboxes (with All / None), so you can show
+  just control points, just yards, etc.
 
 Every change is written straight into the writable areas file (atomic write, with a
 `.bak` backup) and the served `manifest.json` is kept in sync, so a fresh reload
@@ -100,32 +101,43 @@ python serve.py <config.ini> [--port 8000] [--host 127.0.0.1] [--areas-file FILE
 
 ### Area label categories
 
-Each label has a `type`: `yard`, `cp` (control point), `jct` (junction), `region`,
-`notes`, or `other` (the default). The category sets a default text color (a label's
-own `color=` overrides it) and drives the per-category show/hide toggles. Full label
-syntax:
+Each label has a `type` — one of the categories your config defines (see
+`[label_types]` below). The category sets a default text color and drives the
+per-category show/hide toggles. A label whose `type` isn't defined (or is missing)
+renders **white** and groups under an auto **"Other"** toggle. Full label syntax:
 
 ```ini
 [area.barstow_yard]
 label = Barstow Yard
 tile = 209,-10           ; tile_x,tile_z
 local = 421.5,-500.2     ; Run8 local_x,local_z within that tile
-type = yard              ; optional: yard|cp|jct|region|notes|other (default other)
+type = yard              ; optional: a [label_types] id (undefined -> white)
 color = bnsf             ; optional; a preset name or hex; defaults to the type's color
-```
-
-Color presets (name → hex) are defined in an optional `[color_presets]` config
-section and always include the built-ins `bnsf`/`up`:
-
-```ini
-[color_presets]
-bnsf = #f85d13
-up   = #ffcc00
-; add your own — they appear in the editor's Color dropdown
 font_size = 16           ; optional
 box = true               ; optional background box
 rotation = -30           ; optional degrees clockwise
 ```
+
+**Color palette (config-owned).** No categories or colors are baked into the code —
+the config defines them. Two optional sections:
+
+```ini
+[label_types]            ; id = Display Name, #color  (order = filter order)
+yard    = Yard, #ffd11a
+cp      = CP, #ff6b35
+region  = Region, #ffffff
+station = Station, #0078b9
+
+[color_presets]          ; named presets for the label color dropdown
+bnsf = #f85d13
+up   = #ffcc00
+; add your own railroads here
+```
+
+The display name shows in the filter/editor; the color is the category default (a
+label's own `color=` still wins). If a label uses `color = bnsf` but no
+`[color_presets]` defines `bnsf`, it renders as that literal text — so define every
+preset your labels reference.
 
 ---
 

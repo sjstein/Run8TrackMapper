@@ -96,7 +96,7 @@ color = bnsf             ; optional; a [color_presets] name or hex; defaults to 
 font_size = 16           ; optional (size at <=50 m scale; default 22)
 box = true               ; optional, background box behind the text (default: no box)
 rotation = -30           ; optional, rotate text in degrees clockwise (align to track/yard)
-type = yard              ; optional category: yard|cp|jct|region|notes|other (default other)
+type = yard              ; optional category: a [label_types] id (undefined -> white)
 ```
 Labels scale with the map: full `font_size` at the 50 m scale-bar level, shrinking to
 a small floor by ~15 km (tunable in `updateAreaLabelSizes` in html_generator.py).
@@ -104,26 +104,31 @@ Labels are emitted into `manifest.json` (`areas`) and rendered as a toggleable
 "Area Labels" overlay in **both** the tile-based viewer and the manual-alignment
 (default) viewer.
 
-**Categories (`type`).** Each label has a category — `yard`, `cp` (control point),
-`jct` (junction), `region`, `notes`, or `other` (the default for untyped/legacy
-labels). A category implies a default text color (`[colors] area_yard`, `area_cp`,
-`area_jct`, `area_region`, `area_notes`, `area_other`; a label's own `color=` still
-wins) and drives per-category show/hide. In the **align viewer** the single "Area
-Labels" overlay becomes a master checkbox with one indented child (colour-swatched)
-per category, so you can show just control points, just yards, etc. The authoring
-add/edit popup (and the no-backend INI-generator popup) include a **Type** selector.
-The canonical category list + labels live in `AREA_TYPES`/`AREA_TYPE_LABELS`
-(config_parser.py) and the `AREA_TYPES` JS constant in `ALIGN_JS` (html_generator.py);
-default colors live in `ColorConfig` and are emitted to `window.COLORS.areaTypes`. The
-tile-based viewer color-codes by category but keeps a single "Area Labels" toggle.
-New labels placed in the align editor default to category **`cp`** (`AREA_TYPE_DEFAULT_NEW`
-in `ALIGN_JS`); the *data* default for untyped/legacy labels stays `other`.
+**Categories (`type`) — config-defined.** Categories come from the config's
+`[label_types]` section (`id = Display Name, #color`, ordered), parsed into
+`VisualizationConfig.label_types` (a list of `LabelType`) and emitted to
+`manifest.label_types` (`[{id,name,color}]`). A label's `type` is a category id; a type
+**not** present in `[label_types]` (or a missing type) renders in `UNDEFINED_TYPE_COLOR`
+(white) and groups under the viewer's `AREA_UNDEFINED` (`__other__`) bucket. There is no
+hardcoded category list — `AREA_TYPES`/`AREA_TYPE_LABELS` were removed; the viewer builds
+everything from `manifest.label_types` (`labelTypes`/`labelTypeColor`/`areaTypeOf` in
+`ALIGN_JS`). In the **align viewer** the "Area Labels" overlay is a master checkbox with a
+**Filter** button beside it; the button opens a popover (`toggleAreaFilterPopover`) of
+per-category checkboxes (colour-swatched, with All / None), **plus an auto "Other" row**
+shown only when some loaded label is undefined (`hasUndefinedLabels`). The add/edit popup (and the
+no-backend INI popup) `Type` selector lists the defined categories + an "Other" (undefined)
+option. New labels default to **`cp`** if defined, else the first category (`newLabelType`).
+The tile-based viewer color-codes by category (via `manifest.label_types`) but keeps a
+single "Area Labels" toggle. Type validation was dropped everywhere (any string is accepted).
 
-**Color presets (a palette).** A label `color` may be a **preset name** (e.g. `bnsf`)
-or a raw hex. Presets are a `name -> hex` map defined in an optional `[color_presets]`
-config section, merged over the built-ins `DEFAULT_COLOR_PRESETS` (`bnsf` `#f85d13`,
-`up` `#ffcc00`) in config_parser.py, exposed as `VisualizationConfig.color_presets` and
-emitted to `manifest.color_presets`. **The name is stored, not the hex** — kept raw in
+**Config-owned color palette (no colors baked into code).** Both palettes come from the
+config, not from hardcoded defaults:
+- *Per-category colors* — defined inline in `[label_types]` (the `#color` after each
+  display name); emitted via `manifest.label_types`. An undefined category → white.
+- *Named presets* — the `[color_presets]` section (`name = hex`). `DEFAULT_COLOR_PRESETS`
+  is now **empty** (no built-in `bnsf`/`up`; the shipped configs define them), exposed as
+  `VisualizationConfig.color_presets` and emitted to `manifest.color_presets`. A label
+  `color` may be a preset **name** or raw hex. **The name is stored, not the hex** — kept raw in
 the INI / `AreaLabel.color` / REST payload and **resolved to hex at render time** by the
 viewer (`resolveColor` in `ALIGN_JS`; an inline lookup in the tile-based
 `createAreaLabelIcon`), so recoloring a preset updates every label that uses it. In the
