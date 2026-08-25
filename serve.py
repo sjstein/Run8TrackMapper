@@ -37,18 +37,89 @@ from urllib.parse import urlsplit, unquote
 from config_parser import (parse_config, collect_areas, resolve_areas_files,
                             AREA_TYPE_DEFAULT)
 from area_store import AreaStore, AreaStoreError, slugify, _area_to_dict
+from region_extractor import SectionData, extract_trains
+from world_parser import parse_world_save
+from output_generator import train_to_dict
+from rv_length_db import load_rv_lengths
 
 
 class AuthoringState:
     """Shared, thread-safe state for the request handlers."""
 
-    def __init__(self, config_path: Path, output_dir: Path, areas_file: Path):
+    def __init__(self, config_path: Path, output_dir: Path, areas_file: Path,
+                 config=None, world_save: Path = None):
         self.config_path = config_path
         self.output_dir = output_dir
         self.manifest_path = output_dir / "manifest.json"
         self.store = AreaStore(areas_file)
         self.areas_file = areas_file
         self.lock = threading.Lock()
+
+        # ---- world-save train plotting (optional, with live mtime watch) ----
+        self.config = config
+        self.world_save = world_save
+        # regionId -> route_prefix (for filtering vehicles to each region)
+        self.region_prefix = {r.id: r.route_prefix for r in (config.regions if config else [])}
+        self._sections_cache = {}   # regionId -> [SectionData] (rebuilt from region JSON)
+        self._trains_cache = {'mtime': None, 'payload': {'version': 0, 'trains': {}}}
+
+        # Optional rail-vehicle length DB (true car length drawn over the trucks).
+        self.rv_lengths = None
+        rv_db = getattr(config, 'railvehicle_db', None) if config else None
+        if rv_db and Path(rv_db).exists():
+            try:
+                self.rv_lengths = load_rv_lengths(str(rv_db))
+                print(f"  Loaded {len(self.rv_lengths)} rail-vehicle length(s) from {rv_db}")
+            except Exception as e:  # noqa: BLE001
+                print(f"  Warning: could not load railvehicle_db {rv_db}: {e}")
+
+    # ---- world-save trains (call under self.lock) ----------------------
+    def _region_sections(self, region_id):
+        """Reconstruct lightweight SectionData (id + paths) from the region's
+        already-generated JSON, so trains can be re-placed without reloading the
+        binary track database. Cached per region."""
+        if region_id in self._sections_cache:
+            return self._sections_cache[region_id]
+        path = self.output_dir / 'data' / f'{region_id}.json'
+        secs = []
+        if path.exists():
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            for s in data.get('sections', []):
+                secs.append(SectionData(
+                    id=s['id'],
+                    paths=[[tuple(pt) for pt in p] for p in s.get('paths', [])],
+                    length_ft=s.get('length_ft', 0.0),
+                    length_m=s.get('length_m', 0.0),
+                ))
+        self._sections_cache[region_id] = secs
+        return secs
+
+    def trains_payload(self):
+        """Return {version, trains:{regionId:[train dicts]}}, re-placing vehicles
+        only when the world save file's mtime has changed since the last call."""
+        if not self.world_save or not self.world_save.exists():
+            return {'version': 0, 'trains': {}}
+        mtime = self.world_save.stat().st_mtime
+        if mtime == self._trains_cache['mtime']:
+            return self._trains_cache['payload']
+
+        parsed = parse_world_save(str(self.world_save))
+        # Only touch regions whose route prefix actually appears in the save, so we
+        # don't load every region's (large) JSON just to place zero vehicles.
+        present = {v.route_prefix for tr in parsed for v in tr.vehicles}
+        trains_by_region = {}
+        for region_id, prefix in self.region_prefix.items():
+            if prefix not in present:
+                continue
+            placed = extract_trains(parsed, self._region_sections(region_id), prefix,
+                                    rv_lengths=self.rv_lengths)
+            if placed:
+                trains_by_region[region_id] = [train_to_dict(t) for t in placed]
+
+        payload = {'version': mtime, 'trains': trains_by_region}
+        self._trains_cache = {'mtime': mtime, 'payload': payload}
+        return payload
 
     # ---- label operations (call under self.lock) -----------------------
     def merged_areas(self):
@@ -172,7 +243,15 @@ def make_handler(state: AuthoringState, authoring: bool):
             if path == '/api/ping':
                 self._send_json({'ok': True,
                                  'areas_file': state.areas_file.name,
-                                 'authoring': authoring})
+                                 'authoring': authoring,
+                                 'world': bool(state.world_save and state.world_save.exists())})
+                return
+            if path == '/api/trains':
+                try:
+                    with state.lock:
+                        self._send_json(state.trains_payload())
+                except Exception as e:  # noqa: BLE001
+                    self._error(str(e), 500)
                 return
             if path == '/api/areas':
                 try:
@@ -339,10 +418,22 @@ def main():
                         help='Override the areas file labels are written to (default: first areas_file in the config)')
     parser.add_argument('--no-authoring', dest='authoring', action='store_false',
                         help='Serve read-only (disable the create/edit/delete API)')
+    parser.add_argument('--world', metavar='FILE', dest='world',
+                        help='Run8 world save (.xml) to plot trains from, watched for live '
+                             'updates (overrides [visualization] world_save in the config)')
     args = parser.parse_args()
 
     config = parse_config(args.config)
     output_dir = config.output_dir
+
+    # Resolve the world save (CLI overrides config); watched for live refresh.
+    world_save = None
+    if args.world:
+        world_save = Path(args.world)
+        if not world_save.is_absolute():
+            world_save = Path.cwd() / world_save
+    elif config.world_save:
+        world_save = Path(config.world_save)
     if not (output_dir / 'index.html').exists():
         print(f"ERROR: {output_dir / 'index.html'} not found. Generate it first:\n"
               f"    python output_generator.py {args.config}", file=sys.stderr)
@@ -355,7 +446,8 @@ def main():
             sys.exit(1)
 
     state = AuthoringState(Path(args.config), output_dir,
-                           areas_file or output_dir / '_noauthoring.ini')
+                           areas_file or output_dir / '_noauthoring.ini',
+                           config=config, world_save=world_save)
     if args.authoring:
         # Make sure the served manifest matches the areas files on disk at startup.
         try:
@@ -372,6 +464,9 @@ def main():
         print(f"  Writing : {areas_file}")
     else:
         print(f"  Mode    : read-only (no label authoring)")
+    if world_save:
+        exists = " (not found yet)" if not world_save.exists() else ""
+        print(f"  World   : {world_save}{exists}  [live-watched]")
     print(f"  URL     : http://{args.host}:{args.port}/")
     print(f"\nPress Ctrl+C to stop.\n")
     try:

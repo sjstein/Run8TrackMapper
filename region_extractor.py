@@ -142,6 +142,7 @@ class RegionData:
     mileposts: List[MilepostData] = field(default_factory=list)
     industries: List[IndustryData] = field(default_factory=list)
     tiles: List[TileData] = field(default_factory=list)
+    trains: List["TrainData"] = field(default_factory=list)  # from an optional world save
     bounds: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None  # ((min_lat, min_lon), (max_lat, max_lon))
 
 
@@ -1532,6 +1533,260 @@ def extract_industries(industry_db_path: str,
     return industries
 
 
+# ---------------------------------------------------------------------------
+# Rail-vehicle placement (world-save import)
+#
+# Each rail vehicle reports two trucks; each truck gives a Run8 track section,
+# a start-node end, and a distance along that section (metres). We place a truck
+# by walking that many metres along the section's *already-extracted* polyline
+# (SectionData.paths), so vehicles land exactly on the drawn track in whatever
+# coordinate mode is active (tile-world metres or lat/lon). The car body is the
+# sub-polyline between its two truck points, so it follows curves. Ordering is
+# geometry-only: a vehicle's sort key is the yard-direction-most (minimum) of
+# its two trucks' distance-from-polyline-start, matching the coordinate model in
+# world-import-rail-vehicle-ordering.md without the YARDS yard-track SEQ layer.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RailVehicleData:
+    """A placed rail vehicle ready for JSON serialization."""
+    train_id: int
+    unit_number: str
+    destination_tag: str
+    unit_type: str
+    rv_filename: str
+    body: List[Tuple[float, float]]      # polyline (>=2 pts) from truck A to truck B
+    position_key: float                  # ordering key (min truck dist-from-start)
+    resolved: bool                       # at least one truck landed on a known section
+
+
+@dataclass
+class TrainData:
+    """A train (consist) with its placed rail vehicles."""
+    train_id: int
+    was_ai: bool
+    vehicles: List[RailVehicleData] = field(default_factory=list)
+
+
+def _concat_section_polyline(sd: SectionData) -> List[Tuple[float, float]]:
+    """Concatenate a section's paths into one polyline (dedup shared endpoints).
+
+    Most sections have a single path; switches/curves may have several. Adjacent
+    paths that meet end-to-start are stitched so the cumulative length is
+    continuous.
+    """
+    poly: List[Tuple[float, float]] = []
+    for path in sd.paths:
+        if not path:
+            continue
+        if poly and _d2(poly[-1], path[0]) < 0.25:  # within 0.5 units -> shared joint
+            poly.extend(path[1:])
+        else:
+            poly.extend(path)
+    return poly
+
+
+def _cumulative_lengths(poly: List[Tuple[float, float]]) -> List[float]:
+    """Cumulative arc length at each vertex of a polyline (poly[0] -> 0)."""
+    cum = [0.0]
+    for a, b in zip(poly, poly[1:]):
+        cum.append(cum[-1] + math.hypot(b[0] - a[0], b[1] - a[1]))
+    return cum
+
+
+def _point_at_distance(poly: List[Tuple[float, float]], cum: List[float],
+                       d: float) -> Tuple[float, float]:
+    """Interpolate the point at arc length ``d`` from ``poly[0]`` (clamped)."""
+    total = cum[-1]
+    d = min(max(d, 0.0), total)
+    for i in range(1, len(cum)):
+        if d <= cum[i] or i == len(cum) - 1:
+            seg = cum[i] - cum[i - 1]
+            t = 0.0 if seg <= 1e-9 else (d - cum[i - 1]) / seg
+            a, b = poly[i - 1], poly[i]
+            return (a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1]))
+    return poly[-1]
+
+
+def _subpolyline(poly: List[Tuple[float, float]], cum: List[float],
+                 d0: float, d1: float) -> List[Tuple[float, float]]:
+    """Return the polyline vertices between arc lengths ``d0`` and ``d1``.
+
+    Endpoints are interpolated exactly and the result is ordered from ``d0`` to
+    ``d1`` (so the body runs from truck A toward truck B). Used to draw a car
+    body that follows the track's curvature between its two trucks.
+    """
+    lo, hi = (d0, d1) if d0 <= d1 else (d1, d0)
+    total = cum[-1]
+    lo = min(max(lo, 0.0), total)
+    hi = min(max(hi, 0.0), total)
+    pts = [_point_at_distance(poly, cum, lo)]
+    for i in range(len(poly)):
+        if lo < cum[i] < hi:
+            pts.append(poly[i])
+    pts.append(_point_at_distance(poly, cum, hi))
+    if d0 > d1:
+        pts.reverse()
+    # Drop duplicate consecutive points.
+    out = [pts[0]]
+    for p in pts[1:]:
+        if _d2(p, out[-1]) > 1e-6:
+            out.append(p)
+    return out if len(out) >= 2 else [pts[0], pts[-1]]
+
+
+class _SectionPlacer:
+    """Caches per-section polyline + cumulative lengths for fast truck placement."""
+
+    def __init__(self, sections: List[SectionData]):
+        self._sd = {s.id: s for s in sections}
+        self._cache: Dict[int, Optional[Tuple[List, List, float]]] = {}
+
+    def _geometry(self, section_index: int):
+        if section_index in self._cache:
+            return self._cache[section_index]
+        sd = self._sd.get(section_index)
+        geom = None
+        if sd is not None:
+            poly = _concat_section_polyline(sd)
+            if len(poly) >= 2:
+                cum = _cumulative_lengths(poly)
+                if cum[-1] > 1e-6:
+                    geom = (poly, cum, cum[-1])
+        self._cache[section_index] = geom
+        return geom
+
+    def truck(self, truck) -> Optional[Tuple[Tuple[float, float], float, int]]:
+        """Place a truck.
+
+        Returns ``(point, dist_from_start, section_index)`` where
+        ``dist_from_start`` is metres from ``polyline[0]`` oriented by the
+        truck's ``start_node_index`` (0 -> from start, else -> from far end), or
+        ``None`` if the truck's section is unknown.
+        """
+        geom = self._geometry(truck.section_index)
+        if geom is None:
+            return None
+        poly, cum, total = geom
+        d = total - truck.distance_m if truck.start_node_index else truck.distance_m
+        d = min(max(d, 0.0), total)
+        return (_point_at_distance(poly, cum, d), d, truck.section_index)
+
+    def body(self, section_index: int, d0: float, d1: float) -> List[Tuple[float, float]]:
+        """Sub-polyline between two distances on the same section (follows curves)."""
+        geom = self._geometry(section_index)
+        if geom is None:
+            return []
+        poly, cum, _ = geom
+        return _subpolyline(poly, cum, d0, d1)
+
+
+def _extend_segment(pa: Tuple[float, float], pb: Tuple[float, float],
+                    length: float) -> List[Tuple[float, float]]:
+    """Extend a straight A->B segment symmetrically to at least ``length`` units.
+
+    Used for the (rare) case where a vehicle's two trucks are on different
+    sections, so there is no single polyline to walk: the body is drawn straight
+    and grown past each truck by the overhang. Coordinate units must match
+    ``length`` (metres in the tile-world / align coordinate mode).
+    """
+    dx, dy = pb[0] - pa[0], pb[1] - pa[1]
+    d = math.hypot(dx, dy)
+    if not length or d < 1e-9 or length <= d:
+        return [pa, pb]
+    oh = (length - d) / 2.0
+    ux, uy = dx / d, dy / d
+    return [(pa[0] - ux * oh, pa[1] - uy * oh),
+            (pb[0] + ux * oh, pb[1] + uy * oh)]
+
+
+def extract_trains(trains, sections: List[SectionData],
+                   route_prefix: Optional[int] = None,
+                   rv_lengths: Optional[Dict[str, float]] = None) -> List[TrainData]:
+    """Place a parsed world save's trains onto extracted section geometry.
+
+    Args:
+        trains: list of world_parser.Train records.
+        sections: the region's extracted SectionData (already in the active
+            coordinate mode).
+        route_prefix: if given, only vehicles whose truck-A route prefix matches
+            are placed (so each region gets its own trains).
+        rv_lengths: optional {rvXMLfilename.lower(): (length_m, coupler_offset_m)}
+            from rv_length_db.load_rv_lengths(). When given, each car body is drawn
+            at its real *body* length - the coupled footprint ``length_m`` minus one
+            ``coupler_offset_m`` per end - by extending the truck-to-truck span
+            symmetrically by the per-end overhang (body_len - span) / 2. Dropping the
+            couplers keeps a realistic gap between adjacent (coupled) cars, which
+            otherwise abut. Only meaningful in the metre-based (tile/align) mode.
+    """
+    placer = _SectionPlacer(sections)
+    out: List[TrainData] = []
+
+    for train in trains:
+        placed: List[RailVehicleData] = []
+        for v in train.vehicles:
+            if route_prefix is not None and v.route_prefix != route_prefix:
+                continue
+
+            ta = placer.truck(v.truck_a)
+            tb = placer.truck(v.truck_b)
+            resolved = ta is not None or tb is not None
+
+            # Drawn body length = coupled footprint minus a coupler at each end,
+            # so adjacent coupled cars keep a visible gap instead of abutting.
+            length_m = None
+            if rv_lengths:
+                entry = rv_lengths.get((v.rv_filename or '').strip().lower())
+                if entry:
+                    full_len_m, coupler_m = entry
+                    body_len_m = full_len_m - 2.0 * coupler_m
+                    length_m = body_len_m if body_len_m > 0 else full_len_m
+
+            if ta and tb and ta[2] == tb[2]:
+                # Both trucks on the same section -> body follows the track.
+                lo, hi = (ta[1], tb[1]) if ta[1] <= tb[1] else (tb[1], ta[1])
+                if length_m:
+                    # Grow past each truck by the overhang to the true car length.
+                    overhang = max(0.0, (length_m - (hi - lo)) / 2.0)
+                    lo -= overhang
+                    hi += overhang
+                body = placer.body(ta[2], lo, hi)  # clamps to the section ends
+                key = min(ta[1], tb[1])
+            elif ta and tb:
+                # Trucks on different (adjacent) sections -> straight body.
+                body = _extend_segment(ta[0], tb[0], length_m)
+                key = min(ta[1], tb[1])
+            elif ta or tb:
+                # Only one truck resolved -> zero-length body at that point.
+                t = ta or tb
+                body = [t[0], t[0]]
+                key = t[1]
+            else:
+                body = []
+                key = float("inf")
+
+            if len(body) < 2:
+                body = body * 2 if body else []
+
+            placed.append(RailVehicleData(
+                train_id=train.train_id,
+                unit_number=v.unit_number,
+                destination_tag=v.destination_tag,
+                unit_type=v.unit_type,
+                rv_filename=v.rv_filename,
+                body=[(round(p[0], 6), round(p[1], 6)) for p in body],
+                position_key=round(key, 3) if key != float("inf") else -1.0,
+                resolved=resolved,
+            ))
+
+        # Skip trains with nothing on this region (e.g. filtered out by prefix).
+        if placed:
+            out.append(TrainData(train_id=train.train_id, was_ai=train.was_ai,
+                                 vehicles=placed))
+
+    return out
+
+
 def calculate_bounds(sections: List[SectionData],
                      signals: List[SignalData],
                      ai_locations: List[AILocationData],
@@ -1574,7 +1829,9 @@ def extract_region(region_config: RegionConfig,
                    tile_corrections: Dict[Tuple[int, int], Dict[str, float]],
                    default_tile_dir: str,
                    tile_dir: str = None,
-                   tile_based_config: Optional[TileBasedConfig] = None) -> RegionData:
+                   tile_based_config: Optional[TileBasedConfig] = None,
+                   world_trains=None,
+                   rv_lengths: Optional[Dict[str, float]] = None) -> RegionData:
     """Extract all data for a single region
 
     Args:
@@ -1584,6 +1841,8 @@ def extract_region(region_config: RegionConfig,
         default_tile_dir: Default tile directory from config (derived from region_dir)
         tile_dir: Override tile directory (uses region_config.terrain_tile_dir or default_tile_dir if None)
         tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
+        world_trains: optional list of world_parser.Train to place on this region's
+            track (filtered to region_config.route_prefix)
     """
     print(f"\nExtracting region: {region_config.display_name}")
     use_tile_coords = tile_based_config is not None
@@ -1667,6 +1926,16 @@ def extract_region(region_config: RegionConfig,
     )
     print(f"  Extracted {len(industries)} industries")
 
+    # Place trains from an optional world save (filtered to this region's prefix)
+    trains = []
+    if world_trains:
+        trains = extract_trains(world_trains, sections, region_config.route_prefix,
+                                rv_lengths=rv_lengths)
+        n_veh = sum(len(t.vehicles) for t in trains)
+        n_res = sum(1 for t in trains for v in t.vehicles if v.resolved)
+        print(f"  Placed {n_veh} rail vehicle(s) in {len(trains)} train(s) "
+              f"for route prefix {region_config.route_prefix} ({n_res} resolved)")
+
     # Calculate bounds
     bounds = calculate_bounds(sections, signals, ai_locations, industries)
 
@@ -1710,6 +1979,7 @@ def extract_region(region_config: RegionConfig,
         ai_locations=ai_locations,
         industries=industries,
         tiles=tiles,
+        trains=trains,
         bounds=bounds
     )
 

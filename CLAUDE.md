@@ -32,6 +32,77 @@ python output_generator.py <config.ini>
 
 > **Why manual alignment is the default:** the Run8 route is a *topological* model — section lengths are compressed/stretched and a few tiles carry genuine route-designer defects — so no automatic transform georeferences the whole network. The default viewer instead renders the internally-consistent (contiguous) tile grid on a real map and lets you slide it into place per area of interest. See `openrailways_goals.txt` for background.
 
+#### World saves: plotting trains & rail vehicles
+A Run8 world save (`.xml`, e.g. `small_world.xml`) can be plotted on the track:
+
+```bash
+python output_generator.py <config.ini> --world <world_save.xml>
+```
+
+`--world FILE` overrides an optional `[visualization] world_save = FILE` in the config
+(resolved relative to the config dir). Each train lives under
+`//trainList/TrainLoader/unitLoaderList/RailVehicleStateClass`; every vehicle reports two
+*trucks* (paired child order = A, B) with `currentTrackSectionIndex`, `startNodeIndex`,
+`distanceTravelledInMeters`, `currentRoutePrefix`, plus `unitNumber` / `destinationTag` /
+`unitType`. Parsing is in **`world_parser.py`** (tolerant: missing values → 0/false/0.0).
+
+**Placement** (`region_extractor.extract_trains` / `_SectionPlacer`): a truck is placed by
+walking `distanceTravelledInMeters` **metres** along that section's already-extracted
+`SectionData.paths` polyline (`currentTrackSectionIndex` == `section.index`), oriented by
+`startNodeIndex` (0 → from `polyline[0]`, else from the far end) and clamped to the section
+length. Because both the Run8 distance and the tile-world coords are in metres, no
+fraction/denominator is needed and vehicles land exactly on the drawn track in every
+coordinate mode. Each **car is drawn as a body polyline spanning its two trucks** (so it
+follows curves); a vehicle's ordering key is the yard-direction-most (minimum) truck
+distance — geometry only (the YARDS logical-yard-track `SEQ` layer in
+`world-import-rail-vehicle-ordering.md` is intentionally **not** reproduced, as it needs the
+`.ind` survey this tool does not consume). Vehicles are filtered to each region's
+`route_prefix` and emitted to the region JSON as `trains` (`train_to_dict` /
+`rail_vehicle_to_dict`).
+
+**True vehicle length** (optional): with `[visualization] railvehicle_db = db_railvehicles.db`
+(a SQLite DB — `loco_data` / `car_data` tables keyed by `R8_FILENAME`, columns `RV_LENGTH` and
+`COUPLER_OFFSET`, both feet), the body is grown from the truck-to-truck span toward the real
+vehicle length. `RV_LENGTH` is the *coupled footprint* (over pulling faces) — drawing it whole
+makes coupled cars **abut with no visible gap**, so we draw the car **body between the couplers**:
+`body = RV_LENGTH - 2 * COUPLER_OFFSET`, extended past each truck by
+`overhang = (body_m - truck_span) / 2` (kept centred on the trucks). The dropped couplers become
+the gap between adjacent cars. Loaded by **`rv_length_db.load_rv_lengths()`** (→
+`{rvXMLfilename.lower(): (length_m, coupler_offset_m)}`) and passed to
+`extract_trains(..., rv_lengths=...)`. Only meaningful in the metre-based (tile/align) coord mode;
+without the DB the body stays the truck-to-truck span.
+
+**Viewer:** a **Trains** overlay (each car a body polyline; length is the true car length when
+`railvehicle_db` is set, otherwise the truck-to-truck span) with per-vehicle popups (train id / unit / type / destination) and
+a 3-line monospace tooltip (`Train : <id>` / `RV num : <unit>` / `RV tag : <destination>`). Body colours are config-driven:
+`[colors] train` (cars) and `train_loco` (locomotives); all vehicles share one line weight.
+Each **train** (cars sharing a `train_id`) also gets a **thin connecting spine** through its cars, so a
+consist reads as one unit (`drawTrainOutline` in `generate_javascript`: cars are chained by
+nearest-neighbour so the spine follows the train even across sections / mis-ordered XML; the spine runs
+end tip -> each car centre -> other end tip; colour `[colors] train_outline`, default black).
+Line widths (in **screen pixels**, so zoom-invariant) come from an optional `[trains]` section —
+`car_width` (RV body, default 7) and `spine_width` (connecting line, default 1.5) — parsed to
+`VisualizationConfig.train_car_width` / `train_spine_width` and injected as `window.TRAIN_STYLE`
+(`{{car, spine}}`), read by `renderTrains` / `drawTrainOutline` (both viewers).
+A **Train / Rail
+Vehicle** search type matches **trainID**, **destinationTag**, or **unitNumber** (a hit
+enables the overlay and pans to the vehicle). Wired in the geographic base
+(`generate_javascript`: `renderTrains`, overlay entry, search) which the align viewer reuses,
+plus `transformData` in `ALIGN_JS`; the flat `--tile-based` viewer has a parallel copy.
+
+##### Live world-save watching (`serve.py --world`)
+```bash
+python serve.py <config.ini> --world <world_save.xml> [--no-authoring]
+```
+`serve.py` watches the world save's mtime and re-places vehicles when it changes,
+reconstructing section polylines from the already-generated region JSON (no track-DB
+reload). New endpoint `GET /api/trains` → `{version, trains:{regionId:[...]}}` (`version`
+is the file mtime; results are cached until it changes). The align viewer probes
+`/api/ping` (now also reports `world`) and, when a watched save is present, **polls
+`/api/trains` every 3 s** and re-renders the Trains layer, so editing/re-saving the world
+in Run8 moves the vehicles on the map with no reload. Static output (served without
+`serve.py`) still shows the trains baked into the region JSON, just without live refresh.
+
 **Output Structure:**
 ```
 output/<name>/
@@ -76,6 +147,9 @@ signal_absolute = #FF6B35
 signal_intermediate = #FFD700
 signal_border_single = #000000
 signal_border_stacked = #87CEEB
+train = #8B0000            # rail-vehicle (car) body from a world save
+train_loco = #B22222      # locomotive body
+train_outline = #000000   # thin spine joining a train's cars
 
 [output]
 output_dir = ./output/socal/

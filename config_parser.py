@@ -81,6 +81,9 @@ class ColorConfig:
     signal_border_stacked: str = "#87CEEB"  # Multiple head signal border (light blue)
     background: str = "#333333"         # Background color (tile-based mode)
     area_label: str = "#ffd11a"         # Legacy generic label color (kept for compatibility)
+    train: str = "#8B0000"              # Rail-vehicle body (cars) from a world save (dark red)
+    train_loco: str = "#B22222"         # Locomotive body (firebrick, to head-mark a consist)
+    train_outline: str = "#000000"      # Thin spine joining a train's cars
 
 
 @dataclass
@@ -149,6 +152,10 @@ class VisualizationConfig:
     colors: ColorConfig = field(default_factory=ColorConfig)
     tile_based: Optional[TileBasedConfig] = None
     initial_center: Optional[Tuple[float, float]] = None  # (lat, lon) for initial map center
+    world_save: Optional[Path] = None  # optional Run8 world save (.xml) to plot trains from
+    railvehicle_db: Optional[Path] = None  # optional SQLite DB of rail-vehicle lengths
+    train_car_width: float = 7.0    # [trains] car_width: RV body line width (px)
+    train_spine_width: float = 1.5  # [trains] spine_width: train connecting-line width (px)
     areas: List[AreaLabel] = field(default_factory=list)  # user-defined area/place labels
     color_presets: Dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_COLOR_PRESETS))  # name -> hex label-color palette
@@ -291,6 +298,15 @@ def parse_config(config_path: str) -> VisualizationConfig:
         if not region_dir_str:
             errors.append("[visualization] region_dir is required")
 
+        # Optional world_save: a Run8 world save (.xml) to plot trains from.
+        # A --world CLI switch overrides this; resolved relative to the config dir.
+        world_save_str = viz.get('world_save', '').strip()
+
+        # Optional railvehicle_db: SQLite DB (db_railvehicles.db) mapping
+        # rvXMLfilename -> RV_LENGTH, used to draw true vehicle length over the
+        # trucks. Resolved relative to the config dir.
+        railvehicle_db_str = viz.get('railvehicle_db', '').strip()
+
         # Optional initial_center (format: "lat,lon" e.g., "34.9,-118.0")
         initial_center_str = viz.get('initial_center', '').strip()
         initial_center = None
@@ -408,7 +424,23 @@ def parse_config(config_path: str) -> VisualizationConfig:
             signal_border_stacked=color_section.get('signal_border_stacked', colors.signal_border_stacked).strip(),
             background=color_section.get('background', colors.background).strip(),
             area_label=color_section.get('area_label', colors.area_label).strip(),
+            train=color_section.get('train', colors.train).strip(),
+            train_loco=color_section.get('train_loco', colors.train_loco).strip(),
+            train_outline=color_section.get('train_outline', colors.train_outline).strip(),
         )
+
+    # Parse [trains] section (optional): rail-vehicle rendering line widths (px).
+    train_car_width, train_spine_width = 7.0, 1.5
+    if 'trains' in parser:
+        ts = parser['trains']
+        try:
+            train_car_width = float(ts.get('car_width', train_car_width))
+        except ValueError:
+            errors.append("[trains] car_width must be a number")
+        try:
+            train_spine_width = float(ts.get('spine_width', train_spine_width))
+        except ValueError:
+            errors.append("[trains] spine_width must be a number")
 
     # Parse [label_types] section (optional): `id = Display Name, #color` per line,
     # in order. The id is the value stored in a label's `type =`; the display name
@@ -465,6 +497,10 @@ def parse_config(config_path: str) -> VisualizationConfig:
         colors=colors,
         tile_based=tile_based,
         initial_center=initial_center,
+        world_save=(config_file.parent / world_save_str) if world_save_str else None,
+        railvehicle_db=(config_file.parent / railvehicle_db_str) if railvehicle_db_str else None,
+        train_car_width=train_car_width,
+        train_spine_width=train_spine_width,
         areas=areas,
         color_presets=color_presets,
         label_types=label_types
