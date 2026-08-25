@@ -1,0 +1,37 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+
+# --- Generated map output (produced by output_generator.py) ---
+output/
+
+# --- Backups & temp (serve.py writes *.bak on label edits; atomic *.tmp) ---
+*.bak
+*.tmp
+*.json.tmp
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# --- Run8 data copies (game-data copies kept in the working dir) ---
+*.r8
+tile_corrections*.csv
+
+# --- World saves & rolling-stock DB (Run8 exports; all .xml here are saves) ---
+*.xml
+db_railvehicles.db
+
+# --- Session handoff notes ---
+session_handoff_*.md
