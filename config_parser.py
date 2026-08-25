@@ -154,8 +154,11 @@ class VisualizationConfig:
     initial_center: Optional[Tuple[float, float]] = None  # (lat, lon) for initial map center
     world_save: Optional[Path] = None  # optional Run8 world save (.xml) to plot trains from
     railvehicle_db: Optional[Path] = None  # optional SQLite DB of rail-vehicle lengths
-    train_car_width: float = 7.0    # [trains] car_width: RV body line width (px)
+    train_car_width: float = 7.0    # [trains] car_width: RV body min line width (px floor)
     train_spine_width: float = 1.5  # [trains] spine_width: train connecting-line width (px)
+    train_car_width_m: float = 3.5  # [trains] car_width_m: real RV width (m); RVs widen with
+                                    # zoom to this, never below car_width, so they stay wider
+                                    # than the track at every zoom. 0 = fixed px (car_width).
     areas: List[AreaLabel] = field(default_factory=list)  # user-defined area/place labels
     color_presets: Dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_COLOR_PRESETS))  # name -> hex label-color palette
@@ -429,18 +432,28 @@ def parse_config(config_path: str) -> VisualizationConfig:
             train_outline=color_section.get('train_outline', colors.train_outline).strip(),
         )
 
-    # Parse [trains] section (optional): rail-vehicle rendering line widths (px).
-    train_car_width, train_spine_width = 7.0, 1.5
+    # Parse [trains] section (optional): rail-vehicle rendering line widths.
+    # Strip inline ';'/'#' comments ourselves: the default ConfigParser keeps them
+    # in the value, which would break float().
+    def _cfg_float(section, key, default):
+        raw = section.get(key)
+        if raw is None:
+            return default
+        s = raw.split(';', 1)[0].split('#', 1)[0].strip()
+        if not s:
+            return default
+        try:
+            return float(s)
+        except ValueError:
+            errors.append(f"[trains] {key} must be a number (got {raw!r})")
+            return default
+
+    train_car_width, train_spine_width, train_car_width_m = 7.0, 1.5, 3.5
     if 'trains' in parser:
         ts = parser['trains']
-        try:
-            train_car_width = float(ts.get('car_width', train_car_width))
-        except ValueError:
-            errors.append("[trains] car_width must be a number")
-        try:
-            train_spine_width = float(ts.get('spine_width', train_spine_width))
-        except ValueError:
-            errors.append("[trains] spine_width must be a number")
+        train_car_width = _cfg_float(ts, 'car_width', train_car_width)
+        train_spine_width = _cfg_float(ts, 'spine_width', train_spine_width)
+        train_car_width_m = _cfg_float(ts, 'car_width_m', train_car_width_m)
 
     # Parse [label_types] section (optional): `id = Display Name, #color` per line,
     # in order. The id is the value stored in a label's `type =`; the display name
@@ -501,6 +514,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
         railvehicle_db=(config_file.parent / railvehicle_db_str) if railvehicle_db_str else None,
         train_car_width=train_car_width,
         train_spine_width=train_spine_width,
+        train_car_width_m=train_car_width_m,
         areas=areas,
         color_presets=color_presets,
         label_types=label_types

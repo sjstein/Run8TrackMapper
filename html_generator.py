@@ -48,8 +48,9 @@ def generate_javascript() -> str:
 
     // Use colors from window.COLORS (injected separately)
     const COLORS = window.COLORS;
-    // Rail-vehicle line widths (px) from [trains] config, with safe defaults.
-    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5};
+    // Rail-vehicle line widths from [trains] config, with safe defaults.
+    // car = min px floor; carM = real car width (m) the body widens to with zoom.
+    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5};
 
     // ========================================
     // MapApp - Main Application State
@@ -380,6 +381,11 @@ def generate_javascript() -> str:
             MapApp.currentLocalFilter = e.target.value || null;
             applyLocalSymbolHighlighting();
         });
+
+        // Re-weight rail-vehicle bodies so they stay wider than the track at any zoom.
+        MapApp.map.on('zoomend', updateTrainWidths);
+        // Show/hide per-RV destination labels by zoom (visible at ~20 m scale or tighter).
+        MapApp.map.on('zoomend', updateTrainLabelVisibility);
     }
 
     function createSearchDialog() {
@@ -609,7 +615,8 @@ def generate_javascript() -> str:
                 industries: L.layerGroup(),
                 aiLocations: L.layerGroup(),
                 tileBoundaries: L.layerGroup(),
-                trains: L.layerGroup()
+                trains: L.layerGroup(),
+                trainLabels: L.layerGroup()   // per-RV destination tags (shown only when zoomed in)
             };
 
             // Get region-specific track color (from manifest) or fall back to global default
@@ -856,7 +863,7 @@ def generate_javascript() -> str:
             }
 
             // Render trains / rail vehicles (from an optional world save)
-            renderTrains(regionId, data, layers.trains);
+            renderTrains(regionId, data, layers);
 
             // Store region data
             MapApp.loadedRegions.set(regionId, {data, layers, visible: true});
@@ -871,6 +878,7 @@ def generate_javascript() -> str:
             if (MapApp.overlayStates.aiLocations) layers.aiLocations.addTo(MapApp.map);
             if (MapApp.overlayStates.tileBoundaries) layers.tileBoundaries.addTo(MapApp.map);
             if (MapApp.overlayStates.trains) layers.trains.addTo(MapApp.map);
+            updateTrainLabelVisibility();
 
         } catch (error) {
             console.error(`Failed to load region ${regionId}:`, error);
@@ -884,34 +892,96 @@ def generate_javascript() -> str:
     // ---- Trains / rail vehicles (from an optional world save) ----
     // Body colours come from the config ([colors] train / train_loco).
 
+    // RV body line width in px: a real-world car width (carM, metres) converted at
+    // the current zoom, floored at TRAIN_STYLE.car and capped so it can't explode.
+    // Because it scales with zoom like the map/raster rail does, the RV stays wider
+    // than the track at every zoom (the fixed-px vector track is 5 px). carM = 0
+    // reverts to a plain fixed px width.
+    const TRAIN_CAR_WIDTH_MAX_PX = 64;
+    function rvBodyWeightPx() {
+        const floor = TRAIN_STYLE.car || 7;
+        const carM = TRAIN_STYLE.carM || 0;
+        if (!carM || !MapApp.map) return floor;
+        const lat = MapApp.map.getCenter().lat;
+        const mPerPx = 156543.03392 * Math.cos(lat * Math.PI / 180) / Math.pow(2, MapApp.map.getZoom());
+        return Math.max(floor, Math.min(TRAIN_CAR_WIDTH_MAX_PX, carM / mPerPx));
+    }
+    // Re-weight every rendered RV body for the current zoom (called on zoomend).
+    function updateTrainWidths() {
+        const w = rvBodyWeightPx();
+        MapApp.loadedRegions.forEach(region => {
+            if (region.layers && region.layers.trains)
+                region.layers.trains.eachLayer(l => {
+                    if (l._rvBody && l.setStyle) l.setStyle({ weight: w });
+                });
+        });
+    }
+
+    // Centered destination-tag label for one RV (shown only when zoomed in).
+    function trainDestLabelIcon(text) {
+        return L.divIcon({
+            className: 'rv-dest-label',
+            html: `<div style="transform:translate(-50%,-50%);color:#fff;`
+                + `font:bold 11px/1 system-ui,sans-serif;white-space:nowrap;`
+                + `text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000;">`
+                + `${text}</div>`,
+            iconSize: null, iconAnchor: [0, 0]
+        });
+    }
+
     // Draw each rail vehicle as a body polyline spanning its two trucks. Body
     // points are already [lat, lon] at render time (geographic mode stores them
     // that way; align mode converts them in transformData), so no coord swap.
-    function renderTrains(regionId, data, layerGroup) {
+    // `layers` carries .trains (bodies + spine) and .trainLabels (destination tags).
+    function renderTrains(regionId, data, layers) {
         // Idempotent per region: drop prior entries (e.g. a re-align rebuild).
         MapApp.trainIndex = MapApp.trainIndex.filter(it => it.regionId !== regionId);
         for (const train of (data.trains || [])) {
-            const carBodies = [];  // resolved bodies, for the spine + end brackets
+            const carBodies = [];  // resolved bodies, for the connecting spine
             for (const v of train.vehicles) {
                 if (!v.resolved || !v.body || v.body.length < 2) continue;
                 const isLoco = /DieselEngine|Electric|Steam|Engine/i.test(v.unit_type || '');
                 const line = L.polyline(v.body, {
                     color: isLoco ? COLORS.trainLoco : COLORS.train,
-                    weight: TRAIN_STYLE.car,
+                    weight: rvBodyWeightPx(),
                     opacity: 0.95,
                     lineCap: 'butt'
                 });
+                line._rvBody = true;   // marks it for zoom re-weighting
                 line.bindTooltip(trainVehicleTooltip(train, v), {sticky: true});
                 line.bindPopup(trainVehiclePopup(train, v), {maxWidth: 300});
-                line.addTo(layerGroup);
+                line.addTo(layers.trains);
                 MapApp.trainLayers.push(line);
                 MapApp.trainIndex.push({regionId, trainId: train.train_id, vehicle: v, layer: line});
                 carBodies.push(v.body);
+
+                // Destination tag centered on the car (zoom-gated visibility).
+                if (v.destination_tag) {
+                    L.marker(_midpoint(v.body), {
+                        icon: trainDestLabelIcon(v.destination_tag),
+                        interactive: false, keyboard: false
+                    }).addTo(layers.trainLabels);
+                }
             }
-            // A thin line joins all the cars in this train, with a square bracket
-            // capping the front and rear (so a consist reads as one unit).
-            drawTrainOutline(carBodies, layerGroup);
+            // A thin line joins all the cars in this train so a consist reads as one unit.
+            drawTrainOutline(carBodies, layers.trains);
         }
+    }
+
+    // meters per screen pixel at the current view (for zoom-gated RV labels).
+    function _metersPerPixel() {
+        return 156543.03392 * Math.cos(MapApp.map.getCenter().lat * Math.PI / 180)
+            / Math.pow(2, MapApp.map.getZoom());
+    }
+    // RV destination labels appear only when the scale bar reads ~20 m or tighter
+    // (a 100 px bar of <=20 m means < 0.5 m/px) and the Trains overlay is on.
+    function updateTrainLabelVisibility() {
+        const show = MapApp.overlayStates.trains && _metersPerPixel() < 0.5;
+        MapApp.loadedRegions.forEach(region => {
+            if (!region.visible || !region.layers || !region.layers.trainLabels) return;
+            if (show) region.layers.trainLabels.addTo(MapApp.map);
+            else MapApp.map.removeLayer(region.layers.trainLabels);
+        });
     }
 
     // ---- Train outline: a thin spine connecting all cars in a train ----
@@ -1045,6 +1115,7 @@ def generate_javascript() -> str:
         if (MapApp.overlayStates.trains) region.layers.trains.addTo(MapApp.map);
 
         region.visible = true;
+        updateTrainLabelVisibility();
     }
 
     function toggleRegion(regionId, enabled) {
@@ -1073,6 +1144,9 @@ def generate_javascript() -> str:
                 }
             }
         }
+
+        // Trains overlay also gates the zoom-based destination labels.
+        if (overlayId === 'trains') updateTrainLabelVisibility();
 
         // When toggling industries, recolor industry tracks and apply local filter highlighting
         if (overlayId === 'industries') {
@@ -1720,7 +1794,7 @@ window.COLORS = {{
     trainLoco: '{colors.train_loco}',
     trainOutline: '{colors.train_outline}'
 }};
-window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}}};
+window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}}};
 
 (function() {{
     'use strict';
@@ -3222,9 +3296,11 @@ ALIGN_JS = r'''
                 for (let i=0;i<(v.body||[]).length;i++){ const q=T(v.body[i][0], v.body[i][1]); v.body[i]=[q[0],q[1]]; }
             region.data.trains = fresh;
             region.layers.trains.clearLayers();
-            renderTrains(regionId, region.data, region.layers.trains);
+            region.layers.trainLabels.clearLayers();
+            renderTrains(regionId, region.data, region.layers);
             if (MapApp.overlayStates.trains) region.layers.trains.addTo(MapApp.map);
         }
+        updateTrainLabelVisibility();
     }
     function apiArea(method, id, body){
         const url = 'api/areas' + (id != null ? '/' + encodeURIComponent(id) : '');
@@ -3686,7 +3762,7 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
 </head><body>
 <div id="map"></div>
 {color_config}
-<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}}};</script>
+<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}}};</script>
 <script>window.__run8_authoring = {authoring_js}; window.__run8map = L.map('map', {{preferCanvas:true, maxZoom:22, zoomControl:true}}).setView([35,-117.8],9);</script>
 {js}
 </body></html>'''

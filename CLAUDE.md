@@ -80,10 +80,21 @@ Each **train** (cars sharing a `train_id`) also gets a **thin connecting spine**
 consist reads as one unit (`drawTrainOutline` in `generate_javascript`: cars are chained by
 nearest-neighbour so the spine follows the train even across sections / mis-ordered XML; the spine runs
 end tip -> each car centre -> other end tip; colour `[colors] train_outline`, default black).
-Line widths (in **screen pixels**, so zoom-invariant) come from an optional `[trains]` section —
-`car_width` (RV body, default 7) and `spine_width` (connecting line, default 1.5) — parsed to
-`VisualizationConfig.train_car_width` / `train_spine_width` and injected as `window.TRAIN_STYLE`
-(`{{car, spine}}`), read by `renderTrains` / `drawTrainOutline` (both viewers).
+Line widths come from an optional `[trains]` section, injected as `window.TRAIN_STYLE`
+(`{{car, spine, carM}}`) and read by `renderTrains` / `drawTrainOutline`:
+- `spine_width` (default 1.5) — connecting-line width in **px** (zoom-invariant).
+- `car_width` (default 7) — RV body **min** width in px (the floor at low zoom).
+- `car_width_m` (default 3.5) — real RV width in **metres**; the body widens with zoom to this
+  (`rvBodyWeightPx()` = `car_width_m / metres-per-pixel`, floored at `car_width`, capped 64 px,
+  re-applied on `zoomend` via `updateTrainWidths`). Because it scales with zoom like the map and
+  the raster rail do, the RV stays wider than the (fixed-5px vector, zoom-scaling raster) track at
+  every zoom. `car_width_m = 0` reverts to a plain fixed `car_width` px. Config-side floats strip
+  inline `;`/`#` comments (default ConfigParser keeps them, which would break `float()`).
+  Scaling is align/geographic only; the `--tile-based` viewer uses fixed `car_width`.
+At close zoom (scale bar ~20 m or tighter, i.e. `_metersPerPixel() < 0.5`, ~zoom 18+) each RV also
+shows its **destination tag centered on the car** (`trainDestLabelIcon` divIcons in a per-region
+`layers.trainLabels` group; `updateTrainLabelVisibility()` adds/removes the group on `zoomend` and
+when the Trains overlay toggles — labels only show when Trains is on and zoomed in).
 A **Train / Rail
 Vehicle** search type matches **trainID**, **destinationTag**, or **unitNumber** (a hit
 enables the overlay and pans to the vehicle). Wired in the geographic base
