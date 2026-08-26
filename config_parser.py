@@ -419,21 +419,28 @@ def parse_config(config_path: str) -> VisualizationConfig:
     colors = ColorConfig()
     if 'colors' in parser:
         color_section = parser['colors']
+
+        # Strip an inline ';' comment (the default ConfigParser keeps it in the
+        # value, which would bake a bad CSS colour). '#' is the hex prefix, so it
+        # is NOT a comment char here.
+        def _c(key, default):
+            return color_section.get(key, default).split(';', 1)[0].strip()
+
         colors = ColorConfig(
-            track=color_section.get('track', colors.track).strip(),
-            track_selected=color_section.get('track_selected', colors.track_selected).strip(),
-            track_hover=color_section.get('track_hover', colors.track_hover).strip(),
-            switch=color_section.get('switch', colors.switch).strip(),
-            industry_track=color_section.get('industry_track', colors.industry_track).strip(),
-            signal_absolute=color_section.get('signal_absolute', colors.signal_absolute).strip(),
-            signal_intermediate=color_section.get('signal_intermediate', colors.signal_intermediate).strip(),
-            signal_border_single=color_section.get('signal_border_single', colors.signal_border_single).strip(),
-            signal_border_stacked=color_section.get('signal_border_stacked', colors.signal_border_stacked).strip(),
-            background=color_section.get('background', colors.background).strip(),
-            area_label=color_section.get('area_label', colors.area_label).strip(),
-            train=color_section.get('train', colors.train).strip(),
-            train_loco=color_section.get('train_loco', colors.train_loco).strip(),
-            train_outline=color_section.get('train_outline', colors.train_outline).strip(),
+            track=_c('track', colors.track),
+            track_selected=_c('track_selected', colors.track_selected),
+            track_hover=_c('track_hover', colors.track_hover),
+            switch=_c('switch', colors.switch),
+            industry_track=_c('industry_track', colors.industry_track),
+            signal_absolute=_c('signal_absolute', colors.signal_absolute),
+            signal_intermediate=_c('signal_intermediate', colors.signal_intermediate),
+            signal_border_single=_c('signal_border_single', colors.signal_border_single),
+            signal_border_stacked=_c('signal_border_stacked', colors.signal_border_stacked),
+            background=_c('background', colors.background),
+            area_label=_c('area_label', colors.area_label),
+            train=_c('train', colors.train),
+            train_loco=_c('train_loco', colors.train_loco),
+            train_outline=_c('train_outline', colors.train_outline),
         )
 
     # Parse [trains] section (optional): rail-vehicle rendering line widths.
