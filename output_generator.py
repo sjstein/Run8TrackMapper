@@ -126,6 +126,7 @@ def rail_vehicle_to_dict(v: RailVehicleData) -> dict:
         "position_key": v.position_key,
         "resolved": v.resolved,
         "car_type": v.car_type,  # INDUSTRY_CONFIG_CAR_TYPE, for per-type body colour
+        "company": v.company,    # loco reporting mark (INITIAL), for per-railroad loco colour
     }
 
 
@@ -203,6 +204,7 @@ def generate_manifest(config: VisualizationConfig,
         "label_types": [{"id": t.id, "name": t.name, "color": t.color}
                         for t in getattr(config, "label_types", []) or []],
         "car_type_colors": dict(getattr(config, "car_type_colors", {}) or {}),
+        "loco_company_colors": dict(getattr(config, "loco_company_colors", {}) or {}),
     }
 
     # Add tile parameters if using tile-based coordinates

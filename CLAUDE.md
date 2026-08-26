@@ -85,14 +85,20 @@ without the DB the body stays the truck-to-truck span.
 **Viewer:** a **Trains** overlay (each car a body polyline; length is the true car length when
 `railvehicle_db` is set, otherwise the truck-to-truck span) with per-vehicle popups (train id / unit / type / destination) and
 a 4-line monospace tooltip (`Train : <id>` / `RV num : <unit>` / `RV tag : <destination>` /
-`RV typ : <car_type>`), and the popup shows the DB car type. Body colours are config-driven and by **car type**: a locomotive uses
-`[colors] train_loco`; every other car uses its colour from `[car_type_colors]` (keyed by the DB's
+`RV typ : <car_type>`), and the popup shows the DB car type. Body colours are config-driven. A
+**locomotive** is coloured by its **owning railroad** from `[loco_company_colors]` (keyed by the loco
+DB's `INITIAL` reporting mark, e.g. `BNSF`, `ATSF`, `SP`, `UP`, `CSXT`, `R8W`; keys case-insensitive),
+falling back to `[colors] train_loco` when a mark has no entry (or the loco isn't in the DB). Every
+other car is coloured by **car type** from `[car_type_colors]` (keyed by the DB's
 `INDUSTRY_CONFIG_CAR_TYPE`, e.g. `Tank_Car`, `Covered_Hopper`, `Box_Car`; keys case-insensitive), falling
-back to `[colors] train` when a type has no entry. The map is parsed to
-`VisualizationConfig.car_type_colors`, emitted as `manifest.car_type_colors`, and applied by `rvBodyColor`
-(`carTypeColor(v.car_type)`) in `renderTrains`. `car_type` per vehicle comes from `rv_length_db`
-(`RvInfo.car_type`; locos are `Locomotive`) via `extract_trains`, emitted on each RV in the region JSON.
-All vehicles share one line weight.
+back to `[colors] train` when a type has no entry. Both maps are parsed to
+`VisualizationConfig.car_type_colors` / `loco_company_colors`, emitted as `manifest.car_type_colors` /
+`manifest.loco_company_colors`, and applied by `rvBodyColor` in `renderTrains`
+(`isLoco ? locoCompanyColor(v.company) || trainLoco : carTypeColor(v.car_type) || train`). `car_type`
+and `company` per vehicle come from `rv_length_db` (`RvInfo.car_type` — locos are `Locomotive`;
+`RvInfo.company` — loco `INITIAL`, cars `""`) via `extract_trains`, emitted on each RV in the region JSON.
+Locomotives also render with **rounded end-caps** (a pill shape; `lineCap: isLoco ? 'round' : 'butt'`)
+so they read as the powered unit without relying on colour. All vehicles share one line weight.
 Each **train** (cars sharing a `train_id`) also gets a **thin connecting spine** through its cars, so a
 consist reads as one unit (`drawTrainOutline` in `generate_javascript`: cars are chained by
 nearest-neighbour so the spine follows the train even across sections / mis-ordered XML; the spine runs

@@ -167,6 +167,8 @@ class VisualizationConfig:
     label_types: List[LabelType] = field(default_factory=list)  # from [label_types], ordered
     car_type_colors: Dict[str, str] = field(
         default_factory=dict)  # INDUSTRY_CONFIG_CAR_TYPE (lowercased) -> hex, from [car_type_colors]
+    loco_company_colors: Dict[str, str] = field(
+        default_factory=dict)  # loco reporting mark / INITIAL (lowercased) -> hex, from [loco_company_colors]
 
     @property
     def industry_db(self) -> Path:
@@ -479,6 +481,18 @@ def parse_config(config_path: str) -> VisualizationConfig:
                     c = '#' + c
                 car_type_colors[ctype.strip().lower()] = c
 
+    # Parse [loco_company_colors] (optional): loco reporting mark (INITIAL) -> hex
+    # colour, for colouring locomotives by owning railroad. configparser lower-cases
+    # keys, so match reporting marks case-insensitively (viewer lowercases too).
+    loco_company_colors = {}
+    if 'loco_company_colors' in parser:
+        for mark, hexcolor in parser['loco_company_colors'].items():
+            c = hexcolor.split(';', 1)[0].strip()   # strip ';' inline comment ('#' is the hex prefix)
+            if c:
+                if not c.startswith('#'):
+                    c = '#' + c
+                loco_company_colors[mark.strip().lower()] = c
+
     # Parse [label_types] section (optional): `id = Display Name, #color` per line,
     # in order. The id is the value stored in a label's `type =`; the display name
     # shows in the filter/editor; the color is the category default (a label's own
@@ -541,6 +555,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
         train_car_width_m=train_car_width_m,
         train_label_scale_m=train_label_scale_m,
         car_type_colors=car_type_colors,
+        loco_company_colors=loco_company_colors,
         areas=areas,
         color_presets=color_presets,
         label_types=label_types

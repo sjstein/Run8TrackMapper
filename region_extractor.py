@@ -1559,6 +1559,7 @@ class RailVehicleData:
     position_key: float                  # ordering key (min truck dist-from-start)
     resolved: bool                       # at least one truck landed on a known section
     car_type: str = ""                   # INDUSTRY_CONFIG_CAR_TYPE from the DB (for colouring)
+    company: str = ""                    # loco reporting mark (INITIAL) from the DB (for loco colouring)
 
 
 @dataclass
@@ -1759,10 +1760,11 @@ def extract_trains(trains, placer: "_SectionPlacer",
             # so adjacent coupled cars keep a visible gap instead of abutting.
             length_m = None
             car_type = ""
+            company = ""
             if rv_lengths:
                 entry = rv_lengths.get((v.rv_filename or '').strip().lower())
                 if entry:
-                    full_len_m, coupler_m, car_type = entry
+                    full_len_m, coupler_m, car_type, company = entry
                     body_len_m = full_len_m - 2.0 * coupler_m
                     length_m = body_len_m if body_len_m > 0 else full_len_m
 
@@ -1803,6 +1805,7 @@ def extract_trains(trains, placer: "_SectionPlacer",
                 position_key=round(key, 3) if key != float("inf") else -1.0,
                 resolved=resolved,
                 car_type=car_type,
+                company=company,
             ))
 
         for prefix, vehicles in by_region.items():

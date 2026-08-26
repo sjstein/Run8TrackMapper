@@ -15,11 +15,15 @@ same value a world save stores as `rvXMLfilename`). We read three columns:
 * ``INDUSTRY_CONFIG_CAR_TYPE`` - a broad car category (Box_Car, Tank_Car,
                      Covered_Hopper, ...), used to colour the body by car type.
                      `loco_data` has no such column; its rows get ``Locomotive``.
+* ``INITIAL`` (loco only) - the owning railroad's reporting mark (BNSF, ATSF, SP,
+                     UP, CSXT, R8W, ...). Used to colour locomotives by railroad.
+                     `car_data` has no such column; its rows get ``""``.
 
 `load_rv_lengths()` returns a dict mapping the lower-cased filename to an
-:class:`RvInfo` (``length_m``, ``coupler_m``, ``car_type``), merging both tables
-(the `*_BACKUP_*` tables are ignored). The caller draws the body at
-``length_m - 2 * coupler_m`` and colours it by ``car_type``.
+:class:`RvInfo` (``length_m``, ``coupler_m``, ``car_type``, ``company``), merging
+both tables (the `*_BACKUP_*` tables are ignored). The caller draws the body at
+``length_m - 2 * coupler_m``, colours it by ``car_type``, and colours locomotives
+by ``company``.
 """
 
 import sqlite3
@@ -31,17 +35,18 @@ FEET_TO_METERS = 0.3048
 # Active tables (ignore the dated *_BACKUP_* copies).
 _LENGTH_TABLES = ("loco_data", "car_data")
 
-RvInfo = namedtuple("RvInfo", "length_m coupler_m car_type")
+RvInfo = namedtuple("RvInfo", "length_m coupler_m car_type company")
 
 
 def load_rv_lengths(db_path: str) -> Dict[str, RvInfo]:
-    """Load {r8_filename.lower(): RvInfo(length_m, coupler_m, car_type)} from the DB.
+    """Load {r8_filename.lower(): RvInfo(length_m, coupler_m, car_type, company)} from the DB.
 
     Rows with a missing filename or a non-positive length are skipped. A missing
     coupler offset becomes 0.0 (body drawn at the full coupled length). Loco rows
-    have car_type ``"Locomotive"``; a car row with a null category gets ``"None"``.
-    If a filename appears in more than one table the first (loco) value wins; in
-    practice the two tables are disjoint.
+    have car_type ``"Locomotive"`` and company = the ``INITIAL`` reporting mark;
+    car rows get car_type from ``INDUSTRY_CONFIG_CAR_TYPE`` (null -> ``"None"``)
+    and an empty company. If a filename appears in more than one table the first
+    (loco) value wins; in practice the two tables are disjoint.
     """
     out: Dict[str, RvInfo] = {}
     con = sqlite3.connect(db_path)
@@ -53,11 +58,12 @@ def load_rv_lengths(db_path: str) -> Dict[str, RvInfo]:
                 continue
             is_loco = (table == "loco_data")
             cols = "R8_FILENAME, RV_LENGTH, COUPLER_OFFSET"
-            if not is_loco:
-                cols += ", INDUSTRY_CONFIG_CAR_TYPE"
+            cols += ", INITIAL" if is_loco else ", INDUSTRY_CONFIG_CAR_TYPE"
             for row in con.execute(f'SELECT {cols} FROM "{table}"'):
                 filename, length_ft, coupler_ft = row[0], row[1], row[2]
+                # loco: row[3] = INITIAL (reporting mark); car: row[3] = car type.
                 car_type = "Locomotive" if is_loco else (row[3] or "None")
+                company = (str(row[3]).strip() if is_loco and row[3] else "")
                 if not filename or length_ft is None:
                     continue
                 try:
@@ -73,7 +79,7 @@ def load_rv_lengths(db_path: str) -> Dict[str, RvInfo]:
                 if coupler_m < 0:
                     coupler_m = 0.0
                 out.setdefault(str(filename).strip().lower(),
-                               RvInfo(length_m, coupler_m, str(car_type)))
+                               RvInfo(length_m, coupler_m, str(car_type), company))
     finally:
         con.close()
     return out
@@ -87,4 +93,5 @@ if __name__ == "__main__":
     for name in list(table)[:5]:
         info = table[name]
         print(f"  {name} -> length {info.length_m:.2f} m, coupler {info.coupler_m:.2f} m, "
-              f"body {info.length_m - 2*info.coupler_m:.2f} m, type {info.car_type}")
+              f"body {info.length_m - 2*info.coupler_m:.2f} m, type {info.car_type}, "
+              f"company {info.company!r}")

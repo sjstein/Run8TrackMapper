@@ -890,15 +890,21 @@ def generate_javascript() -> str:
     }
 
     // ---- Trains / rail vehicles (from an optional world save) ----
-    // Body colour: locomotives use [colors] train_loco; other cars use the
-    // per-type colour from the config's [car_type_colors] (keyed by the DB's
-    // INDUSTRY_CONFIG_CAR_TYPE), falling back to [colors] train.
+    // Body colour: locomotives are coloured by owning railroad from the config's
+    // [loco_company_colors] (keyed by the DB's INITIAL reporting mark), falling
+    // back to [colors] train_loco; other cars use the per-type colour from
+    // [car_type_colors] (keyed by INDUSTRY_CONFIG_CAR_TYPE), falling back to
+    // [colors] train.
     function carTypeColor(t) {
         const m = (MapApp.manifest && MapApp.manifest.car_type_colors) || {};
         return t ? m[String(t).toLowerCase()] : null;
     }
+    function locoCompanyColor(c) {
+        const m = (MapApp.manifest && MapApp.manifest.loco_company_colors) || {};
+        return c ? m[String(c).toLowerCase()] : null;
+    }
     function rvBodyColor(v, isLoco) {
-        if (isLoco) return COLORS.trainLoco;
+        if (isLoco) return locoCompanyColor(v.company) || COLORS.trainLoco;
         return carTypeColor(v.car_type) || COLORS.train;
     }
 
@@ -955,7 +961,9 @@ def generate_javascript() -> str:
                     color: rvBodyColor(v, isLoco),
                     weight: rvBodyWeightPx(),
                     opacity: 0.95,
-                    lineCap: 'butt'
+                    // Locos get rounded end-caps (a pill shape) so they read as
+                    // the powered unit without relying on colour; cars stay blunt.
+                    lineCap: isLoco ? 'round' : 'butt'
                 });
                 line._rvBody = true;   // marks it for zoom re-weighting
                 line.bindTooltip(trainVehicleTooltip(train, v), {sticky: true});
@@ -2163,13 +2171,17 @@ window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine
                 const coords = v.body.map(p => [p[1], p[0]]);
                 const isLoco = /DieselEngine|Electric|Steam|Engine/i.test(v.unit_type || '');
                 const _ctc = (MapApp.manifest && MapApp.manifest.car_type_colors) || {{}};
-                const _bodyColor = isLoco ? COLORS.trainLoco
+                const _lcc = (MapApp.manifest && MapApp.manifest.loco_company_colors) || {{}};
+                const _bodyColor = isLoco
+                    ? (_lcc[String(v.company || '').toLowerCase()] || COLORS.trainLoco)
                     : (_ctc[String(v.car_type || '').toLowerCase()] || COLORS.train);
                 const line = L.polyline(coords, {{
                     color: _bodyColor,
                     weight: TRAIN_STYLE.car,
                     opacity: 0.95,
-                    lineCap: 'butt'
+                    // Locos get rounded end-caps (a pill shape) so they read as
+                    // the powered unit without relying on colour; cars stay blunt.
+                    lineCap: isLoco ? 'round' : 'butt'
                 }});
                 const tip = `<div style="font-family:monospace;white-space:pre;margin:0">`
                     + `Train  : ${{train.train_id}}<br>`
@@ -3792,7 +3804,7 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
 <html><head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>{config.name} - manual alignment</title>
+<title>{config.name}</title>
 <link rel="icon" href="data:,"/>
 <link rel="stylesheet" href="leaflet/leaflet.css"/>
 <script src="leaflet/leaflet.js"></script>
