@@ -847,6 +847,53 @@ def compute_switch_leg_fixes(db: TrackDatabase) -> Tuple[Dict, Dict]:
     return leg_recon, point_fix
 
 
+def _dedup_section_paths(paths, tol: float = 3.0):
+    """Drop redundant paths that span the *same* endpoint pair (forward or
+    reversed), keeping the most detailed (most points) representative per distinct
+    span. Genuinely distinct legs - e.g. switch legs, whose endpoints differ - are
+    all kept.
+
+    Curved sections in the track DB often store the same physical track three
+    times (a coarse forward path, its coarse mirror, and a detailed interpolated
+    path). Concatenating all of them produces an out-and-back / zigzag polyline of
+    2-3x the real length (and a *degenerate*, start==end polyline when the two
+    coarse halves are exact mirrors). Keeping one representative per span fixes
+    both the inflated length and the rendered shape.
+    """
+    kept = []   # representative paths, in first-appearance order
+    for path in paths:
+        if len(path) < 2:
+            continue
+        a0, a1 = path[0], path[-1]
+        for gi, rep in enumerate(kept):
+            b0, b1 = rep[0], rep[-1]
+            same = ((math.hypot(a0[0]-b0[0], a0[1]-b0[1]) < tol and
+                     math.hypot(a1[0]-b1[0], a1[1]-b1[1]) < tol) or
+                    (math.hypot(a0[0]-b1[0], a0[1]-b1[1]) < tol and
+                     math.hypot(a1[0]-b0[0], a1[1]-b0[1]) < tol))
+            if same:
+                if len(path) > len(rep):   # keep the more detailed representative
+                    kept[gi] = path
+                break
+        else:
+            kept.append(path)
+    return kept
+
+
+def _path_length_metric(path, use_tile_coords: bool) -> float:
+    """Arc length of one path in metres (tile-world euclidean, or lat/lon metres)."""
+    total = 0.0
+    for a, b in zip(path, path[1:]):
+        if use_tile_coords:
+            total += math.hypot(b[0] - a[0], b[1] - a[1])
+        else:
+            clat = (a[0] + b[0]) / 2
+            dlat = (b[0] - a[0]) * METERS_PER_DEGREE_LAT
+            dlon = (b[1] - a[1]) * METERS_PER_DEGREE_LAT * math.cos(math.radians(clat))
+            total += math.hypot(dlat, dlon)
+    return total
+
+
 def extract_sections(db: TrackDatabase,
                      tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]] = None,
                      tile_based_config: Optional[TileBasedConfig] = None) -> List[SectionData]:
@@ -1123,6 +1170,12 @@ def extract_sections(db: TrackDatabase,
                     # Only add if segment length is meaningful (> ~1 meter in degrees)
                     if seg_length > 0.00001:
                         all_paths.append(path_points)
+
+        # Drop redundant duplicate/mirror paths (same span stored 2-3x) that would
+        # otherwise concatenate into an inflated out-and-back polyline; recompute
+        # the section length from what remains. Distinct legs (switches) are kept.
+        all_paths = _dedup_section_paths(all_paths)
+        total_length_m = sum(_path_length_metric(p, use_tile_coords) for p in all_paths)
 
         # Close joints: snap any endpoint that lands on a rebuilt switch far point.
         if point_fix_world:
@@ -1724,8 +1777,278 @@ def _extend_segment(pa: Tuple[float, float], pb: Tuple[float, float],
             (pb[0] + ux * oh, pb[1] + uy * oh)]
 
 
+# --- Within-consist rigid layout (de-overlap) -------------------------------
+# A coupled consist is physically a rigid string of cars, end to end. The sim's
+# per-truck metres are noisy (compressed topological track) and, on a broken
+# section, outright garbage. So rather than draw each car between its own two
+# trucks, we lay the whole consist end to end along its section chain: cars in
+# world-save (front->back) order, each at its real DB body length, zero gap,
+# anchored at the consist midpoint. See rv_cross_section_ordering_plan.md.
+
+_CHAIN_DEGENERATE_TOL = 1.0   # m: a section whose two endpoints are this close is degenerate
+
+
+def _seg_len(a: Tuple[float, float], b: Tuple[float, float]) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def _consist_section_order(group) -> List[Tuple[int, int]]:
+    """Distinct section keys a consist occupies, in front->back order.
+
+    ``group`` items are ``(vehicle, ta, tb, length_m, car_type, company)`` in
+    world-save order, where ``ta``/``tb`` are ``placer.truck()`` results
+    ``(point, dist, key)`` or ``None``. Sections are ordered by first appearance
+    scanning cars front->back (truck A before truck B).
+    """
+    order, seen = [], set()
+    for item in group:
+        for t in (item[1], item[2]):
+            if t is not None and t[2] not in seen:
+                seen.add(t[2])
+                order.append(t[2])
+    return order
+
+
+def _is_degenerate_section(placer, key) -> bool:
+    g = placer._geometry(key)
+    if g is None:
+        return True
+    poly = g[0]
+    return _seg_len(poly[0], poly[-1]) < _CHAIN_DEGENERATE_TOL
+
+
+def _build_consist_polyline(placer, ordered_keys):
+    """Concatenate a consist's sections into one continuous polyline ``P``.
+
+    Sections are oriented greedily (each section's near endpoint joins the
+    running end) and degenerate / missing sections are bridged with a straight
+    line so ``P`` stays continuous and monotonic front->back. Returns
+    ``(P, P_cum, place)`` where ``place[key] = (off, total, flip)`` locates each
+    section in ``P``: a truck at arc length ``d`` from that section's own
+    ``polyline[0]`` sits at ``P`` arc length ``off + (total - d if flip else d)``.
+    Returns ``None`` if no usable (non-degenerate) section is present.
+    """
+    geoms = []
+    for key in ordered_keys:
+        g = placer._geometry(key)
+        if g is None:
+            geoms.append((key, None, 0.0, True))
+            continue
+        poly, _cum, total = g
+        degen = _seg_len(poly[0], poly[-1]) < _CHAIN_DEGENERATE_TOL
+        geoms.append((key, poly, total, degen))
+
+    usable = [i for i, gg in enumerate(geoms) if gg[1] is not None and not gg[3]]
+    if not usable:
+        return None
+
+    P: List[Tuple[float, float]] = []
+    P_cum: List[float] = [0.0]
+
+    def push(pt):
+        if P and _seg_len(P[-1], pt) < 1e-9:
+            return
+        if P:
+            P_cum.append(P_cum[-1] + _seg_len(P[-1], pt))
+        P.append(pt)
+
+    # First usable section: orient it so its far end points toward the next one.
+    first = usable[0]
+    flip_first = False
+    if len(usable) >= 2:
+        s0, e0 = geoms[first][1][0], geoms[first][1][-1]
+        p1 = geoms[usable[1]][1]
+        s1, e1 = p1[0], p1[-1]
+        d_end = min(_seg_len(e0, s1), _seg_len(e0, e1))
+        d_start = min(_seg_len(s0, s1), _seg_len(s0, e1))
+        flip_first = d_start < d_end
+
+    place: Dict[Tuple[int, int], Tuple[float, float, bool]] = {}
+    for gi, (key, poly, total, degen) in enumerate(geoms):
+        if poly is None or degen:
+            # Degenerate / missing: no vertices to push; record a placement at the
+            # current running end (used only for reliability, never for drawing).
+            place[key] = (P_cum[-1], total, False)
+            continue
+        if gi == first:
+            flip = flip_first
+        else:
+            cur = P[-1] if P else poly[0]
+            flip = _seg_len(poly[-1], cur) < _seg_len(poly[0], cur)
+        oriented = list(reversed(poly)) if flip else poly
+        push(oriented[0])       # bridge to this section's start (straight if a gap)
+        off = P_cum[-1]
+        for pt in oriented[1:]:
+            push(pt)
+        place[key] = (off, total, flip)
+
+    if len(P) < 2:
+        return None
+    return P, P_cum, place
+
+
+_CHAIN_ADJ_TOL = 8.0   # m: two sections whose nearest endpoints are within this are adjacent
+
+
+def _min_endpoint_gap(poly_a, poly_b) -> float:
+    a0, a1, b0, b1 = poly_a[0], poly_a[-1], poly_b[0], poly_b[-1]
+    return min(_seg_len(a0, b0), _seg_len(a0, b1), _seg_len(a1, b0), _seg_len(a1, b1))
+
+
+def _split_runs(placer, order):
+    """Split a consist's ordered section keys into contiguous runs of usable,
+    endpoint-adjacent sections. A degenerate / missing section, or a non-adjacent
+    join, ends the current run (and a degenerate/missing section joins no run)."""
+    runs, cur = [], []
+    for key in order:
+        g = placer._geometry(key)
+        if g is None or _seg_len(g[0][0], g[0][-1]) < _CHAIN_DEGENERATE_TOL:
+            if cur:
+                runs.append(cur)
+                cur = []
+            continue
+        if cur and _min_endpoint_gap(placer._geometry(cur[-1])[0], g[0]) > _CHAIN_ADJ_TOL:
+            runs.append(cur)
+            cur = []
+        cur.append(key)
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def _layout_consist(group, placer):
+    """Lay a consist's cars end to end along its section chain.
+
+    ``group`` is ``[(vehicle, ta, tb, body_len_m, full_len_m, coupler_m, car_type,
+    company), ...]`` in world-save (front->back) order. Cars are laid out by their
+    full coupled footprint (``full_len_m``, so they abut like a real coupled train
+    and the laid length matches the true track span), and each body is drawn inset
+    by ``coupler_m`` at each end so the couplers become the visible inter-car gap.
+    Returns ``[body | None, ...]`` aligned to
+    ``group`` (each body a polyline following the real track; ``None`` for a car
+    the caller should place with the per-truck fallback), or ``None`` to fall back
+    entirely.
+
+    The consist is split into contiguous **runs** of usable, endpoint-adjacent
+    sections (a degenerate / missing / non-adjacent section ends a run). Each run's
+    slice of the consist is laid out end to end on that run's own polyline, anchored
+    at the median of its cars' true positions. Segmenting keeps a single corrupt
+    section (e.g. the degenerate 2283) from stretching the whole train: drift is
+    bounded to each run's small gap-compression instead of accumulating across the
+    bad joint. Cars on the bad section (in no run) fall back per-truck.
+    """
+    order = _consist_section_order(group)
+    runs = _split_runs(placer, order)
+    if not runs:
+        return None
+    sec_run = {k: ri for ri, run in enumerate(runs) for k in run}
+
+    def car_run(ta, tb):
+        if ta is not None and ta[2] in sec_run:
+            return sec_run[ta[2]]
+        if tb is not None and tb[2] in sec_run:
+            return sec_run[tb[2]]
+        return None
+
+    def car_slot(ta, tb, full_len_m, body_len_m):
+        # Layout slot = the coupled footprint (cars abut like a real coupled train,
+        # so the laid length matches the true span). Fall back to the body length,
+        # then the truck span, then a sane default.
+        if full_len_m and full_len_m > 0:
+            return full_len_m
+        if body_len_m and body_len_m > 0:
+            return body_len_m
+        span = _seg_len(ta[0], tb[0]) if (ta and tb) else 0.0
+        return span if 0 < span < 30 else 15.0
+
+    out = [None] * len(group)
+    for ri, run in enumerate(runs):
+        built = _build_consist_polyline(placer, run)
+        if built is None:
+            continue
+        P, P_cum, place = built
+        Ptot = P_cum[-1]
+
+        def truck_P(t):
+            if t is None or t[2] not in place:
+                return None
+            off, total, flip = place[t[2]]
+            return off + (total - t[1] if flip else t[1])
+
+        idxs = [i for i in range(len(group)) if car_run(group[i][1], group[i][2]) == ri]
+        if not idxs:
+            continue
+
+        # Per-car footprint slot + coupler inset + true along-run centre.
+        lengths, couplers, centres = {}, {}, {}
+        for i in idxs:
+            v, ta, tb, body_len_m, full_len_m, coupler_m, ct, co = group[i]
+            lengths[i] = car_slot(ta, tb, full_len_m, body_len_m)
+            couplers[i] = coupler_m if (coupler_m and coupler_m > 0) else 0.0
+            pts = [p for p in (truck_P(ta), truck_P(tb)) if p is not None]
+            centres[i] = (sum(pts) / len(pts)) if pts else None
+
+        # Orient the run's laid coordinate to match consist order (P may have been
+        # built either way): if reliable centres decrease along the consist, flip.
+        rel = [(i, centres[i]) for i in idxs if centres[i] is not None]
+        flip_run = len(rel) >= 2 and rel[0][1] > rel[-1][1]
+
+        # Lay cars end to end (zero gap) in consist order; local centre per car.
+        local_centre, run_len = {}, 0.0
+        for i in idxs:
+            local_centre[i] = run_len + lengths[i] / 2.0
+            run_len += lengths[i]
+
+        deltas = sorted((Ptot - centres[i] if flip_run else centres[i]) - local_centre[i]
+                        for i in idxs if centres[i] is not None)
+        if not deltas:
+            continue
+        m = len(deltas)
+        offset = deltas[m // 2] if m % 2 else (deltas[m // 2 - 1] + deltas[m // 2]) / 2.0
+
+        pos = 0.0
+        for i in idxs:
+            # Slots abut; draw the body inset by one coupler at each end so the
+            # dropped couplers become the visible gap between adjacent cars.
+            inset = couplers[i] if (2 * couplers[i] < lengths[i]) else 0.0
+            lo, hi = offset + pos + inset, offset + pos + lengths[i] - inset
+            pos += lengths[i]
+            if flip_run:
+                lo, hi = Ptot - hi, Ptot - lo
+            body = _subpolyline(P, P_cum, lo, hi)
+            if len(body) >= 2:
+                out[i] = body
+    return out
+
+
+def _fallback_body(placer, ta, tb, length_m):
+    """Per-car body (the pre-de-overlap behaviour): follow the section between the
+    two trucks when they share one section, else a straight chord. Returns
+    ``(body, key)`` where ``key`` is the ordering key (min truck distance)."""
+    if ta and tb and ta[2] == tb[2]:
+        lo, hi = (ta[1], tb[1]) if ta[1] <= tb[1] else (tb[1], ta[1])
+        if length_m:
+            overhang = max(0.0, (length_m - (hi - lo)) / 2.0)
+            lo -= overhang
+            hi += overhang
+        body = placer.body(ta[2], lo, hi)
+        key = min(ta[1], tb[1])
+    elif ta and tb:
+        body = _extend_segment(ta[0], tb[0], length_m)
+        key = min(ta[1], tb[1])
+    elif ta or tb:
+        t = ta or tb
+        body = [t[0], t[0]]
+        key = t[1]
+    else:
+        body = []
+        key = float("inf")
+    return body, key
+
+
 def extract_trains(trains, placer: "_SectionPlacer",
-                   rv_lengths: Optional[Dict[str, str]] = None) -> Dict[int, List[TrainData]]:
+                   rv_lengths: Optional[Dict[str, str]] = None,
+                   deoverlap: bool = True) -> Dict[int, List[TrainData]]:
     """Place a parsed world save's trains against a multi-region section placer.
 
     Each truck is located by its own ``(route_prefix, section_index)`` (see
@@ -1741,6 +2064,10 @@ def extract_trains(trains, placer: "_SectionPlacer",
             car_type)} from rv_length_db.load_rv_lengths(). When given, each car
             body is drawn at its real *body* length - the coupled footprint minus
             one coupler per end - so adjacent coupled cars keep a visible gap.
+        deoverlap: when True (default), each consist's cars are laid end to end
+            along its section chain (front->back order, DB length, midpoint anchor)
+            so coupled cars can't overlap. When False, each car is drawn between
+            its own two trucks (the raw per-truck placement).
 
     Returns:
         ``{route_prefix: [TrainData]}`` - cars grouped by their assigned region.
@@ -1748,65 +2075,58 @@ def extract_trains(trains, placer: "_SectionPlacer",
     out: Dict[int, List[TrainData]] = {}
 
     for train in trains:
-        by_region: Dict[int, List[RailVehicleData]] = {}
+        # Resolve every car's trucks + DB length/type/company once, in world-save
+        # (front->back) order. Body length = coupled footprint minus a coupler at
+        # each end, so adjacent coupled cars keep a visible gap instead of abutting.
+        metas = []   # (v, ta, tb, body_len_m, full_len_m, coupler_m, car_type, company)
         for v in train.vehicles:
-            region_prefix = v.route_prefix   # truck-A prefix = region assignment
-
-            ta = placer.truck(v.truck_a)
-            tb = placer.truck(v.truck_b)
-            resolved = ta is not None or tb is not None
-
-            # Drawn body length = coupled footprint minus a coupler at each end,
-            # so adjacent coupled cars keep a visible gap instead of abutting.
-            length_m = None
-            car_type = ""
-            company = ""
+            body_len_m, full_len_m, coupler_m, car_type, company = None, None, 0.0, "", ""
             if rv_lengths:
                 entry = rv_lengths.get((v.rv_filename or '').strip().lower())
                 if entry:
                     full_len_m, coupler_m, car_type, company = entry
-                    body_len_m = full_len_m - 2.0 * coupler_m
-                    length_m = body_len_m if body_len_m > 0 else full_len_m
+                    b = full_len_m - 2.0 * coupler_m
+                    body_len_m = b if b > 0 else full_len_m
+            metas.append((v, placer.truck(v.truck_a), placer.truck(v.truck_b),
+                          body_len_m, full_len_m, coupler_m, car_type, company))
 
-            if ta and tb and ta[2] == tb[2]:
-                # Both trucks on the same physical section -> body follows the track.
-                lo, hi = (ta[1], tb[1]) if ta[1] <= tb[1] else (tb[1], ta[1])
-                if length_m:
-                    # Grow past each truck by the overhang to the true car length.
-                    overhang = max(0.0, (length_m - (hi - lo)) / 2.0)
-                    lo -= overhang
-                    hi += overhang
-                body = placer.body(ta[2], lo, hi)  # clamps to the section ends
-                key = min(ta[1], tb[1])
-            elif ta and tb:
-                # Trucks on different sections (incl. across a region boundary) ->
-                # straight body between the two real truck points, grown to length.
-                body = _extend_segment(ta[0], tb[0], length_m)
-                key = min(ta[1], tb[1])
-            elif ta or tb:
-                # Only one truck resolved -> zero-length body at that point.
-                t = ta or tb
-                body = [t[0], t[0]]
-                key = t[1]
-            else:
-                body = []
-                key = float("inf")
+        # Group by assigned region (truck-A prefix), preserving consist order. Each
+        # region's slice of the consist is laid out independently (a cross-region
+        # train is split per region, as before; car bodies still span the seam).
+        region_groups: Dict[int, List[Tuple]] = {}
+        for meta in metas:
+            region_groups.setdefault(meta[0].route_prefix, []).append(meta)
 
-            if len(body) < 2:
-                body = body * 2 if body else []
+        by_region: Dict[int, List[RailVehicleData]] = {}
+        for region_prefix, group in region_groups.items():
+            laid = _layout_consist(group, placer) if deoverlap else None
+            for i, (v, ta, tb, body_len_m, full_len_m, coupler_m, car_type, company) in enumerate(group):
+                resolved = ta is not None or tb is not None
+                if laid is not None and laid[i] is not None:
+                    body = laid[i]
+                    key = min([d for d in ((ta[1] if ta else None),
+                                           (tb[1] if tb else None)) if d is not None],
+                              default=float("inf"))
+                else:
+                    body, key = _fallback_body(placer, ta, tb, body_len_m)
 
-            by_region.setdefault(region_prefix, []).append(RailVehicleData(
-                train_id=train.train_id,
-                unit_number=v.unit_number,
-                destination_tag=v.destination_tag,
-                unit_type=v.unit_type,
-                rv_filename=v.rv_filename,
-                body=[(round(p[0], 6), round(p[1], 6)) for p in body],
-                position_key=round(key, 3) if key != float("inf") else -1.0,
-                resolved=resolved,
-                car_type=car_type,
-                company=company,
-            ))
+                if len(body) < 2:
+                    body = body * 2 if body else []
+                    if len(body) < 2:
+                        resolved = False
+
+                by_region.setdefault(region_prefix, []).append(RailVehicleData(
+                    train_id=train.train_id,
+                    unit_number=v.unit_number,
+                    destination_tag=v.destination_tag,
+                    unit_type=v.unit_type,
+                    rv_filename=v.rv_filename,
+                    body=[(round(p[0], 6), round(p[1], 6)) for p in body],
+                    position_key=round(key, 3) if key != float("inf") else -1.0,
+                    resolved=resolved,
+                    car_type=car_type,
+                    company=company,
+                ))
 
         for prefix, vehicles in by_region.items():
             if vehicles:

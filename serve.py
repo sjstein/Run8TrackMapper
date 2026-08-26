@@ -63,6 +63,8 @@ class AuthoringState:
         self._sections_cache = {}   # regionId -> [SectionData] (rebuilt from region JSON)
         self._trains_cache = {'mtime': None, 'payload': {'version': 0, 'trains': {}}}
 
+        self.train_deoverlap = getattr(config, 'train_deoverlap', True) if config else True
+
         # Optional rail-vehicle length DB (true car length drawn over the trucks).
         self.rv_lengths = None
         rv_db = getattr(config, 'railvehicle_db', None) if config else None
@@ -117,7 +119,8 @@ class AuthoringState:
                 region_sections.append((prefix, self._region_sections(region_id)))
                 prefix_to_region[prefix] = region_id
         placer = build_section_placer(region_sections)
-        by_prefix = extract_trains(parsed, placer, rv_lengths=self.rv_lengths)
+        by_prefix = extract_trains(parsed, placer, rv_lengths=self.rv_lengths,
+                                   deoverlap=self.train_deoverlap)
 
         trains_by_region = {}
         for prefix, trains in by_prefix.items():

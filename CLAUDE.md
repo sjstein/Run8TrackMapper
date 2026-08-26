@@ -56,6 +56,31 @@ yard-direction-most (minimum) truck distance — geometry only (the YARDS logica
 `SEQ` layer in `world-import-rail-vehicle-ordering.md` is intentionally **not** reproduced, as
 it needs the `.ind` survey this tool does not consume).
 
+**Within-consist de-overlap** (`[trains] deoverlap`, default **on**; `extract_trains(...,
+deoverlap=True)`). Raw per-truck placement draws cars that overlap or streak when a truck lands
+on a broken section or the two trucks straddle a curve. Because a coupled consist is a *rigid*
+string, `_layout_consist` instead lays each consist's cars **end to end along its section
+chain**: cars in world-save (front→back) order — trusted as the physical coupling order — each
+at its **full coupled footprint** (`RV_LENGTH`) so footprints abut like a real train and the laid
+length matches the true track span (near-zero drift), with each body drawn **inset by one coupler
+per end** so the couplers reappear as the visible inter-car gap. The consist's occupied sections
+are chained into one continuous polyline via endpoint adjacency (`_build_consist_polyline`), split
+into contiguous **runs** at any degenerate/missing/non-adjacent joint (`_split_runs`) so a single
+bad section can't stretch the whole train; each run is anchored at the **median** of its cars'
+true positions (midpoint anchor). Cars on an unusable section fall back to per-truck placement
+(`_fallback_body`). This still trusts XML order *within* one consist only — no cross-cut / logical
+yard-track ordering (that needs the `.ind` survey; see `rv_cross_section_ordering_plan.md`).
+
+> **Depends on honest section geometry.** Curved sections in the track DB store the same span
+> multiple times (coarse forward + coarse mirror + detailed); `extract_sections` now
+> **de-duplicates** these (`_dedup_section_paths`: keep the most-detailed path per distinct
+> endpoint-pair; genuinely distinct legs / switches have different endpoints and are kept) and
+> recomputes `length_m` from what remains. Without this, ~10% of sections concatenated into
+> inflated out-and-back polylines (up to ~5× length; a *degenerate* start==end polyline when the
+> mirror halves cancel), which both mis-drew the track and injected a spurious ~1.3–1.5× "stretch"
+> that made the rigid layout drift. This fix is what lets the footprint-abutting layout stay on
+> the true track.
+
 **Cross-region cars.** Run8 section indices are **per-region and collide** (Barstow's 446 ≠
 Needles' 446), and `currentTrackSectionIndex` is paired with `currentRoutePrefix`. So the placer
 is keyed by **`(route_prefix, section_index)`** and each truck is resolved by its *own*

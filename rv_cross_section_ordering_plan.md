@@ -238,6 +238,40 @@ Still TBD before/while building: exact coupler-gap value, how to build the chain
 the consist branches through a switch (the `2283→2280` jump crosses branches), and whether
 to gate this behind a config flag (default on? `[trains] deoverlap`).
 
+## IMPLEMENTED (2026-08-26) — geometry fix + footprint-abutting layout
+
+Built and verified on `_test_world.xml` (Bakersfield, prefix 250). The result is far
+better than the original plan expected, because the "stretch" turned out to be mostly a
+geometry-extraction bug rather than genuine Run8 compression.
+
+**Root cause found: redundant duplicate/mirror paths.** ~10% of sections (446/4308 in
+Bakersfield — every curved/switch-throat section) stored the same physical span 2–3× (coarse
+forward + coarse mirror + detailed). `_concat_section_polyline` stitched them all into an
+out-and-back / zigzag polyline of up to ~5× the true length — and a **degenerate** (start==end)
+polyline when the mirror halves cancelled (that was section 2283, the original "overlap" villain).
+This both mis-drew the track *and* injected a spurious ~1.3–1.5× stretch into placement.
+
+**Fix 1 — `_dedup_section_paths` (in `extract_sections`).** Keep the most-detailed path per
+distinct endpoint-pair; genuinely distinct legs (switches — different endpoints) are preserved
+(verified: 0 sections had distinct-endpoint legs, so nothing legitimate was dropped). `length_m`
+is recomputed from the deduped paths. Region-wide inflated-section count 446 → 0; 2283/2287 heal
+to clean 37.7 m single paths. This fixes the track map too, not just trains.
+
+**Fix 2 — footprint-abutting rigid layout (`_layout_consist`).** Lay cars end-to-end by their
+**full coupled footprint** (`RV_LENGTH`, cars abut like a real coupled train) so the laid length
+matches the true track span; draw each body **inset by one coupler per end** so the couplers are
+the visible ~2.5 m inter-car gap. Front→back = XML order (trusted within a consist). Sections
+chained by endpoint adjacency; split into runs at bad joints; each run anchored at the **median**
+of its cars' true positions. Config `[trains] deoverlap` (default **on**), threaded through
+`output_generator` + `serve.py`.
+
+**Verified (train 99991190, 60 cars):** streaks (bodies >30 m) 2 → **0**; max body 48.2 → 20.4 m;
+inter-car gap median 2.55 m (proper coupler gap); **per-car drift median 1.1 m, max 16.7 m**
+(was 215 m before Fix 1 + footprint slots). Other consists: drift ≤ 0.4 m. No cars lost.
+
+Remaining deferred: cross-cut / multi-consist yard-track de-overlap still needs the `.ind`
+logical-track survey (§3b) — out of scope for within-consist, which is what mattered.
+
 ## Source map (our code)
 
 | Concern | File / symbol |

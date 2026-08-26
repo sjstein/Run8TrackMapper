@@ -395,7 +395,8 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
         from region_extractor import build_section_placer, extract_trains
         placer = build_section_placer(
             (rc.route_prefix, rd.sections) for rc, rd in zip(config.regions, regions_data))
-        trains_by_prefix = extract_trains(world_trains, placer, rv_lengths=rv_lengths)
+        trains_by_prefix = extract_trains(world_trains, placer, rv_lengths=rv_lengths,
+                                          deoverlap=getattr(config, 'train_deoverlap', True))
         for rc, rd in zip(config.regions, regions_data):
             rd.trains = trains_by_prefix.get(rc.route_prefix, [])
             if rd.trains:

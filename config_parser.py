@@ -161,6 +161,9 @@ class VisualizationConfig:
                                     # than the track at every zoom. 0 = fixed px (car_width).
     train_label_scale_m: float = 30.0  # [trains] label_scale_m: show per-RV destination tags
                                        # when the scale bar reads this many m or tighter.
+    train_deoverlap: bool = True    # [trains] deoverlap: lay each consist's cars end-to-end
+                                    # (front->back XML order, DB length, midpoint anchor) so
+                                    # coupled cars don't overlap. False = raw per-truck placement.
     areas: List[AreaLabel] = field(default_factory=list)  # user-defined area/place labels
     color_presets: Dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_COLOR_PRESETS))  # name -> hex label-color palette
@@ -463,12 +466,16 @@ def parse_config(config_path: str) -> VisualizationConfig:
 
     train_car_width, train_spine_width, train_car_width_m = 7.0, 1.5, 3.5
     train_label_scale_m = 30.0
+    train_deoverlap = True
     if 'trains' in parser:
         ts = parser['trains']
         train_car_width = _cfg_float(ts, 'car_width', train_car_width)
         train_spine_width = _cfg_float(ts, 'spine_width', train_spine_width)
         train_car_width_m = _cfg_float(ts, 'car_width_m', train_car_width_m)
         train_label_scale_m = _cfg_float(ts, 'label_scale_m', train_label_scale_m)
+        _do = ts.get('deoverlap', '').split(';', 1)[0].split('#', 1)[0].strip().lower()
+        if _do:
+            train_deoverlap = _do in ('1', 'true', 'yes', 'on')
 
     # Parse [car_type_colors] (optional): INDUSTRY_CONFIG_CAR_TYPE -> hex colour for
     # the RV body. configparser lower-cases keys, so match car types case-insensitively.
@@ -554,6 +561,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
         train_spine_width=train_spine_width,
         train_car_width_m=train_car_width_m,
         train_label_scale_m=train_label_scale_m,
+        train_deoverlap=train_deoverlap,
         car_type_colors=car_type_colors,
         loco_company_colors=loco_company_colors,
         areas=areas,
