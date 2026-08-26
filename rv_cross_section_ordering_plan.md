@@ -193,6 +193,51 @@ coordinate model and the ordered-chain, implemented cleanly.
 
 ---
 
+## DECISIONS LOCKED (2026-08-26) — within-consist rigid layout
+
+Scope narrowed by the user to **within-consist overlap only** (cross-cut/yard-track
+overlap deferred → no `.ind` survey needed for now). A read-only spike on `_test_world.xml`
+train 99991190 (Bakersfield, prefix 250) grounded these decisions:
+
+- **Order = XML consist order, trusted.** Top-to-bottom in the world save = front-to-back
+  of the consist (user-confirmed). The clean cars (0–10) already march monotonically along
+  the reconstructed section chain at even ~17 m spacing, so no physical position sort is
+  needed within a single train.
+- **Anchor = the consist midpoint** (user-confirmed). Lay cars symmetrically about the
+  consist's centre so drift from the true positions is spread to both ends. Compute the
+  anchor as the **median** of the cars' along-chain positions (median resists outliers from
+  bad-geometry cars — see below).
+- **Layout = rigid end-to-end by DB body length.** Position each car by *order + length*,
+  never by its own (possibly corrupt) per-truck metres. Body length = `RV_LENGTH −
+  2·COUPLER_OFFSET` (fallback: truck span). Draw each body as the sub-polyline of the
+  contiguous chain between `[centre − body/2, centre + body/2]` so it follows curves. This
+  sidesteps BOTH the cross-section chord and the corrupt-geometry problem at once.
+
+**Spike evidence (train 99991190):**
+- Occupied sections chain via 0.00 m endpoint joins:
+  `2277→2278→2279→2282→2283→(2280)→2281→2287→2288→2289→2290`.
+- The three overlapping cars (827939, 467104, 582385) ALL have a truck on **section 2283**,
+  whose extracted polyline is **degenerate** (start == end, yet length 150.9 m), producing
+  impossible 26 m / 46 m truck spans for ~15.5 m cars. This is an **independent geometry
+  bug** (affects the track map too), flagged as its own task — do not try to fix it inside
+  the de-overlap work; the rigid layout tolerates it by design.
+
+**Algorithm (per train):**
+1. Take cars in XML order (front→back).
+2. From the section-adjacency graph, build the ordered chain of sections the consist
+   occupies (head car's section → tail car's section) and its one continuous polyline `P`
+   with cumulative length; orient head→tail from the end cars' positions.
+3. Assign each car a length (DB body, fallback truck span).
+4. Anchor = median of cars' along-chain positions. Lay cars end-to-end about the anchor
+   with a small coupler gap between neighbours.
+5. Each car body = sub-polyline of `P` for its `[lo, hi]` span.
+6. Fallback to today's per-truck placement for any car whose section isn't on the chain
+   (shouldn't occur within one consist).
+
+Still TBD before/while building: exact coupler-gap value, how to build the chain path when
+the consist branches through a switch (the `2283→2280` jump crosses branches), and whether
+to gate this behind a config flag (default on? `[trains] deoverlap`).
+
 ## Source map (our code)
 
 | Concern | File / symbol |
