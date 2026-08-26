@@ -63,11 +63,16 @@ string, `_layout_consist` instead lays each consist's cars **end to end along it
 chain**: cars in world-save (front→back) order — trusted as the physical coupling order — each
 at its **full coupled footprint** (`RV_LENGTH`) so footprints abut like a real train and the laid
 length matches the true track span (near-zero drift), with each body drawn **inset by one coupler
-per end** so the couplers reappear as the visible inter-car gap. The consist's occupied sections
-are chained into one continuous polyline via endpoint adjacency (`_build_consist_polyline`), split
-into contiguous **runs** at any degenerate/missing/non-adjacent joint (`_split_runs`) so a single
-bad section can't stretch the whole train; each run is anchored at the **median** of its cars'
-true positions (midpoint anchor). Cars on an unusable section fall back to per-truck placement
+per end** so the couplers reappear as the visible inter-car gap. Each body is a **straight chord**
+between its two end points on the chain (a rail car is rigid, so it must not bend), which keeps a
+car spanning a switch/curve a straight rectangle instead of wrapping onto the diverging leg;
+consecutive cars still abut because their chord endpoints share a chain point. The consist's
+occupied sections are chained into one continuous polyline via endpoint adjacency
+(`_build_consist_polyline`; `_concat_section_polyline` snaps each detailed path's endpoints to the
+section's canonical node positions so seams meet cleanly), split into contiguous **runs** at any
+degenerate/missing/non-adjacent joint (`_split_runs`) so a single bad section can't stretch the
+whole train; each run is anchored at the **median** of its cars' true positions (midpoint anchor).
+Cars on an unusable section fall back to per-truck placement
 (`_fallback_body`). This still trusts XML order *within* one consist only — no cross-cut / logical
 yard-track ordering (that needs the `.ind` survey; see `rv_cross_section_ordering_plan.md`).
 

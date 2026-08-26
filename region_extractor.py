@@ -1595,6 +1595,20 @@ def _concat_section_polyline(sd: SectionData) -> List[Tuple[float, float]]:
 
     # Base = the most detailed path (most vertices); on a tie, the longer arc.
     base = list(max(paths, key=lambda p: (len(p), _cumulative_lengths(p)[-1])))
+
+    # The detailed interpolated path can drift ~1 m at its ends from the section's
+    # canonical node positions, while neighbouring sections connect at those node
+    # positions - so an un-snapped detailed path kinks at the seam (visible as a
+    # rounded lobe under the wide RV stroke). Snap the base's endpoints to a coarse
+    # same-span path's endpoints (the node positions) so seams meet cleanly.
+    coarse = min((p for p in paths if p is not base and same_span(p, base)),
+                 key=len, default=None)
+    if coarse is not None:
+        if _d2(coarse[0], base[0]) <= _d2(coarse[-1], base[0]):
+            base[0], base[-1] = coarse[0], coarse[-1]
+        else:
+            base[0], base[-1] = coarse[-1], coarse[0]
+
     for p in paths:
         if p is base or same_span(p, base):
             continue                       # duplicate / reverse of the base route
@@ -1980,8 +1994,13 @@ def _layout_consist(group, placer):
             pos += lengths[i]
             if flip_run:
                 lo, hi = Ptot - hi, Ptot - lo
-            body = _subpolyline(P, P_cum, lo, hi)
-            if len(body) >= 2:
+            # A rail car is rigid: draw the body as a STRAIGHT chord between its two
+            # end points on the chain (not the sub-polyline), so a car spanning a
+            # switch/curve stays a straight rectangle instead of bending onto the
+            # diverging leg. Endpoints stay on the track; consecutive cars still abut.
+            lo, hi = min(lo, hi), max(lo, hi)
+            body = [_point_at_distance(P, P_cum, lo), _point_at_distance(P, P_cum, hi)]
+            if _seg_len(body[0], body[1]) > 1e-6:
                 out[i] = body
     return out
 
