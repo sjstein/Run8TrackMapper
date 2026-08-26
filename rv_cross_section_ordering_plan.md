@@ -251,11 +251,14 @@ out-and-back / zigzag polyline of up to ~5× the true length — and a **degener
 polyline when the mirror halves cancelled (that was section 2283, the original "overlap" villain).
 This both mis-drew the track *and* injected a spurious ~1.3–1.5× stretch into placement.
 
-**Fix 1 — `_dedup_section_paths` (in `extract_sections`).** Keep the most-detailed path per
-distinct endpoint-pair; genuinely distinct legs (switches — different endpoints) are preserved
-(verified: 0 sections had distinct-endpoint legs, so nothing legitimate was dropped). `length_m`
-is recomputed from the deduped paths. Region-wide inflated-section count 446 → 0; 2283/2287 heal
-to clean 37.7 m single paths. This fixes the track map too, not just trains.
+**Fix 1 — placement polyline in `_concat_section_polyline` (used only by `_SectionPlacer`).**
+The map draws *all* of a section's `paths` (so turnouts show every leg), but placement needs one
+non-repeating route. `_concat` now takes the most-detailed path as the base and stitches on only
+paths that *continue* it end-to-start, skipping duplicates / reverses (same endpoints) and
+branches (a switch's other leg). Region-wide placement-inflated sections 446 → 0; 2283/2287 give
+clean 37.7 m routes. NOTE: an earlier attempt deduped `paths` in `extract_sections` instead — that
+also fixed placement but **erased turnout legs from the map** (860 sections had same-endpoint but
+divergent-shape legs), so it was reverted in favour of fixing only the placement layer.
 
 **Fix 2 — footprint-abutting rigid layout (`_layout_consist`).** Lay cars end-to-end by their
 **full coupled footprint** (`RV_LENGTH`, cars abut like a real coupled train) so the laid length

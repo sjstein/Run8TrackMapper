@@ -847,53 +847,6 @@ def compute_switch_leg_fixes(db: TrackDatabase) -> Tuple[Dict, Dict]:
     return leg_recon, point_fix
 
 
-def _dedup_section_paths(paths, tol: float = 3.0):
-    """Drop redundant paths that span the *same* endpoint pair (forward or
-    reversed), keeping the most detailed (most points) representative per distinct
-    span. Genuinely distinct legs - e.g. switch legs, whose endpoints differ - are
-    all kept.
-
-    Curved sections in the track DB often store the same physical track three
-    times (a coarse forward path, its coarse mirror, and a detailed interpolated
-    path). Concatenating all of them produces an out-and-back / zigzag polyline of
-    2-3x the real length (and a *degenerate*, start==end polyline when the two
-    coarse halves are exact mirrors). Keeping one representative per span fixes
-    both the inflated length and the rendered shape.
-    """
-    kept = []   # representative paths, in first-appearance order
-    for path in paths:
-        if len(path) < 2:
-            continue
-        a0, a1 = path[0], path[-1]
-        for gi, rep in enumerate(kept):
-            b0, b1 = rep[0], rep[-1]
-            same = ((math.hypot(a0[0]-b0[0], a0[1]-b0[1]) < tol and
-                     math.hypot(a1[0]-b1[0], a1[1]-b1[1]) < tol) or
-                    (math.hypot(a0[0]-b1[0], a0[1]-b1[1]) < tol and
-                     math.hypot(a1[0]-b0[0], a1[1]-b0[1]) < tol))
-            if same:
-                if len(path) > len(rep):   # keep the more detailed representative
-                    kept[gi] = path
-                break
-        else:
-            kept.append(path)
-    return kept
-
-
-def _path_length_metric(path, use_tile_coords: bool) -> float:
-    """Arc length of one path in metres (tile-world euclidean, or lat/lon metres)."""
-    total = 0.0
-    for a, b in zip(path, path[1:]):
-        if use_tile_coords:
-            total += math.hypot(b[0] - a[0], b[1] - a[1])
-        else:
-            clat = (a[0] + b[0]) / 2
-            dlat = (b[0] - a[0]) * METERS_PER_DEGREE_LAT
-            dlon = (b[1] - a[1]) * METERS_PER_DEGREE_LAT * math.cos(math.radians(clat))
-            total += math.hypot(dlat, dlon)
-    return total
-
-
 def extract_sections(db: TrackDatabase,
                      tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]] = None,
                      tile_based_config: Optional[TileBasedConfig] = None) -> List[SectionData]:
@@ -1170,12 +1123,6 @@ def extract_sections(db: TrackDatabase,
                     # Only add if segment length is meaningful (> ~1 meter in degrees)
                     if seg_length > 0.00001:
                         all_paths.append(path_points)
-
-        # Drop redundant duplicate/mirror paths (same span stored 2-3x) that would
-        # otherwise concatenate into an inflated out-and-back polyline; recompute
-        # the section length from what remains. Distinct legs (switches) are kept.
-        all_paths = _dedup_section_paths(all_paths)
-        total_length_m = sum(_path_length_metric(p, use_tile_coords) for p in all_paths)
 
         # Close joints: snap any endpoint that lands on a rebuilt switch far point.
         if point_fix_world:
@@ -1624,21 +1571,39 @@ class TrainData:
 
 
 def _concat_section_polyline(sd: SectionData) -> List[Tuple[float, float]]:
-    """Concatenate a section's paths into one polyline (dedup shared endpoints).
+    """Build one clean polyline for the section, for placing rail vehicles.
 
-    Most sections have a single path; switches/curves may have several. Adjacent
-    paths that meet end-to-start are stitched so the cumulative length is
-    continuous.
+    A section's ``paths`` may hold the same physical track several times (a coarse
+    forward path, its coarse mirror, and a detailed interpolated path) and/or
+    genuinely distinct switch legs. The map draws all of them, but placement needs
+    a single non-repeating route: blindly concatenating every path produces an
+    out-and-back / zigzag polyline of 2-3x the real length (a *degenerate*
+    start==end polyline when the mirror halves cancel - e.g. section 2283).
+
+    So: take the most-detailed path as the base, then stitch on only paths that
+    *continue* it end-to-start (a genuine multi-segment run), skipping duplicates,
+    reverses (same endpoints) and branches (a switch's other leg). The result
+    follows one route with honest length.
     """
-    poly: List[Tuple[float, float]] = []
-    for path in sd.paths:
-        if not path:
-            continue
-        if poly and _d2(poly[-1], path[0]) < 0.25:  # within 0.5 units -> shared joint
-            poly.extend(path[1:])
-        else:
-            poly.extend(path)
-    return poly
+    paths = [p for p in sd.paths if len(p) >= 2]
+    if not paths:
+        return []
+
+    def same_span(a, b, tol2=9.0):   # same endpoint pair, either direction (~3 m)
+        return ((_d2(a[0], b[0]) < tol2 and _d2(a[-1], b[-1]) < tol2) or
+                (_d2(a[0], b[-1]) < tol2 and _d2(a[-1], b[0]) < tol2))
+
+    # Base = the most detailed path (most vertices); on a tie, the longer arc.
+    base = list(max(paths, key=lambda p: (len(p), _cumulative_lengths(p)[-1])))
+    for p in paths:
+        if p is base or same_span(p, base):
+            continue                       # duplicate / reverse of the base route
+        if _d2(base[-1], p[0]) < 0.25:     # p continues from the base's end
+            base.extend(p[1:])
+        elif _d2(base[-1], p[-1]) < 0.25:  # p continues, reversed
+            base.extend(reversed(p[:-1]))
+        # otherwise p is a branch / disjoint -> ignore for placement
+    return base
 
 
 def _cumulative_lengths(poly: List[Tuple[float, float]]) -> List[float]:

@@ -71,15 +71,17 @@ true positions (midpoint anchor). Cars on an unusable section fall back to per-t
 (`_fallback_body`). This still trusts XML order *within* one consist only — no cross-cut / logical
 yard-track ordering (that needs the `.ind` survey; see `rv_cross_section_ordering_plan.md`).
 
-> **Depends on honest section geometry.** Curved sections in the track DB store the same span
-> multiple times (coarse forward + coarse mirror + detailed); `extract_sections` now
-> **de-duplicates** these (`_dedup_section_paths`: keep the most-detailed path per distinct
-> endpoint-pair; genuinely distinct legs / switches have different endpoints and are kept) and
-> recomputes `length_m` from what remains. Without this, ~10% of sections concatenated into
-> inflated out-and-back polylines (up to ~5× length; a *degenerate* start==end polyline when the
-> mirror halves cancel), which both mis-drew the track and injected a spurious ~1.3–1.5× "stretch"
-> that made the rigid layout drift. This fix is what lets the footprint-abutting layout stay on
-> the true track.
+> **Depends on an honest *placement* polyline.** A section's `paths` may hold the same span
+> multiple times (coarse forward + coarse mirror + detailed) and/or distinct switch legs. The
+> **map draws all of them** (so turnouts render every leg), but *placement* needs one
+> non-repeating route. `_concat_section_polyline` (used only by `_SectionPlacer`, never the map)
+> now takes the **most-detailed path as the base and stitches on only paths that *continue* it
+> end-to-start**, skipping duplicates, reverses (same endpoints) and branches (a switch's other
+> leg). Previously it concatenated *every* path into an out-and-back / zigzag polyline of up to
+> ~5× the real length (a *degenerate* start==end polyline when the mirror halves cancel — section
+> 2283), which mis-placed trucks and injected a spurious ~1.3–1.5× "stretch" that made the rigid
+> layout drift. Fixing this at the placement layer (not by dropping paths, which would erase
+> turnout legs from the map) is what lets the footprint-abutting layout stay on the true track.
 
 **Cross-region cars.** Run8 section indices are **per-region and collide** (Barstow's 446 ≠
 Needles' 446), and `currentTrackSectionIndex` is paired with `currentRoutePrefix`. So the placer
