@@ -159,10 +159,14 @@ class VisualizationConfig:
     train_car_width_m: float = 3.5  # [trains] car_width_m: real RV width (m); RVs widen with
                                     # zoom to this, never below car_width, so they stay wider
                                     # than the track at every zoom. 0 = fixed px (car_width).
+    train_label_scale_m: float = 30.0  # [trains] label_scale_m: show per-RV destination tags
+                                       # when the scale bar reads this many m or tighter.
     areas: List[AreaLabel] = field(default_factory=list)  # user-defined area/place labels
     color_presets: Dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_COLOR_PRESETS))  # name -> hex label-color palette
     label_types: List[LabelType] = field(default_factory=list)  # from [label_types], ordered
+    car_type_colors: Dict[str, str] = field(
+        default_factory=dict)  # INDUSTRY_CONFIG_CAR_TYPE (lowercased) -> hex, from [car_type_colors]
 
     @property
     def industry_db(self) -> Path:
@@ -449,11 +453,24 @@ def parse_config(config_path: str) -> VisualizationConfig:
             return default
 
     train_car_width, train_spine_width, train_car_width_m = 7.0, 1.5, 3.5
+    train_label_scale_m = 30.0
     if 'trains' in parser:
         ts = parser['trains']
         train_car_width = _cfg_float(ts, 'car_width', train_car_width)
         train_spine_width = _cfg_float(ts, 'spine_width', train_spine_width)
         train_car_width_m = _cfg_float(ts, 'car_width_m', train_car_width_m)
+        train_label_scale_m = _cfg_float(ts, 'label_scale_m', train_label_scale_m)
+
+    # Parse [car_type_colors] (optional): INDUSTRY_CONFIG_CAR_TYPE -> hex colour for
+    # the RV body. configparser lower-cases keys, so match car types case-insensitively.
+    car_type_colors = {}
+    if 'car_type_colors' in parser:
+        for ctype, hexcolor in parser['car_type_colors'].items():
+            c = hexcolor.split(';', 1)[0].strip()   # strip ';' inline comment ('#' is the hex prefix)
+            if c:
+                if not c.startswith('#'):
+                    c = '#' + c
+                car_type_colors[ctype.strip().lower()] = c
 
     # Parse [label_types] section (optional): `id = Display Name, #color` per line,
     # in order. The id is the value stored in a label's `type =`; the display name
@@ -515,6 +532,8 @@ def parse_config(config_path: str) -> VisualizationConfig:
         train_car_width=train_car_width,
         train_spine_width=train_spine_width,
         train_car_width_m=train_car_width_m,
+        train_label_scale_m=train_label_scale_m,
+        car_type_colors=car_type_colors,
         areas=areas,
         color_presets=color_presets,
         label_types=label_types

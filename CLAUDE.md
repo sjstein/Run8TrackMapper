@@ -48,16 +48,26 @@ python output_generator.py <config.ini> --world <world_save.xml>
 
 **Placement** (`region_extractor.extract_trains` / `_SectionPlacer`): a truck is placed by
 walking `distanceTravelledInMeters` **metres** along that section's already-extracted
-`SectionData.paths` polyline (`currentTrackSectionIndex` == `section.index`), oriented by
-`startNodeIndex` (0 → from `polyline[0]`, else from the far end) and clamped to the section
-length. Because both the Run8 distance and the tile-world coords are in metres, no
-fraction/denominator is needed and vehicles land exactly on the drawn track in every
-coordinate mode. Each **car is drawn as a body polyline spanning its two trucks** (so it
-follows curves); a vehicle's ordering key is the yard-direction-most (minimum) truck
-distance — geometry only (the YARDS logical-yard-track `SEQ` layer in
-`world-import-rail-vehicle-ordering.md` is intentionally **not** reproduced, as it needs the
-`.ind` survey this tool does not consume). Vehicles are filtered to each region's
-`route_prefix` and emitted to the region JSON as `trains` (`train_to_dict` /
+`SectionData.paths` polyline, oriented by `startNodeIndex` (0 → from `polyline[0]`, else from
+the far end) and clamped to the section length. Because both the Run8 distance and the
+tile-world coords are in metres, no fraction/denominator is needed. Each **car is drawn as a
+body polyline spanning its two trucks** (so it follows curves); a vehicle's ordering key is the
+yard-direction-most (minimum) truck distance — geometry only (the YARDS logical-yard-track
+`SEQ` layer in `world-import-rail-vehicle-ordering.md` is intentionally **not** reproduced, as
+it needs the `.ind` survey this tool does not consume).
+
+**Cross-region cars.** Run8 section indices are **per-region and collide** (Barstow's 446 ≠
+Needles' 446), and `currentTrackSectionIndex` is paired with `currentRoutePrefix`. So the placer
+is keyed by **`(route_prefix, section_index)`** and each truck is resolved by its *own*
+`truck.route_prefix` — a car whose two trucks are in different regions (e.g. straddling the
+Barstow/Needles seam) draws correctly across the boundary (all regions share one tile-world
+coordinate space). Placement therefore runs **once over all regions**: `build_section_placer`
+builds the combined placer from every region's `(prefix, sections)`, and `extract_trains(trains,
+placer, rv_lengths)` returns `{route_prefix: [TrainData]}` — each car assigned to the region of
+its **truck-A** prefix (so a train spanning regions is split into per-region `TrainData`; the
+car bodies span the seam, but a train's spine is still drawn per region). `output_generator`
+extracts all regions first, then places trains and attaches `RegionData.trains`; `extract_region`
+no longer places trains. Emitted to the region JSON as `trains` (`train_to_dict` /
 `rail_vehicle_to_dict`).
 
 **True vehicle length** (optional): with `[visualization] railvehicle_db = db_railvehicles.db`
@@ -74,8 +84,15 @@ without the DB the body stays the truck-to-truck span.
 
 **Viewer:** a **Trains** overlay (each car a body polyline; length is the true car length when
 `railvehicle_db` is set, otherwise the truck-to-truck span) with per-vehicle popups (train id / unit / type / destination) and
-a 3-line monospace tooltip (`Train : <id>` / `RV num : <unit>` / `RV tag : <destination>`). Body colours are config-driven:
-`[colors] train` (cars) and `train_loco` (locomotives); all vehicles share one line weight.
+a 4-line monospace tooltip (`Train : <id>` / `RV num : <unit>` / `RV tag : <destination>` /
+`RV typ : <car_type>`), and the popup shows the DB car type. Body colours are config-driven and by **car type**: a locomotive uses
+`[colors] train_loco`; every other car uses its colour from `[car_type_colors]` (keyed by the DB's
+`INDUSTRY_CONFIG_CAR_TYPE`, e.g. `Tank_Car`, `Covered_Hopper`, `Box_Car`; keys case-insensitive), falling
+back to `[colors] train` when a type has no entry. The map is parsed to
+`VisualizationConfig.car_type_colors`, emitted as `manifest.car_type_colors`, and applied by `rvBodyColor`
+(`carTypeColor(v.car_type)`) in `renderTrains`. `car_type` per vehicle comes from `rv_length_db`
+(`RvInfo.car_type`; locos are `Locomotive`) via `extract_trains`, emitted on each RV in the region JSON.
+All vehicles share one line weight.
 Each **train** (cars sharing a `train_id`) also gets a **thin connecting spine** through its cars, so a
 consist reads as one unit (`drawTrainOutline` in `generate_javascript`: cars are chained by
 nearest-neighbour so the spine follows the train even across sections / mis-ordered XML; the spine runs
@@ -91,10 +108,12 @@ Line widths come from an optional `[trains]` section, injected as `window.TRAIN_
   every zoom. `car_width_m = 0` reverts to a plain fixed `car_width` px. Config-side floats strip
   inline `;`/`#` comments (default ConfigParser keeps them, which would break `float()`).
   Scaling is align/geographic only; the `--tile-based` viewer uses fixed `car_width`.
-At close zoom (scale bar ~20 m or tighter, i.e. `_metersPerPixel() < 0.5`, ~zoom 18+) each RV also
-shows its **destination tag centered on the car** (`trainDestLabelIcon` divIcons in a per-region
-`layers.trainLabels` group; `updateTrainLabelVisibility()` adds/removes the group on `zoomend` and
-when the Trains overlay toggles — labels only show when Trains is on and zoomed in).
+At close zoom each RV also shows its **destination tag centered on the car** (`trainDestLabelIcon`
+divIcons in a per-region `layers.trainLabels` group; `updateTrainLabelVisibility()` adds/removes the
+group on `zoomend` and when the Trains overlay toggles — labels show only when Trains is on and the
+scale bar reads `[trains] label_scale_m` metres or tighter, default 30). The threshold is compared
+against `_scaleBarMeters()`, which mirrors Leaflet `L.control.scale`'s 1/2/3/5x10^n rounding (so it
+matches the on-screen bar exactly — note the **3** step: `< 0.5` m/px lands on the 30 m bar, not 20).
 A **Train / Rail
 Vehicle** search type matches **trainID**, **destinationTag**, or **unitNumber** (a hit
 enables the overlay and pans to the vehicle). Wired in the geographic base
@@ -113,6 +132,9 @@ is the file mtime; results are cached until it changes). The align viewer probes
 `/api/trains` every 3 s** and re-renders the Trains layer, so editing/re-saving the world
 in Run8 moves the vehicles on the map with no reload. Static output (served without
 `serve.py`) still shows the trains baked into the region JSON, just without live refresh.
+Committing a manual alignment (`rerenderAlign`) rebuilds every region from the raw cache, which only
+has the *baked* trains, so after the reload the poll is re-run (`pollTrainsOnce`, with the version guard
+reset) to restore the live positions - otherwise live-only trains would vanish on align.
 
 **Output Structure:**
 ```

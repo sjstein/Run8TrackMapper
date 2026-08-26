@@ -37,7 +37,7 @@ from urllib.parse import urlsplit, unquote
 from config_parser import (parse_config, collect_areas, resolve_areas_files,
                             AREA_TYPE_DEFAULT)
 from area_store import AreaStore, AreaStoreError, slugify, _area_to_dict
-from region_extractor import SectionData, extract_trains
+from region_extractor import SectionData, extract_trains, build_section_placer
 from world_parser import parse_world_save
 from output_generator import train_to_dict
 from rv_length_db import load_rv_lengths
@@ -105,17 +105,25 @@ class AuthoringState:
             return self._trains_cache['payload']
 
         parsed = parse_world_save(str(self.world_save))
-        # Only touch regions whose route prefix actually appears in the save, so we
-        # don't load every region's (large) JSON just to place zero vehicles.
-        present = {v.route_prefix for tr in parsed for v in tr.vehicles}
-        trains_by_region = {}
+        # A car can straddle a region boundary, so build ONE placer over every
+        # region whose prefix appears on ANY truck (A or B) - not just truck A -
+        # then place all trains against it at once.
+        present = {truck.route_prefix
+                   for tr in parsed for v in tr.vehicles
+                   for truck in (v.truck_a, v.truck_b)}
+        region_sections, prefix_to_region = [], {}
         for region_id, prefix in self.region_prefix.items():
-            if prefix not in present:
-                continue
-            placed = extract_trains(parsed, self._region_sections(region_id), prefix,
-                                    rv_lengths=self.rv_lengths)
-            if placed:
-                trains_by_region[region_id] = [train_to_dict(t) for t in placed]
+            if prefix in present:
+                region_sections.append((prefix, self._region_sections(region_id)))
+                prefix_to_region[prefix] = region_id
+        placer = build_section_placer(region_sections)
+        by_prefix = extract_trains(parsed, placer, rv_lengths=self.rv_lengths)
+
+        trains_by_region = {}
+        for prefix, trains in by_prefix.items():
+            region_id = prefix_to_region.get(prefix)
+            if region_id:
+                trains_by_region[region_id] = [train_to_dict(t) for t in trains]
 
         payload = {'version': mtime, 'trains': trains_by_region}
         self._trains_cache = {'mtime': mtime, 'payload': payload}

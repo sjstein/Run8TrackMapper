@@ -50,7 +50,7 @@ def generate_javascript() -> str:
     const COLORS = window.COLORS;
     // Rail-vehicle line widths from [trains] config, with safe defaults.
     // car = min px floor; carM = real car width (m) the body widens to with zoom.
-    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5};
+    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30};
 
     // ========================================
     // MapApp - Main Application State
@@ -890,7 +890,17 @@ def generate_javascript() -> str:
     }
 
     // ---- Trains / rail vehicles (from an optional world save) ----
-    // Body colours come from the config ([colors] train / train_loco).
+    // Body colour: locomotives use [colors] train_loco; other cars use the
+    // per-type colour from the config's [car_type_colors] (keyed by the DB's
+    // INDUSTRY_CONFIG_CAR_TYPE), falling back to [colors] train.
+    function carTypeColor(t) {
+        const m = (MapApp.manifest && MapApp.manifest.car_type_colors) || {};
+        return t ? m[String(t).toLowerCase()] : null;
+    }
+    function rvBodyColor(v, isLoco) {
+        if (isLoco) return COLORS.trainLoco;
+        return carTypeColor(v.car_type) || COLORS.train;
+    }
 
     // RV body line width in px: a real-world car width (carM, metres) converted at
     // the current zoom, floored at TRAIN_STYLE.car and capped so it can't explode.
@@ -942,7 +952,7 @@ def generate_javascript() -> str:
                 if (!v.resolved || !v.body || v.body.length < 2) continue;
                 const isLoco = /DieselEngine|Electric|Steam|Engine/i.test(v.unit_type || '');
                 const line = L.polyline(v.body, {
-                    color: isLoco ? COLORS.trainLoco : COLORS.train,
+                    color: rvBodyColor(v, isLoco),
                     weight: rvBodyWeightPx(),
                     opacity: 0.95,
                     lineCap: 'butt'
@@ -973,10 +983,21 @@ def generate_javascript() -> str:
         return 156543.03392 * Math.cos(MapApp.map.getCenter().lat * Math.PI / 180)
             / Math.pow(2, MapApp.map.getZoom());
     }
-    // RV destination labels appear only when the scale bar reads ~20 m or tighter
-    // (a 100 px bar of <=20 m means < 0.5 m/px) and the Trains overlay is on.
+    // The scale bar's reading in metres (mirrors Leaflet L.control.scale: the
+    // 1/2/3/5 x 10^n round number of metres a 100 px bar spans).
+    function _scaleBarMeters() {
+        const m = _metersPerPixel() * 100;
+        if (!(m > 0)) return Infinity;
+        const pow10 = Math.pow(10, Math.floor(Math.log10(m)));
+        let d = m / pow10;
+        d = d >= 10 ? 10 : d >= 5 ? 5 : d >= 3 ? 3 : d >= 2 ? 2 : 1;
+        return pow10 * d;
+    }
+    // RV destination labels appear when the scale bar reads TRAIN_STYLE.labelScaleM
+    // metres or tighter ([trains] label_scale_m, default 30) and Trains is on.
     function updateTrainLabelVisibility() {
-        const show = MapApp.overlayStates.trains && _metersPerPixel() < 0.5;
+        const show = MapApp.overlayStates.trains
+            && _scaleBarMeters() <= (TRAIN_STYLE.labelScaleM || 30);
         MapApp.loadedRegions.forEach(region => {
             if (!region.visible || !region.layers || !region.layers.trainLabels) return;
             if (show) region.layers.trainLabels.addTo(MapApp.map);
@@ -1040,13 +1061,15 @@ def generate_javascript() -> str:
         return `<div style="font-family:monospace;white-space:pre;margin:0">`
              + `Train  : ${train.train_id}<br>`
              + `RV num : ${v.unit_number || ''}<br>`
-             + `RV tag : ${v.destination_tag || ''}</div>`;
+             + `RV tag : ${v.destination_tag || ''}<br>`
+             + `RV typ : ${v.car_type || ''}</div>`;
     }
 
     function trainVehiclePopup(train, v) {
         let html = `<b>Train ${train.train_id}</b>${train.was_ai ? ' (AI)' : ''}<br>`;
         html += `Unit: ${v.unit_number || 'N/A'}<br>`;
         html += `Type: ${v.unit_type || 'N/A'}<br>`;
+        if (v.car_type) html += `Car type: ${v.car_type}<br>`;
         html += `Destination: ${v.destination_tag || 'N/A'}`;
         if (v.rv_filename) html += `<br><span style="color:#888;font-size:11px;">${v.rv_filename}</span>`;
         return html;
@@ -1794,13 +1817,13 @@ window.COLORS = {{
     trainLoco: '{colors.train_loco}',
     trainOutline: '{colors.train_outline}'
 }};
-window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}}};
+window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}}};
 
 (function() {{
     'use strict';
 
     const COLORS = window.COLORS;
-    const TRAIN_STYLE = window.TRAIN_STYLE || {{car: 7, spine: 1.5}};
+    const TRAIN_STYLE = window.TRAIN_STYLE || {{car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30}};
 
     const MapApp = {{
         map: null,
@@ -2139,8 +2162,11 @@ window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine
                 if (!v.resolved || !v.body || v.body.length < 2) continue;
                 const coords = v.body.map(p => [p[1], p[0]]);
                 const isLoco = /DieselEngine|Electric|Steam|Engine/i.test(v.unit_type || '');
+                const _ctc = (MapApp.manifest && MapApp.manifest.car_type_colors) || {{}};
+                const _bodyColor = isLoco ? COLORS.trainLoco
+                    : (_ctc[String(v.car_type || '').toLowerCase()] || COLORS.train);
                 const line = L.polyline(coords, {{
-                    color: isLoco ? COLORS.trainLoco : COLORS.train,
+                    color: _bodyColor,
                     weight: TRAIN_STYLE.car,
                     opacity: 0.95,
                     lineCap: 'butt'
@@ -2148,7 +2174,8 @@ window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine
                 const tip = `<div style="font-family:monospace;white-space:pre;margin:0">`
                     + `Train  : ${{train.train_id}}<br>`
                     + `RV num : ${{v.unit_number || ''}}<br>`
-                    + `RV tag : ${{v.destination_tag || ''}}</div>`;
+                    + `RV tag : ${{v.destination_tag || ''}}<br>`
+                    + `RV typ : ${{v.car_type || ''}}</div>`;
                 line.bindTooltip(tip, {{ sticky: true }});
                 line.bindPopup(trainVehiclePopup(train, v), {{ maxWidth: 300 }});
                 line.addTo(layerGroup);
@@ -2162,6 +2189,7 @@ window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine
         let html = `<b>Train ${{train.train_id}}</b>${{train.was_ai ? ' (AI)' : ''}}<br>`;
         html += `Unit: ${{v.unit_number || 'N/A'}}<br>`;
         html += `Type: ${{v.unit_type || 'N/A'}}<br>`;
+        if (v.car_type) html += `Car type: ${{v.car_type}}<br>`;
         html += `Destination: ${{v.destination_tag || 'N/A'}}<br>`;
         if (v.rv_filename) html += `<span style="color:#888;font-size:11px;">${{v.rv_filename}}</span>`;
         return html;
@@ -3266,16 +3294,17 @@ ALIGN_JS = r'''
 
     // ---- Live rail-vehicle refresh (serve.py --world) ----
     MapApp.trainsVersion = null;
+    function pollTrainsOnce(){
+        return fetch('api/trains', {cache:'no-store'})
+            .then(r => r.ok ? r.json() : null)
+            .then(applyLiveTrains)
+            .catch(err => console.error('trains poll failed:', err));
+    }
+    MapApp.pollTrainsOnce = pollTrainsOnce;
     function startTrainsPolling(){
         if (MapApp._trainsPoll) return;
-        const tick = () => {
-            fetch('api/trains', {cache:'no-store'})
-                .then(r => r.ok ? r.json() : null)
-                .then(applyLiveTrains)
-                .catch(err => console.error('trains poll failed:', err));
-        };
-        tick();
-        MapApp._trainsPoll = setInterval(tick, 3000);
+        pollTrainsOnce();
+        MapApp._trainsPoll = setInterval(pollTrainsOnce, 3000);
     }
     function applyLiveTrains(j){
         if (!j || !j.trains) return;
@@ -3596,7 +3625,17 @@ ALIGN_JS = r'''
             unloadRegion(id);
             MapApp.loadedRegions.delete(id);   // force loadRegion to rebuild (not just show old layers)
         }
-        for (const id of ids) loadRegion(id);
+        // The rebuild renders the BAKED trains from the raw cache; when a world
+        // save is being live-watched the poll owns the current positions (and some
+        // regions have no baked trains at all), so re-fetch them onto the rebuilt
+        // regions once the loads settle - otherwise live trains vanish after align.
+        Promise.all(ids.map(id => loadRegion(id))).then(() => {
+            if (MapApp._trainsPoll) {
+                MapApp.trainsVersion = null;
+                MapApp._trainsRegionsKey = null;
+                pollTrainsOnce();
+            }
+        });
     }
     function fitToRegion(regionId){
         // Enabling a region pans/zooms to it (its track can span 100+ mi; the map
@@ -3762,7 +3801,7 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
 </head><body>
 <div id="map"></div>
 {color_config}
-<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}}};</script>
+<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}}};</script>
 <script>window.__run8_authoring = {authoring_js}; window.__run8map = L.map('map', {{preferCanvas:true, maxZoom:22, zoomControl:true}}).setView([35,-117.8],9);</script>
 {js}
 </body></html>'''

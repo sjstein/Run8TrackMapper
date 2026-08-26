@@ -1558,6 +1558,7 @@ class RailVehicleData:
     body: List[Tuple[float, float]]      # polyline (>=2 pts) from truck A to truck B
     position_key: float                  # ordering key (min truck dist-from-start)
     resolved: bool                       # at least one truck landed on a known section
+    car_type: str = ""                   # INDUSTRY_CONFIG_CAR_TYPE from the DB (for colouring)
 
 
 @dataclass
@@ -1636,16 +1637,24 @@ def _subpolyline(poly: List[Tuple[float, float]], cum: List[float],
 
 
 class _SectionPlacer:
-    """Caches per-section polyline + cumulative lengths for fast truck placement."""
+    """Caches per-section polyline + cumulative lengths, keyed by
+    ``(route_prefix, section_index)``.
 
-    def __init__(self, sections: List[SectionData]):
-        self._sd = {s.id: s for s in sections}
-        self._cache: Dict[int, Optional[Tuple[List, List, float]]] = {}
+    Section indices are per-region and collide across regions (Barstow's 446 is a
+    different physical section than Needles' 446), so the key must include the
+    route prefix. A placer can span *all* regions (they share one tile-world
+    coordinate space), which lets a car that straddles a region boundary place
+    each truck against the correct region's section.
+    """
 
-    def _geometry(self, section_index: int):
-        if section_index in self._cache:
-            return self._cache[section_index]
-        sd = self._sd.get(section_index)
+    def __init__(self, sd_by_key: Dict[Tuple[int, int], SectionData]):
+        self._sd = sd_by_key
+        self._cache: Dict[Tuple[int, int], Optional[Tuple[List, List, float]]] = {}
+
+    def _geometry(self, key: Tuple[int, int]):
+        if key in self._cache:
+            return self._cache[key]
+        sd = self._sd.get(key)
         geom = None
         if sd is not None:
             poly = _concat_section_polyline(sd)
@@ -1653,32 +1662,46 @@ class _SectionPlacer:
                 cum = _cumulative_lengths(poly)
                 if cum[-1] > 1e-6:
                     geom = (poly, cum, cum[-1])
-        self._cache[section_index] = geom
+        self._cache[key] = geom
         return geom
 
-    def truck(self, truck) -> Optional[Tuple[Tuple[float, float], float, int]]:
-        """Place a truck.
+    def truck(self, truck) -> Optional[Tuple[Tuple[float, float], float, Tuple[int, int]]]:
+        """Place a truck by its own ``(route_prefix, section_index)``.
 
-        Returns ``(point, dist_from_start, section_index)`` where
-        ``dist_from_start`` is metres from ``polyline[0]`` oriented by the
-        truck's ``start_node_index`` (0 -> from start, else -> from far end), or
-        ``None`` if the truck's section is unknown.
+        Returns ``(point, dist_from_start, key)`` where ``dist_from_start`` is
+        metres from ``polyline[0]`` oriented by the truck's ``start_node_index``
+        (0 -> from start, else -> from far end) and ``key`` is the
+        ``(prefix, section_index)`` it resolved to, or ``None`` if unknown.
         """
-        geom = self._geometry(truck.section_index)
+        key = (truck.route_prefix, truck.section_index)
+        geom = self._geometry(key)
         if geom is None:
             return None
         poly, cum, total = geom
         d = total - truck.distance_m if truck.start_node_index else truck.distance_m
         d = min(max(d, 0.0), total)
-        return (_point_at_distance(poly, cum, d), d, truck.section_index)
+        return (_point_at_distance(poly, cum, d), d, key)
 
-    def body(self, section_index: int, d0: float, d1: float) -> List[Tuple[float, float]]:
+    def body(self, key: Tuple[int, int], d0: float, d1: float) -> List[Tuple[float, float]]:
         """Sub-polyline between two distances on the same section (follows curves)."""
-        geom = self._geometry(section_index)
+        geom = self._geometry(key)
         if geom is None:
             return []
         poly, cum, _ = geom
         return _subpolyline(poly, cum, d0, d1)
+
+
+def build_section_placer(region_sections) -> "_SectionPlacer":
+    """Build a placer spanning multiple regions.
+
+    ``region_sections`` is an iterable of ``(route_prefix, List[SectionData])``;
+    sections are keyed by ``(route_prefix, section.id)``.
+    """
+    sd_by_key: Dict[Tuple[int, int], SectionData] = {}
+    for prefix, sections in region_sections:
+        for s in sections:
+            sd_by_key.setdefault((prefix, s.id), s)
+    return _SectionPlacer(sd_by_key)
 
 
 def _extend_segment(pa: Tuple[float, float], pb: Tuple[float, float],
@@ -1700,33 +1723,33 @@ def _extend_segment(pa: Tuple[float, float], pb: Tuple[float, float],
             (pb[0] + ux * oh, pb[1] + uy * oh)]
 
 
-def extract_trains(trains, sections: List[SectionData],
-                   route_prefix: Optional[int] = None,
-                   rv_lengths: Optional[Dict[str, float]] = None) -> List[TrainData]:
-    """Place a parsed world save's trains onto extracted section geometry.
+def extract_trains(trains, placer: "_SectionPlacer",
+                   rv_lengths: Optional[Dict[str, str]] = None) -> Dict[int, List[TrainData]]:
+    """Place a parsed world save's trains against a multi-region section placer.
+
+    Each truck is located by its own ``(route_prefix, section_index)`` (see
+    :class:`_SectionPlacer`), so a car straddling a region boundary places each
+    truck against the correct region's section and its body spans the seam. A car
+    is assigned to the region of its **truck-A** route prefix.
 
     Args:
         trains: list of world_parser.Train records.
-        sections: the region's extracted SectionData (already in the active
-            coordinate mode).
-        route_prefix: if given, only vehicles whose truck-A route prefix matches
-            are placed (so each region gets its own trains).
-        rv_lengths: optional {rvXMLfilename.lower(): (length_m, coupler_offset_m)}
-            from rv_length_db.load_rv_lengths(). When given, each car body is drawn
-            at its real *body* length - the coupled footprint ``length_m`` minus one
-            ``coupler_offset_m`` per end - by extending the truck-to-truck span
-            symmetrically by the per-end overhang (body_len - span) / 2. Dropping the
-            couplers keeps a realistic gap between adjacent (coupled) cars, which
-            otherwise abut. Only meaningful in the metre-based (tile/align) mode.
+        placer: a :class:`_SectionPlacer` spanning all regions (see
+            :func:`build_section_placer`).
+        rv_lengths: optional {rvXMLfilename.lower(): (length_m, coupler_offset_m,
+            car_type)} from rv_length_db.load_rv_lengths(). When given, each car
+            body is drawn at its real *body* length - the coupled footprint minus
+            one coupler per end - so adjacent coupled cars keep a visible gap.
+
+    Returns:
+        ``{route_prefix: [TrainData]}`` - cars grouped by their assigned region.
     """
-    placer = _SectionPlacer(sections)
-    out: List[TrainData] = []
+    out: Dict[int, List[TrainData]] = {}
 
     for train in trains:
-        placed: List[RailVehicleData] = []
+        by_region: Dict[int, List[RailVehicleData]] = {}
         for v in train.vehicles:
-            if route_prefix is not None and v.route_prefix != route_prefix:
-                continue
+            region_prefix = v.route_prefix   # truck-A prefix = region assignment
 
             ta = placer.truck(v.truck_a)
             tb = placer.truck(v.truck_b)
@@ -1735,15 +1758,16 @@ def extract_trains(trains, sections: List[SectionData],
             # Drawn body length = coupled footprint minus a coupler at each end,
             # so adjacent coupled cars keep a visible gap instead of abutting.
             length_m = None
+            car_type = ""
             if rv_lengths:
                 entry = rv_lengths.get((v.rv_filename or '').strip().lower())
                 if entry:
-                    full_len_m, coupler_m = entry
+                    full_len_m, coupler_m, car_type = entry
                     body_len_m = full_len_m - 2.0 * coupler_m
                     length_m = body_len_m if body_len_m > 0 else full_len_m
 
             if ta and tb and ta[2] == tb[2]:
-                # Both trucks on the same section -> body follows the track.
+                # Both trucks on the same physical section -> body follows the track.
                 lo, hi = (ta[1], tb[1]) if ta[1] <= tb[1] else (tb[1], ta[1])
                 if length_m:
                     # Grow past each truck by the overhang to the true car length.
@@ -1753,7 +1777,8 @@ def extract_trains(trains, sections: List[SectionData],
                 body = placer.body(ta[2], lo, hi)  # clamps to the section ends
                 key = min(ta[1], tb[1])
             elif ta and tb:
-                # Trucks on different (adjacent) sections -> straight body.
+                # Trucks on different sections (incl. across a region boundary) ->
+                # straight body between the two real truck points, grown to length.
                 body = _extend_segment(ta[0], tb[0], length_m)
                 key = min(ta[1], tb[1])
             elif ta or tb:
@@ -1768,7 +1793,7 @@ def extract_trains(trains, sections: List[SectionData],
             if len(body) < 2:
                 body = body * 2 if body else []
 
-            placed.append(RailVehicleData(
+            by_region.setdefault(region_prefix, []).append(RailVehicleData(
                 train_id=train.train_id,
                 unit_number=v.unit_number,
                 destination_tag=v.destination_tag,
@@ -1777,12 +1802,14 @@ def extract_trains(trains, sections: List[SectionData],
                 body=[(round(p[0], 6), round(p[1], 6)) for p in body],
                 position_key=round(key, 3) if key != float("inf") else -1.0,
                 resolved=resolved,
+                car_type=car_type,
             ))
 
-        # Skip trains with nothing on this region (e.g. filtered out by prefix).
-        if placed:
-            out.append(TrainData(train_id=train.train_id, was_ai=train.was_ai,
-                                 vehicles=placed))
+        for prefix, vehicles in by_region.items():
+            if vehicles:
+                out.setdefault(prefix, []).append(
+                    TrainData(train_id=train.train_id, was_ai=train.was_ai,
+                              vehicles=vehicles))
 
     return out
 
@@ -1829,10 +1856,12 @@ def extract_region(region_config: RegionConfig,
                    tile_corrections: Dict[Tuple[int, int], Dict[str, float]],
                    default_tile_dir: str,
                    tile_dir: str = None,
-                   tile_based_config: Optional[TileBasedConfig] = None,
-                   world_trains=None,
-                   rv_lengths: Optional[Dict[str, float]] = None) -> RegionData:
-    """Extract all data for a single region
+                   tile_based_config: Optional[TileBasedConfig] = None) -> RegionData:
+    """Extract all data for a single region.
+
+    Trains are NOT placed here: because a car can straddle a region boundary,
+    placement runs once against a combined placer over all regions (see
+    build_section_placer / extract_trains). The caller attaches RegionData.trains.
 
     Args:
         region_config: Region configuration
@@ -1841,8 +1870,6 @@ def extract_region(region_config: RegionConfig,
         default_tile_dir: Default tile directory from config (derived from region_dir)
         tile_dir: Override tile directory (uses region_config.terrain_tile_dir or default_tile_dir if None)
         tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
-        world_trains: optional list of world_parser.Train to place on this region's
-            track (filtered to region_config.route_prefix)
     """
     print(f"\nExtracting region: {region_config.display_name}")
     use_tile_coords = tile_based_config is not None
@@ -1926,15 +1953,7 @@ def extract_region(region_config: RegionConfig,
     )
     print(f"  Extracted {len(industries)} industries")
 
-    # Place trains from an optional world save (filtered to this region's prefix)
-    trains = []
-    if world_trains:
-        trains = extract_trains(world_trains, sections, region_config.route_prefix,
-                                rv_lengths=rv_lengths)
-        n_veh = sum(len(t.vehicles) for t in trains)
-        n_res = sum(1 for t in trains for v in t.vehicles if v.resolved)
-        print(f"  Placed {n_veh} rail vehicle(s) in {len(trains)} train(s) "
-              f"for route prefix {region_config.route_prefix} ({n_res} resolved)")
+    # Trains are placed later (globally, across all regions) by the caller.
 
     # Calculate bounds
     bounds = calculate_bounds(sections, signals, ai_locations, industries)
@@ -1979,7 +1998,7 @@ def extract_region(region_config: RegionConfig,
         ai_locations=ai_locations,
         industries=industries,
         tiles=tiles,
-        trains=trains,
+        trains=[],   # attached later by the caller (global cross-region placement)
         bounds=bounds
     )
 

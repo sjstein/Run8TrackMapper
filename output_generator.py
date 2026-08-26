@@ -125,6 +125,7 @@ def rail_vehicle_to_dict(v: RailVehicleData) -> dict:
         "body": v.body,          # polyline (>=2 pts) from truck A to truck B
         "position_key": v.position_key,
         "resolved": v.resolved,
+        "car_type": v.car_type,  # INDUSTRY_CONFIG_CAR_TYPE, for per-type body colour
     }
 
 
@@ -200,7 +201,8 @@ def generate_manifest(config: VisualizationConfig,
         "areas": [area_to_dict(a) for a in config.areas],
         "color_presets": dict(getattr(config, "color_presets", {}) or {}),
         "label_types": [{"id": t.id, "name": t.name, "color": t.color}
-                        for t in getattr(config, "label_types", []) or []]
+                        for t in getattr(config, "label_types", []) or []],
+        "car_type_colors": dict(getattr(config, "car_type_colors", {}) or {}),
     }
 
     # Add tile parameters if using tile-based coordinates
@@ -371,7 +373,7 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
         else:
             print(f"  Warning: railvehicle_db not found: {config.railvehicle_db}")
 
-    # Extract all regions
+    # Extract all regions (trains are placed afterwards, globally across regions)
     regions_data = []
     for region_config in config.regions:
         # tile_dir parameter overrides per-region config if specified
@@ -381,13 +383,27 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
             tile_corrections,
             default_tile_dir=str(config.terrain_tile_dir),
             tile_dir=tile_dir,  # None lets each region use its configured terrain_tile_dir
-            tile_based_config=tile_based_config,
-            world_trains=world_trains,
-            rv_lengths=rv_lengths
+            tile_based_config=tile_based_config
         )
         regions_data.append(region_data)
 
-        # Write region JSON file
+    # Place trains once against all regions' sections (a car can straddle a region
+    # boundary, so each truck must resolve against its own region's geometry).
+    if world_trains:
+        from region_extractor import build_section_placer, extract_trains
+        placer = build_section_placer(
+            (rc.route_prefix, rd.sections) for rc, rd in zip(config.regions, regions_data))
+        trains_by_prefix = extract_trains(world_trains, placer, rv_lengths=rv_lengths)
+        for rc, rd in zip(config.regions, regions_data):
+            rd.trains = trains_by_prefix.get(rc.route_prefix, [])
+            if rd.trains:
+                n_veh = sum(len(t.vehicles) for t in rd.trains)
+                n_res = sum(1 for t in rd.trains for v in t.vehicles if v.resolved)
+                print(f"  Placed {n_veh} rail vehicle(s) in {len(rd.trains)} train(s) "
+                      f"on {rc.id} (prefix {rc.route_prefix}, {n_res} resolved)")
+
+    # Write region JSON files
+    for region_config, region_data in zip(config.regions, regions_data):
         region_file = data_dir / f"{region_config.id}.json"
         print(f"\nWriting region file: {region_file}")
 
