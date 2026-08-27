@@ -1050,7 +1050,9 @@ def generate_javascript() -> str:
     }
 
     function drawTrainOutline(carBodies, layerGroup) {
-        if (!carBodies.length) return;
+        // A single-vehicle train has no consist to connect, so draw no spine
+        // (otherwise the end->centre->end line shows as a stub through the one car).
+        if (carBodies.length < 2) return;
         const centers = carBodies.map(_midpoint);
         const order = _chainOrder(centers);
         const bodies = order.map(i => carBodies[i]);
