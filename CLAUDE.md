@@ -68,8 +68,11 @@ between its two end points on the chain (a rail car is rigid, so it must not ben
 car spanning a switch/curve a straight rectangle instead of wrapping onto the diverging leg;
 consecutive cars still abut because their chord endpoints share a chain point. The consist's
 occupied sections are chained into one continuous polyline via endpoint adjacency
-(`_build_consist_polyline`; `_concat_section_polyline` snaps each detailed path's endpoints to the
-section's canonical node positions so seams meet cleanly), split into contiguous **runs** at any
+(`_build_consist_polyline`; for placement, `_concat_section_polyline` uses the straight chord
+between a **switch** section's canonical endpoints — its detailed path bows ~1 m toward the
+diverging lead, which would tilt a through-route car onto the diverging leg — and snaps a
+non-switch detailed path's endpoints to its node positions so seams meet cleanly; the *map* still
+draws every path), split into contiguous **runs** at any
 degenerate/missing/non-adjacent joint (`_split_runs`) so a single bad section can't stretch the
 whole train; each run is anchored at the **median** of its cars' true positions (midpoint anchor).
 Cars on an unusable section fall back to per-truck placement

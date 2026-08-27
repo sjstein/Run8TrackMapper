@@ -1593,6 +1593,16 @@ def _concat_section_polyline(sd: SectionData) -> List[Tuple[float, float]]:
         return ((_d2(a[0], b[0]) < tol2 and _d2(a[-1], b[-1]) < tol2) or
                 (_d2(a[0], b[-1]) < tol2 and _d2(a[-1], b[0]) < tol2))
 
+    if getattr(sd, 'is_switch', False):
+        # A switch section's detailed path bows ~1 m toward the diverging lead (the
+        # points/closure curve). A rail vehicle on the *through* route rides the
+        # straight stock rail, so place it along the straight chord between the
+        # section's canonical endpoints instead of the bowed lead - otherwise cars
+        # sitting on a switch tilt onto the diverging leg. The coarse path is that
+        # chord (endpoints = the node positions the neighbours connect to).
+        coarse = min(paths, key=len)
+        return [tuple(coarse[0]), tuple(coarse[-1])]
+
     # Base = the most detailed path (most vertices); on a tie, the longer arc.
     base = list(max(paths, key=lambda p: (len(p), _cumulative_lengths(p)[-1])))
 
