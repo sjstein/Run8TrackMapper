@@ -93,6 +93,9 @@ class AuthoringState:
                     paths=[[tuple(pt) for pt in p] for p in s.get('paths', [])],
                     length_ft=s.get('length_ft', 0.0),
                     length_m=s.get('length_m', 0.0),
+                    is_switch=s.get('is_switch', False),  # needed: placement picks the
+                    # straight through-chord for switch sections (else cars on a switch
+                    # ride the bowed diverging lead)
                 ))
         self._sections_cache[region_id] = secs
         return secs
