@@ -205,6 +205,8 @@ def generate_manifest(config: VisualizationConfig,
                         for t in getattr(config, "label_types", []) or []],
         "car_type_colors": dict(getattr(config, "car_type_colors", {}) or {}),
         "loco_company_colors": dict(getattr(config, "loco_company_colors", {}) or {}),
+        "initial_map_opacity": getattr(config, "initial_map_opacity", 0.2),
+        "initial_track_opacity": getattr(config, "initial_track_opacity", 0.8),
     }
 
     # Add tile parameters if using tile-based coordinates

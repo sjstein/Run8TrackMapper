@@ -152,6 +152,8 @@ class VisualizationConfig:
     colors: ColorConfig = field(default_factory=ColorConfig)
     tile_based: Optional[TileBasedConfig] = None
     initial_center: Optional[Tuple[float, float]] = None  # (lat, lon) for initial map center
+    initial_map_opacity: float = 0.2   # [visualization] initial_map_opacity: base-map slider (fraction)
+    initial_track_opacity: float = 0.8  # [visualization] initial_track_opacity: track slider (fraction)
     world_save: Optional[Path] = None  # optional Run8 world save (.xml) to plot trains from
     railvehicle_db: Optional[Path] = None  # optional SQLite DB of rail-vehicle lengths
     train_car_width: float = 7.0    # [trains] car_width: RV body min line width (px floor)
@@ -288,6 +290,8 @@ def parse_config(config_path: str) -> VisualizationConfig:
 
     errors = []
     areas_file_str = ''  # optional; comma-separated external areas file(s)
+    initial_map_opacity = 0.2   # [visualization] initial_map_opacity (base map)
+    initial_track_opacity = 0.8  # [visualization] initial_track_opacity (track vectors)
 
     # Parse [visualization] section
     if 'visualization' not in parser:
@@ -328,6 +332,23 @@ def parse_config(config_path: str) -> VisualizationConfig:
                 initial_center = (float(parts[0].strip()), float(parts[1].strip()))
             except (ValueError, IndexError):
                 errors.append(f"[visualization] initial_center must be in format 'lat,lon' (e.g., '34.9,-118.0')")
+
+        # Optional initial opacity slider values. Accept a percent (0-100) or a
+        # fraction (0-1); stored as a fraction. Defaults: map 0.2, track 0.8.
+        def _opacity(key, default):
+            s = viz.get(key, '').split(';', 1)[0].split('#', 1)[0].strip()
+            if not s:
+                return default
+            try:
+                v = float(s)
+            except ValueError:
+                errors.append(f"[visualization] {key} must be a number (0-100)")
+                return default
+            if v > 1:
+                v /= 100.0
+            return max(0.0, min(1.0, v))
+        initial_map_opacity = _opacity('initial_map_opacity', 0.2)
+        initial_track_opacity = _opacity('initial_track_opacity', 0.8)
 
     # Parse [output] section
     if 'output' not in parser:
@@ -555,6 +576,8 @@ def parse_config(config_path: str) -> VisualizationConfig:
         colors=colors,
         tile_based=tile_based,
         initial_center=initial_center,
+        initial_map_opacity=initial_map_opacity,
+        initial_track_opacity=initial_track_opacity,
         world_save=(config_file.parent / world_save_str) if world_save_str else None,
         railvehicle_db=(config_file.parent / railvehicle_db_str) if railvehicle_db_str else None,
         train_car_width=train_car_width,

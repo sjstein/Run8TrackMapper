@@ -264,8 +264,36 @@ def generate_javascript() -> str:
                 .basemap-item label {
                     cursor: pointer;
                 }
+                #control-title {
+                    display: flex;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 10px;
+                    cursor: pointer;
+                    user-select: none;
+                }
+                #control-title.collapsed {
+                    margin-bottom: 0;
+                    padding-bottom: 0;
+                    border-bottom: none;
+                }
+                #control-toggle {
+                    flex: 0 0 auto;
+                    width: 22px;
+                    height: 22px;
+                    line-height: 1;
+                    padding: 0;
+                    font-size: 15px;
+                    border: none;
+                    border-radius: 4px;
+                    background: #eee;
+                    color: #333;
+                    cursor: pointer;
+                }
+                #control-toggle:hover { background: #ddd; }
             </style>
-            <h3>${MapApp.manifest.name}</h3>
+            <h3 id="control-title"><span>${MapApp.manifest.name}</span><button id="control-toggle" title="Show/hide controls" aria-label="Show/hide controls">&minus;</button></h3>
+            <div id="control-body">
             <h4>Base Map</h4>
             <div id="basemap-list">
                 <div class="basemap-item">
@@ -300,8 +328,27 @@ def generate_javascript() -> str:
                 <span id="gradient-row" style="display:none"><strong>Avg Grade:</strong> <span id="selection-gradient"></span><br></span>
                 <button onclick="MapApp.clearSelection()" style="margin-top:5px;padding:4px 8px;font-size:12px;">Clear Selection</button>
             </div>
+            </div>
         `;
         document.body.appendChild(panel);
+
+        // Collapse/expand the control panel, leaving just the title bar. Remembered
+        // per-viewer in localStorage (best-effort; ignore storage errors).
+        (function () {
+            const title = document.getElementById('control-title');
+            const body = document.getElementById('control-body');
+            const btn = document.getElementById('control-toggle');
+            function apply(collapsed) {
+                body.style.display = collapsed ? 'none' : '';
+                title.classList.toggle('collapsed', collapsed);
+                btn.innerHTML = collapsed ? '&plus;' : '&minus;';
+                try { localStorage.setItem('run8_panel_collapsed', collapsed ? '1' : '0'); } catch (e) {}
+            }
+            let collapsed = false;
+            try { collapsed = localStorage.getItem('run8_panel_collapsed') === '1'; } catch (e) {}
+            apply(collapsed);
+            title.addEventListener('click', function () { collapsed = !collapsed; apply(collapsed); });
+        })();
 
         // Setup base map radio buttons
         document.querySelectorAll('input[name="basemap"]').forEach(radio => {
@@ -501,6 +548,9 @@ def generate_javascript() -> str:
     function createOpacityControl() {
         const control = document.createElement('div');
         control.id = 'opacity-control';
+        // Initial base-map opacity from the config ([visualization] initial_map_opacity).
+        const mapOpacity = (MapApp.manifest && MapApp.manifest.initial_map_opacity != null)
+            ? MapApp.manifest.initial_map_opacity : 0.2;
         control.innerHTML = `
             <style>
                 #opacity-control {
@@ -518,9 +568,14 @@ def generate_javascript() -> str:
                     width: 100px;
                 }
             </style>
-            <label>Map Opacity: <input type="range" id="opacity-slider" min="0" max="100" value="100"></label>
+            <label>Map Opacity: <input type="range" id="opacity-slider" min="0" max="100" value="${Math.round(mapOpacity * 100)}"></label>
         `;
         document.body.appendChild(control);
+
+        // Apply the configured initial opacity to the current base layer.
+        if (MapApp.baseLayers[MapApp.currentBaseLayer]) {
+            MapApp.baseLayers[MapApp.currentBaseLayer].setOpacity(mapOpacity);
+        }
 
         document.getElementById('opacity-slider').addEventListener('input', (e) => {
             const opacity = e.target.value / 100;
@@ -547,8 +602,18 @@ def generate_javascript() -> str:
                     z-index: 1000;
                     font-size: 12px;
                     font-family: monospace;
+                    text-align: right;
                 }
+                #train-count {
+                    display: none;
+                    margin-bottom: 3px;
+                    padding-bottom: 3px;
+                    border-bottom: 1px solid #eee;
+                    color: #333;
+                }
+                #mouse-coords { display: block; }
             </style>
+            <span id="train-count"></span>
             <span id="mouse-coords">---, ---</span>
         `;
         document.body.appendChild(display);
@@ -1011,6 +1076,26 @@ def generate_javascript() -> str:
             if (show) region.layers.trainLabels.addTo(MapApp.map);
             else MapApp.map.removeLayer(region.layers.trainLabels);
         });
+        updateTrainCount();
+    }
+
+    // Lower-right status (above the coordinates): total trains + rail vehicles from
+    // the loaded regions' world-save data. Shown only while the Trains overlay is on.
+    function updateTrainCount() {
+        const el = document.getElementById('train-count');
+        if (!el) return;
+        if (!MapApp.overlayStates.trains) { el.style.display = 'none'; return; }
+        const ids = new Set();
+        let rvs = 0;
+        MapApp.loadedRegions.forEach(region => {
+            if (!region.visible || !region.data || !region.data.trains) return;
+            for (const t of region.data.trains) {
+                ids.add(t.train_id);
+                rvs += (t.vehicles ? t.vehicles.length : 0);
+            }
+        });
+        el.textContent = `Trains: ${ids.size}  ·  Rail vehicles: ${rvs}`;
+        el.style.display = 'block';
     }
 
     // ---- Train outline: a thin spine connecting all cars in a train ----
@@ -1134,6 +1219,7 @@ def generate_javascript() -> str:
         }
 
         region.visible = false;
+        updateTrainCount();
     }
 
     function showRegion(regionId) {
@@ -3022,13 +3108,18 @@ ALIGN_JS = r'''
     function addTrackOpacitySlider(){
         const ctl = document.getElementById('opacity-control');
         if (!ctl) return;
+        // Initial track opacity from the config ([visualization] initial_track_opacity).
+        if (MapApp.manifest && MapApp.manifest.initial_track_opacity != null)
+            MapApp.trackOpacity = MapApp.manifest.initial_track_opacity;
         const div = document.createElement('div');
         div.style.marginTop = '4px';
-        div.innerHTML = '<label>Track Opacity: <input type="range" id="track-opacity-slider" min="0" max="100" value="80"></label>';
+        div.innerHTML = '<label>Track Opacity: <input type="range" id="track-opacity-slider" min="0" max="100" value="'
+            + Math.round(MapApp.trackOpacity * 100) + '"></label>';
         ctl.appendChild(div);
         document.getElementById('track-opacity-slider').addEventListener('input', (e)=>{
             MapApp.trackOpacity = e.target.value/100; applyTrackOpacity();
         });
+        applyTrackOpacity();
     }
     function alignInit(){
         const a = MapApp.manifest.align;
@@ -3675,6 +3766,52 @@ ALIGN_JS = r'''
             lbl=document.createElement('button'); lbl.textContent='Add Label: OFF'; lbl.style.cssText=bs+';left:170px';
             document.body.appendChild(lbl);
         }
+        // Help button + overlay: a quick reference of the map's mouse/key commands.
+        const help=document.createElement('button'); help.textContent='Help';
+        help.style.cssText=bs+';left:'+(authoring?288:170)+'px';
+        document.body.appendChild(help);
+        let helpEl=null;
+        function kbd(s){ return '<kbd style="background:#eee;border:1px solid #ccc;border-radius:3px;padding:0 5px;font:12px monospace">'+s+'</kbd>'; }
+        function hrow(t,d){ return '<dt style="font-weight:600;margin-top:10px">'+t+'</dt>'
+            +'<dd style="margin:2px 0 0 0;color:#444">'+d+'</dd>'; }
+        function toggleHelp(show){
+            if(!helpEl){
+                helpEl=document.createElement('div');
+                helpEl.style.cssText='position:absolute;inset:0;z-index:3000;display:none;background:rgba(0,0,0,.35)';
+                const card=document.createElement('div');
+                card.style.cssText='position:absolute;top:50px;left:52px;max-width:430px;max-height:80vh;'
+                    +'overflow:auto;background:#fff;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.35);'
+                    +'padding:16px 20px;font:13px/1.5 Arial';
+                card.innerHTML=
+                    '<div style="display:flex;justify-content:space-between;align-items:center;'
+                    +'border-bottom:1px solid #ddd;padding-bottom:8px;margin-bottom:6px">'
+                    +'<h3 style="margin:0;font:600 15px Arial">Map controls &amp; tips</h3>'
+                    +'<button id="help-close" title="Close" style="border:none;background:#eee;border-radius:4px;'
+                    +'width:26px;height:26px;cursor:pointer;font-size:16px">&times;</button></div>'
+                    +'<dl style="margin:0">'
+                    +hrow('Pan / zoom','Drag to pan &middot; scroll wheel to zoom.')
+                    +hrow(kbd('Shift')+' + click a track section','Add or remove it from the selection; the panel totals length and average grade.')
+                    +hrow(kbd('Ctrl')+' + click a track section','Show a detailed info popup (length, grade, type).')
+                    +hrow('Right-click the map','Open that exact point in Google Maps (new tab) to cross-check imagery.')
+                    +hrow('Enable a region (checkbox)','Loads the region on demand and fits the map to it.')
+                    +hrow('Search button','Find a track section, signal, industry, AI location, or train / rail vehicle.')
+                    +hrow('Align mode button','Turn on, then drag the track to slide it onto the real map; release to commit the alignment.')
+                    +(authoring ?
+                        hrow('Add Label button','Turn on, click to place a label, then click a second point to set the text angle ('+kbd('Esc')+' = horizontal).')
+                       +hrow('Click a label','Edit its text, colour, font, rotation or box — or delete it.')
+                       +hrow('Drag a label','Move it. Hold the mouse button on a label and scroll the wheel to rotate it ('+kbd('Shift')+' = 1&deg; steps).')
+                      : '')
+                    +hrow('Opacity sliders (bottom-left)','Independent Map opacity (the base map) and Track opacity.')
+                    +'</dl>';
+                helpEl.appendChild(card);
+                helpEl.addEventListener('click', e=>{ if(e.target===helpEl) toggleHelp(false); });
+                card.querySelector('#help-close').onclick=()=> toggleHelp(false);
+                document.addEventListener('keydown', e=>{ if(e.key==='Escape' && helpEl.style.display!=='none') toggleHelp(false); });
+                document.body.appendChild(helpEl);
+            }
+            helpEl.style.display = show ? 'block' : 'none';
+        }
+        help.onclick=()=> toggleHelp(helpEl===null || helpEl.style.display==='none');
         const panes = MapApp.map.getPanes();
         function setT(t){ panes.overlayPane.style.transform=t;
             if(panes.markerPane) panes.markerPane.style.transform=t;
