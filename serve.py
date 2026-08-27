@@ -110,6 +110,9 @@ class AuthoringState:
             return self._trains_cache['payload']
 
         parsed = parse_world_save(str(self.world_save))
+        # Whole-save totals (region-independent) for the viewer status line.
+        totals = {'trains': len(parsed),
+                  'vehicles': sum(len(tr.vehicles) for tr in parsed)}
         # A car can straddle a region boundary, so build ONE placer over every
         # region whose prefix appears on ANY truck (A or B) - not just truck A -
         # then place all trains against it at once.
@@ -131,7 +134,7 @@ class AuthoringState:
             if region_id:
                 trains_by_region[region_id] = [train_to_dict(t) for t in trains]
 
-        payload = {'version': mtime, 'trains': trains_by_region}
+        payload = {'version': mtime, 'trains': trains_by_region, 'totals': totals}
         self._trains_cache = {'mtime': mtime, 'payload': payload}
         return payload
 

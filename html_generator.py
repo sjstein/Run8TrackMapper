@@ -1079,22 +1079,16 @@ def generate_javascript() -> str:
         updateTrainCount();
     }
 
-    // Lower-right status (above the coordinates): total trains + rail vehicles from
-    // the loaded regions' world-save data. Shown only while the Trains overlay is on.
+    // Lower-right status (above the coordinates): whole-world-save totals, which
+    // are region-independent (they do NOT depend on which regions are enabled).
+    // Live totals from serve.py override the baked manifest totals when present.
+    // Shown only while the Trains overlay is on and the save has trains.
     function updateTrainCount() {
         const el = document.getElementById('train-count');
         if (!el) return;
-        if (!MapApp.overlayStates.trains) { el.style.display = 'none'; return; }
-        const ids = new Set();
-        let rvs = 0;
-        MapApp.loadedRegions.forEach(region => {
-            if (!region.visible || !region.data || !region.data.trains) return;
-            for (const t of region.data.trains) {
-                ids.add(t.train_id);
-                rvs += (t.vehicles ? t.vehicles.length : 0);
-            }
-        });
-        el.textContent = `Trains: ${ids.size}  ·  Rail vehicles: ${rvs}`;
+        const wt = MapApp._liveTotals || (MapApp.manifest && MapApp.manifest.world_totals);
+        if (!MapApp.overlayStates.trains || !wt) { el.style.display = 'none'; return; }
+        el.textContent = `Trains: ${wt.trains}  ·  Rail vehicles: ${wt.vehicles}`;
         el.style.display = 'block';
     }
 
@@ -1219,7 +1213,6 @@ def generate_javascript() -> str:
         }
 
         region.visible = false;
-        updateTrainCount();
     }
 
     function showRegion(regionId) {
@@ -3413,6 +3406,9 @@ ALIGN_JS = r'''
     }
     function applyLiveTrains(j){
         if (!j || !j.trains) return;
+        // Whole-save totals are region-independent; update the status line even if
+        // the render below early-returns (no regions loaded yet / unchanged version).
+        if (j.totals) { MapApp._liveTotals = j.totals; updateTrainCount(); }
         // Regions load asynchronously (and can be toggled on later); re-apply when
         // either the save changed OR the set of loaded regions changed, so the
         // initial poll that arrives before regions finish loading is not lost.
