@@ -1,0 +1,15 @@
+Discussion topics on where to take the track mapper project.
+
+Definitions:
+Run8 server, r8server : An instance of the Run8 simulator running in server mode. In this mode, the simulator supports multiple users and keeps track of all of the trains and rail vehicles (RVs).
+Rail Vehicle, RV, rvs : A rail vehicle represents a rail car, or locomotive within the Run8 simulation.
+Train : A train represents a linked list of rvs.
+Tag, Destination tag : A tag is a human readable moniker associated with either an rv or train. If on a train, the train tag is typically the "destination tag" (as named in the world save) of the lead locomotive.
+World Save : An xml file which either captures the entire state of the world (if created on a r8server), or a subset of the entire world (near the player location) if created by a client. Big benefit to grabbing the entire world save is that we get the state of all RVs on the server. This file is routinely updated as a backup (and can be used to recreate the world state if the r8server crashes). Typically refreshed once every 2 minutes.
+DispatcherComms.dll : a .net dll which can be used to access certain dispatcher functions on a remote r8server  
+
+Goal #1: Host web server(s) which allows users to view the maps and location of trains as they exist on a particular r8server. We should be able to support multiple server instances - with the URL determining which r8server the user will monitor. 
+Status: This appears to be working when running on a local machine - the maps are rendering, the world save is loaded routinely, and the trains are plotted. This has yet to be tested remotely. We currently have no solution as to how to regularly download world saves from a remote server.
+To do: Investigate how to transfer world saves to the machine hosting the track mapper web server. Ideally this would be as lightweight as possible for the server operator. 
+
+Goal #2 (possibly): Live tracking of trains via DispatcherComms.dll - giving a more real-time view of the status of moving trains.

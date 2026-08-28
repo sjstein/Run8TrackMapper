@@ -156,7 +156,8 @@ def region_to_dict(region: RegionData) -> dict:
 def generate_manifest(config: VisualizationConfig,
                       regions_data: List[RegionData],
                       tile_corrections: Dict[Tuple[int, int], Dict[str, float]],
-                      tile_based: bool = False) -> dict:
+                      tile_based: bool = False,
+                      world_totals: dict = None) -> dict:
     """Generate manifest.json content"""
     regions_manifest = []
 
@@ -205,6 +206,10 @@ def generate_manifest(config: VisualizationConfig,
                         for t in getattr(config, "label_types", []) or []],
         "car_type_colors": dict(getattr(config, "car_type_colors", {}) or {}),
         "loco_company_colors": dict(getattr(config, "loco_company_colors", {}) or {}),
+        "initial_map_opacity": getattr(config, "initial_map_opacity", 0.2),
+        "initial_track_opacity": getattr(config, "initial_track_opacity", 0.8),
+        # Whole-world-save counts (region-independent), for the Trains status line.
+        "world_totals": world_totals,
     }
 
     # Add tile parameters if using tile-based coordinates
@@ -357,12 +362,15 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
 
     # Load an optional world save (CLI --world overrides config world_save).
     world_trains = None
+    world_totals = None
     world_save_path = world_save or (str(config.world_save) if config.world_save else None)
     if world_save_path:
         from world_parser import parse_world_save
         print(f"\nLoading world save: {world_save_path}")
         world_trains = parse_world_save(world_save_path)
         n_veh = sum(len(t.vehicles) for t in world_trains)
+        # Whole-save totals for the viewer status line (region-independent).
+        world_totals = {"trains": len(world_trains), "vehicles": n_veh}
         print(f"  Parsed {len(world_trains)} train(s), {n_veh} rail vehicle(s)")
 
     # Load the optional rail-vehicle length DB (draws true car length over trucks).
@@ -425,7 +433,8 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
     manifest_file = output_dir / "manifest.json"
     print(f"\nWriting manifest: {manifest_file}")
 
-    manifest = generate_manifest(config, regions_data, tile_corrections, tile_based or align)
+    manifest = generate_manifest(config, regions_data, tile_corrections, tile_based or align,
+                                 world_totals=world_totals)
     if align:
         seed = compute_align_seed(regions_data, tile_based_config, str(config.terrain_tile_dir))
         if seed:

@@ -195,6 +195,9 @@ tile_corrections = tile_corrections.csv
 industry_db = C:\Run8Studios\...\Regions\SouthernCA\Config.ind
 # Optional: initial map center as lat,lon
 initial_center = 34.9,-118.0
+# Optional: initial opacity slider values (percent 0-100 or 0-1 fraction; defaults map 20, track 80)
+initial_map_opacity = 20
+initial_track_opacity = 80
 
 [region.mojave]
 display_name = Mojave Subdivision
