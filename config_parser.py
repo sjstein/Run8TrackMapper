@@ -81,6 +81,9 @@ class ColorConfig:
     signal_border_stacked: str = "#87CEEB"  # Multiple head signal border (light blue)
     background: str = "#333333"         # Background color (tile-based mode)
     area_label: str = "#ffd11a"         # Legacy generic label color (kept for compatibility)
+    train: str = "#8B0000"              # Rail-vehicle body (cars) from a world save (dark red)
+    train_loco: str = "#B22222"         # Locomotive body (firebrick, to head-mark a consist)
+    train_outline: str = "#000000"      # Thin spine joining a train's cars
 
 
 @dataclass
@@ -149,10 +152,26 @@ class VisualizationConfig:
     colors: ColorConfig = field(default_factory=ColorConfig)
     tile_based: Optional[TileBasedConfig] = None
     initial_center: Optional[Tuple[float, float]] = None  # (lat, lon) for initial map center
+    world_save: Optional[Path] = None  # optional Run8 world save (.xml) to plot trains from
+    railvehicle_db: Optional[Path] = None  # optional SQLite DB of rail-vehicle lengths
+    train_car_width: float = 7.0    # [trains] car_width: RV body min line width (px floor)
+    train_spine_width: float = 1.5  # [trains] spine_width: train connecting-line width (px)
+    train_car_width_m: float = 3.5  # [trains] car_width_m: real RV width (m); RVs widen with
+                                    # zoom to this, never below car_width, so they stay wider
+                                    # than the track at every zoom. 0 = fixed px (car_width).
+    train_label_scale_m: float = 30.0  # [trains] label_scale_m: show per-RV destination tags
+                                       # when the scale bar reads this many m or tighter.
+    train_deoverlap: bool = True    # [trains] deoverlap: lay each consist's cars end-to-end
+                                    # (front->back XML order, DB length, midpoint anchor) so
+                                    # coupled cars don't overlap. False = raw per-truck placement.
     areas: List[AreaLabel] = field(default_factory=list)  # user-defined area/place labels
     color_presets: Dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_COLOR_PRESETS))  # name -> hex label-color palette
     label_types: List[LabelType] = field(default_factory=list)  # from [label_types], ordered
+    car_type_colors: Dict[str, str] = field(
+        default_factory=dict)  # INDUSTRY_CONFIG_CAR_TYPE (lowercased) -> hex, from [car_type_colors]
+    loco_company_colors: Dict[str, str] = field(
+        default_factory=dict)  # loco reporting mark / INITIAL (lowercased) -> hex, from [loco_company_colors]
 
     @property
     def industry_db(self) -> Path:
@@ -291,6 +310,15 @@ def parse_config(config_path: str) -> VisualizationConfig:
         if not region_dir_str:
             errors.append("[visualization] region_dir is required")
 
+        # Optional world_save: a Run8 world save (.xml) to plot trains from.
+        # A --world CLI switch overrides this; resolved relative to the config dir.
+        world_save_str = viz.get('world_save', '').strip()
+
+        # Optional railvehicle_db: SQLite DB (db_railvehicles.db) mapping
+        # rvXMLfilename -> RV_LENGTH, used to draw true vehicle length over the
+        # trucks. Resolved relative to the config dir.
+        railvehicle_db_str = viz.get('railvehicle_db', '').strip()
+
         # Optional initial_center (format: "lat,lon" e.g., "34.9,-118.0")
         initial_center_str = viz.get('initial_center', '').strip()
         initial_center = None
@@ -396,19 +424,81 @@ def parse_config(config_path: str) -> VisualizationConfig:
     colors = ColorConfig()
     if 'colors' in parser:
         color_section = parser['colors']
+
+        # Strip an inline ';' comment (the default ConfigParser keeps it in the
+        # value, which would bake a bad CSS colour). '#' is the hex prefix, so it
+        # is NOT a comment char here.
+        def _c(key, default):
+            return color_section.get(key, default).split(';', 1)[0].strip()
+
         colors = ColorConfig(
-            track=color_section.get('track', colors.track).strip(),
-            track_selected=color_section.get('track_selected', colors.track_selected).strip(),
-            track_hover=color_section.get('track_hover', colors.track_hover).strip(),
-            switch=color_section.get('switch', colors.switch).strip(),
-            industry_track=color_section.get('industry_track', colors.industry_track).strip(),
-            signal_absolute=color_section.get('signal_absolute', colors.signal_absolute).strip(),
-            signal_intermediate=color_section.get('signal_intermediate', colors.signal_intermediate).strip(),
-            signal_border_single=color_section.get('signal_border_single', colors.signal_border_single).strip(),
-            signal_border_stacked=color_section.get('signal_border_stacked', colors.signal_border_stacked).strip(),
-            background=color_section.get('background', colors.background).strip(),
-            area_label=color_section.get('area_label', colors.area_label).strip(),
+            track=_c('track', colors.track),
+            track_selected=_c('track_selected', colors.track_selected),
+            track_hover=_c('track_hover', colors.track_hover),
+            switch=_c('switch', colors.switch),
+            industry_track=_c('industry_track', colors.industry_track),
+            signal_absolute=_c('signal_absolute', colors.signal_absolute),
+            signal_intermediate=_c('signal_intermediate', colors.signal_intermediate),
+            signal_border_single=_c('signal_border_single', colors.signal_border_single),
+            signal_border_stacked=_c('signal_border_stacked', colors.signal_border_stacked),
+            background=_c('background', colors.background),
+            area_label=_c('area_label', colors.area_label),
+            train=_c('train', colors.train),
+            train_loco=_c('train_loco', colors.train_loco),
+            train_outline=_c('train_outline', colors.train_outline),
         )
+
+    # Parse [trains] section (optional): rail-vehicle rendering line widths.
+    # Strip inline ';'/'#' comments ourselves: the default ConfigParser keeps them
+    # in the value, which would break float().
+    def _cfg_float(section, key, default):
+        raw = section.get(key)
+        if raw is None:
+            return default
+        s = raw.split(';', 1)[0].split('#', 1)[0].strip()
+        if not s:
+            return default
+        try:
+            return float(s)
+        except ValueError:
+            errors.append(f"[trains] {key} must be a number (got {raw!r})")
+            return default
+
+    train_car_width, train_spine_width, train_car_width_m = 7.0, 1.5, 3.5
+    train_label_scale_m = 30.0
+    train_deoverlap = True
+    if 'trains' in parser:
+        ts = parser['trains']
+        train_car_width = _cfg_float(ts, 'car_width', train_car_width)
+        train_spine_width = _cfg_float(ts, 'spine_width', train_spine_width)
+        train_car_width_m = _cfg_float(ts, 'car_width_m', train_car_width_m)
+        train_label_scale_m = _cfg_float(ts, 'label_scale_m', train_label_scale_m)
+        _do = ts.get('deoverlap', '').split(';', 1)[0].split('#', 1)[0].strip().lower()
+        if _do:
+            train_deoverlap = _do in ('1', 'true', 'yes', 'on')
+
+    # Parse [car_type_colors] (optional): INDUSTRY_CONFIG_CAR_TYPE -> hex colour for
+    # the RV body. configparser lower-cases keys, so match car types case-insensitively.
+    car_type_colors = {}
+    if 'car_type_colors' in parser:
+        for ctype, hexcolor in parser['car_type_colors'].items():
+            c = hexcolor.split(';', 1)[0].strip()   # strip ';' inline comment ('#' is the hex prefix)
+            if c:
+                if not c.startswith('#'):
+                    c = '#' + c
+                car_type_colors[ctype.strip().lower()] = c
+
+    # Parse [loco_company_colors] (optional): loco reporting mark (INITIAL) -> hex
+    # colour, for colouring locomotives by owning railroad. configparser lower-cases
+    # keys, so match reporting marks case-insensitively (viewer lowercases too).
+    loco_company_colors = {}
+    if 'loco_company_colors' in parser:
+        for mark, hexcolor in parser['loco_company_colors'].items():
+            c = hexcolor.split(';', 1)[0].strip()   # strip ';' inline comment ('#' is the hex prefix)
+            if c:
+                if not c.startswith('#'):
+                    c = '#' + c
+                loco_company_colors[mark.strip().lower()] = c
 
     # Parse [label_types] section (optional): `id = Display Name, #color` per line,
     # in order. The id is the value stored in a label's `type =`; the display name
@@ -465,6 +555,15 @@ def parse_config(config_path: str) -> VisualizationConfig:
         colors=colors,
         tile_based=tile_based,
         initial_center=initial_center,
+        world_save=(config_file.parent / world_save_str) if world_save_str else None,
+        railvehicle_db=(config_file.parent / railvehicle_db_str) if railvehicle_db_str else None,
+        train_car_width=train_car_width,
+        train_spine_width=train_spine_width,
+        train_car_width_m=train_car_width_m,
+        train_label_scale_m=train_label_scale_m,
+        train_deoverlap=train_deoverlap,
+        car_type_colors=car_type_colors,
+        loco_company_colors=loco_company_colors,
         areas=areas,
         color_presets=color_presets,
         label_types=label_types

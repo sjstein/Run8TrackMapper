@@ -32,6 +32,151 @@ python output_generator.py <config.ini>
 
 > **Why manual alignment is the default:** the Run8 route is a *topological* model — section lengths are compressed/stretched and a few tiles carry genuine route-designer defects — so no automatic transform georeferences the whole network. The default viewer instead renders the internally-consistent (contiguous) tile grid on a real map and lets you slide it into place per area of interest. See `openrailways_goals.txt` for background.
 
+#### World saves: plotting trains & rail vehicles
+A Run8 world save (`.xml`, e.g. `small_world.xml`) can be plotted on the track:
+
+```bash
+python output_generator.py <config.ini> --world <world_save.xml>
+```
+
+`--world FILE` overrides an optional `[visualization] world_save = FILE` in the config
+(resolved relative to the config dir). Each train lives under
+`//trainList/TrainLoader/unitLoaderList/RailVehicleStateClass`; every vehicle reports two
+*trucks* (paired child order = A, B) with `currentTrackSectionIndex`, `startNodeIndex`,
+`distanceTravelledInMeters`, `currentRoutePrefix`, plus `unitNumber` / `destinationTag` /
+`unitType`. Parsing is in **`world_parser.py`** (tolerant: missing values → 0/false/0.0).
+
+**Placement** (`region_extractor.extract_trains` / `_SectionPlacer`): a truck is placed by
+walking `distanceTravelledInMeters` **metres** along that section's already-extracted
+`SectionData.paths` polyline, oriented by `startNodeIndex` (0 → from `polyline[0]`, else from
+the far end) and clamped to the section length. Because both the Run8 distance and the
+tile-world coords are in metres, no fraction/denominator is needed. Each **car is drawn as a
+body polyline spanning its two trucks** (so it follows curves); a vehicle's ordering key is the
+yard-direction-most (minimum) truck distance — geometry only (the YARDS logical-yard-track
+`SEQ` layer in `world-import-rail-vehicle-ordering.md` is intentionally **not** reproduced, as
+it needs the `.ind` survey this tool does not consume).
+
+**Within-consist de-overlap** (`[trains] deoverlap`, default **on**; `extract_trains(...,
+deoverlap=True)`). Raw per-truck placement draws cars that overlap or streak when a truck lands
+on a broken section or the two trucks straddle a curve. Because a coupled consist is a *rigid*
+string, `_layout_consist` instead lays each consist's cars **end to end along its section
+chain**: cars in world-save (front→back) order — trusted as the physical coupling order — each
+at its **full coupled footprint** (`RV_LENGTH`) so footprints abut like a real train and the laid
+length matches the true track span (near-zero drift), with each body drawn **inset by one coupler
+per end** so the couplers reappear as the visible inter-car gap. Each body is a **straight chord**
+between its two end points on the chain (a rail car is rigid, so it must not bend), which keeps a
+car spanning a switch/curve a straight rectangle instead of wrapping onto the diverging leg;
+consecutive cars still abut because their chord endpoints share a chain point. The consist's
+occupied sections are chained into one continuous polyline via endpoint adjacency
+(`_build_consist_polyline`; for placement, `_concat_section_polyline` uses the straight chord
+between a **switch** section's canonical endpoints — its detailed path bows ~1 m toward the
+diverging lead, which would tilt a through-route car onto the diverging leg — and snaps a
+non-switch detailed path's endpoints to its node positions so seams meet cleanly; the *map* still
+draws every path), split into contiguous **runs** at any
+degenerate/missing/non-adjacent joint (`_split_runs`) so a single bad section can't stretch the
+whole train; each run is anchored at the **median** of its cars' true positions (midpoint anchor).
+Cars on an unusable section fall back to per-truck placement
+(`_fallback_body`). This still trusts XML order *within* one consist only — no cross-cut / logical
+yard-track ordering (that needs the `.ind` survey; see `rv_cross_section_ordering_plan.md`).
+
+> **Depends on an honest *placement* polyline.** A section's `paths` may hold the same span
+> multiple times (coarse forward + coarse mirror + detailed) and/or distinct switch legs. The
+> **map draws all of them** (so turnouts render every leg), but *placement* needs one
+> non-repeating route. `_concat_section_polyline` (used only by `_SectionPlacer`, never the map)
+> now takes the **most-detailed path as the base and stitches on only paths that *continue* it
+> end-to-start**, skipping duplicates, reverses (same endpoints) and branches (a switch's other
+> leg). Previously it concatenated *every* path into an out-and-back / zigzag polyline of up to
+> ~5× the real length (a *degenerate* start==end polyline when the mirror halves cancel — section
+> 2283), which mis-placed trucks and injected a spurious ~1.3–1.5× "stretch" that made the rigid
+> layout drift. Fixing this at the placement layer (not by dropping paths, which would erase
+> turnout legs from the map) is what lets the footprint-abutting layout stay on the true track.
+
+**Cross-region cars.** Run8 section indices are **per-region and collide** (Barstow's 446 ≠
+Needles' 446), and `currentTrackSectionIndex` is paired with `currentRoutePrefix`. So the placer
+is keyed by **`(route_prefix, section_index)`** and each truck is resolved by its *own*
+`truck.route_prefix` — a car whose two trucks are in different regions (e.g. straddling the
+Barstow/Needles seam) draws correctly across the boundary (all regions share one tile-world
+coordinate space). Placement therefore runs **once over all regions**: `build_section_placer`
+builds the combined placer from every region's `(prefix, sections)`, and `extract_trains(trains,
+placer, rv_lengths)` returns `{route_prefix: [TrainData]}` — each car assigned to the region of
+its **truck-A** prefix (so a train spanning regions is split into per-region `TrainData`; the
+car bodies span the seam, but a train's spine is still drawn per region). `output_generator`
+extracts all regions first, then places trains and attaches `RegionData.trains`; `extract_region`
+no longer places trains. Emitted to the region JSON as `trains` (`train_to_dict` /
+`rail_vehicle_to_dict`).
+
+**True vehicle length** (optional): with `[visualization] railvehicle_db = db_railvehicles.db`
+(a SQLite DB — `loco_data` / `car_data` tables keyed by `R8_FILENAME`, columns `RV_LENGTH` and
+`COUPLER_OFFSET`, both feet), the body is grown from the truck-to-truck span toward the real
+vehicle length. `RV_LENGTH` is the *coupled footprint* (over pulling faces) — drawing it whole
+makes coupled cars **abut with no visible gap**, so we draw the car **body between the couplers**:
+`body = RV_LENGTH - 2 * COUPLER_OFFSET`, extended past each truck by
+`overhang = (body_m - truck_span) / 2` (kept centred on the trucks). The dropped couplers become
+the gap between adjacent cars. Loaded by **`rv_length_db.load_rv_lengths()`** (→
+`{rvXMLfilename.lower(): (length_m, coupler_offset_m)}`) and passed to
+`extract_trains(..., rv_lengths=...)`. Only meaningful in the metre-based (tile/align) coord mode;
+without the DB the body stays the truck-to-truck span.
+
+**Viewer:** a **Trains** overlay (each car a body polyline; length is the true car length when
+`railvehicle_db` is set, otherwise the truck-to-truck span) with per-vehicle popups (train id / unit / type / destination) and
+a 4-line monospace tooltip (`Train : <id>` / `RV num : <unit>` / `RV tag : <destination>` /
+`RV typ : <car_type>`), and the popup shows the DB car type. Body colours are config-driven. A
+**locomotive** is coloured by its **owning railroad** from `[loco_company_colors]` (keyed by the loco
+DB's `INITIAL` reporting mark, e.g. `BNSF`, `ATSF`, `SP`, `UP`, `CSXT`, `R8W`; keys case-insensitive),
+falling back to `[colors] train_loco` when a mark has no entry (or the loco isn't in the DB). Every
+other car is coloured by **car type** from `[car_type_colors]` (keyed by the DB's
+`INDUSTRY_CONFIG_CAR_TYPE`, e.g. `Tank_Car`, `Covered_Hopper`, `Box_Car`; keys case-insensitive), falling
+back to `[colors] train` when a type has no entry. Both maps are parsed to
+`VisualizationConfig.car_type_colors` / `loco_company_colors`, emitted as `manifest.car_type_colors` /
+`manifest.loco_company_colors`, and applied by `rvBodyColor` in `renderTrains`
+(`isLoco ? locoCompanyColor(v.company) || trainLoco : carTypeColor(v.car_type) || train`). `car_type`
+and `company` per vehicle come from `rv_length_db` (`RvInfo.car_type` — locos are `Locomotive`;
+`RvInfo.company` — loco `INITIAL`, cars `""`) via `extract_trains`, emitted on each RV in the region JSON.
+Locomotives also render with **rounded end-caps** (a pill shape; `lineCap: isLoco ? 'round' : 'butt'`)
+so they read as the powered unit without relying on colour. All vehicles share one line weight.
+Each **train** (cars sharing a `train_id`) also gets a **thin connecting spine** through its cars, so a
+consist reads as one unit (`drawTrainOutline` in `generate_javascript`: cars are chained by
+nearest-neighbour so the spine follows the train even across sections / mis-ordered XML; the spine runs
+end tip -> each car centre -> other end tip; colour `[colors] train_outline`, default black).
+Line widths come from an optional `[trains]` section, injected as `window.TRAIN_STYLE`
+(`{{car, spine, carM}}`) and read by `renderTrains` / `drawTrainOutline`:
+- `spine_width` (default 1.5) — connecting-line width in **px** (zoom-invariant).
+- `car_width` (default 7) — RV body **min** width in px (the floor at low zoom).
+- `car_width_m` (default 3.5) — real RV width in **metres**; the body widens with zoom to this
+  (`rvBodyWeightPx()` = `car_width_m / metres-per-pixel`, floored at `car_width`, capped 64 px,
+  re-applied on `zoomend` via `updateTrainWidths`). Because it scales with zoom like the map and
+  the raster rail do, the RV stays wider than the (fixed-5px vector, zoom-scaling raster) track at
+  every zoom. `car_width_m = 0` reverts to a plain fixed `car_width` px. Config-side floats strip
+  inline `;`/`#` comments (default ConfigParser keeps them, which would break `float()`).
+  Scaling is align/geographic only; the `--tile-based` viewer uses fixed `car_width`.
+At close zoom each RV also shows its **destination tag centered on the car** (`trainDestLabelIcon`
+divIcons in a per-region `layers.trainLabels` group; `updateTrainLabelVisibility()` adds/removes the
+group on `zoomend` and when the Trains overlay toggles — labels show only when Trains is on and the
+scale bar reads `[trains] label_scale_m` metres or tighter, default 30). The threshold is compared
+against `_scaleBarMeters()`, which mirrors Leaflet `L.control.scale`'s 1/2/3/5x10^n rounding (so it
+matches the on-screen bar exactly — note the **3** step: `< 0.5` m/px lands on the 30 m bar, not 20).
+A **Train / Rail
+Vehicle** search type matches **trainID**, **destinationTag**, or **unitNumber** (a hit
+enables the overlay and pans to the vehicle). Wired in the geographic base
+(`generate_javascript`: `renderTrains`, overlay entry, search) which the align viewer reuses,
+plus `transformData` in `ALIGN_JS`; the flat `--tile-based` viewer has a parallel copy.
+
+##### Live world-save watching (`serve.py --world`)
+```bash
+python serve.py <config.ini> --world <world_save.xml> [--no-authoring]
+```
+`serve.py` watches the world save's mtime and re-places vehicles when it changes,
+reconstructing section polylines from the already-generated region JSON (no track-DB
+reload). New endpoint `GET /api/trains` → `{version, trains:{regionId:[...]}}` (`version`
+is the file mtime; results are cached until it changes). The align viewer probes
+`/api/ping` (now also reports `world`) and, when a watched save is present, **polls
+`/api/trains` every 3 s** and re-renders the Trains layer, so editing/re-saving the world
+in Run8 moves the vehicles on the map with no reload. Static output (served without
+`serve.py`) still shows the trains baked into the region JSON, just without live refresh.
+Committing a manual alignment (`rerenderAlign`) rebuilds every region from the raw cache, which only
+has the *baked* trains, so after the reload the poll is re-run (`pollTrainsOnce`, with the version guard
+reset) to restore the live positions - otherwise live-only trains would vanish on align.
+
 **Output Structure:**
 ```
 output/<name>/
@@ -76,6 +221,9 @@ signal_absolute = #FF6B35
 signal_intermediate = #FFD700
 signal_border_single = #000000
 signal_border_stacked = #87CEEB
+train = #8B0000            # rail-vehicle (car) body from a world save
+train_loco = #B22222      # locomotive body
+train_outline = #000000   # thin spine joining a train's cars
 
 [output]
 output_dir = ./output/socal/

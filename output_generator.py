@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple
 from config_parser import VisualizationConfig, parse_config
 from region_extractor import (
     RegionData, SectionData, SignalData, AILocationData, IndustryData, TileData,
-    extract_region, load_tile_corrections
+    TrainData, RailVehicleData, extract_region, load_tile_corrections
 )
 
 
@@ -114,6 +114,31 @@ def area_to_dict(area) -> dict:
     return result
 
 
+def rail_vehicle_to_dict(v: RailVehicleData) -> dict:
+    """Convert RailVehicleData to JSON-serializable dict"""
+    return {
+        "train_id": v.train_id,
+        "unit_number": v.unit_number,
+        "destination_tag": v.destination_tag,
+        "unit_type": v.unit_type,
+        "rv_filename": v.rv_filename,
+        "body": v.body,          # polyline (>=2 pts) from truck A to truck B
+        "position_key": v.position_key,
+        "resolved": v.resolved,
+        "car_type": v.car_type,  # INDUSTRY_CONFIG_CAR_TYPE, for per-type body colour
+        "company": v.company,    # loco reporting mark (INITIAL), for per-railroad loco colour
+    }
+
+
+def train_to_dict(train: TrainData) -> dict:
+    """Convert TrainData to JSON-serializable dict"""
+    return {
+        "train_id": train.train_id,
+        "was_ai": train.was_ai,
+        "vehicles": [rail_vehicle_to_dict(v) for v in train.vehicles],
+    }
+
+
 def region_to_dict(region: RegionData) -> dict:
     """Convert RegionData to JSON-serializable dict for region file"""
     return {
@@ -123,7 +148,8 @@ def region_to_dict(region: RegionData) -> dict:
         "signals": [signal_to_dict(s) for s in region.signals],
         "ai_locations": [ai_location_to_dict(a) for a in region.ai_locations],
         "industries": [industry_to_dict(i) for i in region.industries],
-        "tiles": [tile_to_dict(t) for t in region.tiles]
+        "tiles": [tile_to_dict(t) for t in region.tiles],
+        "trains": [train_to_dict(t) for t in region.trains],
     }
 
 
@@ -176,7 +202,9 @@ def generate_manifest(config: VisualizationConfig,
         "areas": [area_to_dict(a) for a in config.areas],
         "color_presets": dict(getattr(config, "color_presets", {}) or {}),
         "label_types": [{"id": t.id, "name": t.name, "color": t.color}
-                        for t in getattr(config, "label_types", []) or []]
+                        for t in getattr(config, "label_types", []) or []],
+        "car_type_colors": dict(getattr(config, "car_type_colors", {}) or {}),
+        "loco_company_colors": dict(getattr(config, "loco_company_colors", {}) or {}),
     }
 
     # Add tile parameters if using tile-based coordinates
@@ -285,7 +313,8 @@ def copy_leaflet_assets(output_dir: Path) -> None:
 
 
 def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_html: bool = True,
-                    tile_based: bool = False, align: bool = False, authoring: bool = True) -> None:
+                    tile_based: bool = False, align: bool = False, authoring: bool = True,
+                    world_save: str = None) -> None:
     """Generate all output files (manifest.json, per-region JSON files, and index.html)
 
     Args:
@@ -293,6 +322,8 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
         tile_dir: Override tile directory
         generate_html: Whether to generate index.html
         tile_based: Use tile-based coordinates instead of lat/lon
+        world_save: Optional Run8 world save (.xml) to plot trains from; overrides
+            config.world_save when given.
     """
     output_dir = config.output_dir
     data_dir = output_dir / "data"
@@ -324,7 +355,27 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
         print(f"\nLoading tile corrections from: {config.tile_corrections}")
         tile_corrections = load_tile_corrections(str(config.tile_corrections))
 
-    # Extract all regions
+    # Load an optional world save (CLI --world overrides config world_save).
+    world_trains = None
+    world_save_path = world_save or (str(config.world_save) if config.world_save else None)
+    if world_save_path:
+        from world_parser import parse_world_save
+        print(f"\nLoading world save: {world_save_path}")
+        world_trains = parse_world_save(world_save_path)
+        n_veh = sum(len(t.vehicles) for t in world_trains)
+        print(f"  Parsed {len(world_trains)} train(s), {n_veh} rail vehicle(s)")
+
+    # Load the optional rail-vehicle length DB (draws true car length over trucks).
+    rv_lengths = None
+    if world_trains and config.railvehicle_db:
+        from rv_length_db import load_rv_lengths
+        if os.path.exists(str(config.railvehicle_db)):
+            rv_lengths = load_rv_lengths(str(config.railvehicle_db))
+            print(f"  Loaded {len(rv_lengths)} rail-vehicle length(s) from {config.railvehicle_db}")
+        else:
+            print(f"  Warning: railvehicle_db not found: {config.railvehicle_db}")
+
+    # Extract all regions (trains are placed afterwards, globally across regions)
     regions_data = []
     for region_config in config.regions:
         # tile_dir parameter overrides per-region config if specified
@@ -338,7 +389,24 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
         )
         regions_data.append(region_data)
 
-        # Write region JSON file
+    # Place trains once against all regions' sections (a car can straddle a region
+    # boundary, so each truck must resolve against its own region's geometry).
+    if world_trains:
+        from region_extractor import build_section_placer, extract_trains
+        placer = build_section_placer(
+            (rc.route_prefix, rd.sections) for rc, rd in zip(config.regions, regions_data))
+        trains_by_prefix = extract_trains(world_trains, placer, rv_lengths=rv_lengths,
+                                          deoverlap=getattr(config, 'train_deoverlap', True))
+        for rc, rd in zip(config.regions, regions_data):
+            rd.trains = trains_by_prefix.get(rc.route_prefix, [])
+            if rd.trains:
+                n_veh = sum(len(t.vehicles) for t in rd.trains)
+                n_res = sum(1 for t in rd.trains for v in t.vehicles if v.resolved)
+                print(f"  Placed {n_veh} rail vehicle(s) in {len(rd.trains)} train(s) "
+                      f"on {rc.id} (prefix {rc.route_prefix}, {n_res} resolved)")
+
+    # Write region JSON files
+    for region_config, region_data in zip(config.regions, regions_data):
         region_file = data_dir / f"{region_config.id}.json"
         print(f"\nWriting region file: {region_file}")
 
@@ -442,6 +510,13 @@ if __name__ == '__main__':
         help='Same as the default align viewer but WITHOUT the "Add Label" authoring button '
              '(for hosting the map to end users)'
     )
+    parser.add_argument(
+        '--world',
+        metavar='FILE',
+        dest='world',
+        help='Run8 world save (.xml) to plot trains/rail vehicles from '
+             '(overrides [visualization] world_save in the config)'
+    )
 
     args = parser.parse_args()
 
@@ -450,10 +525,10 @@ if __name__ == '__main__':
     if args.tile_report:
         generate_tile_report(config, args.tile_report)
     elif args.tile_based:
-        generate_output(config, tile_based=True)
+        generate_output(config, tile_based=True, world_save=args.world)
     elif args.minimal:
-        generate_output(config)                 # minimal geographic (per-tile bilinear + corrections)
+        generate_output(config, world_save=args.world)   # minimal geographic (per-tile bilinear + corrections)
     elif args.production:
-        generate_output(config, align=True, authoring=False)   # align viewer, no label authoring
+        generate_output(config, align=True, authoring=False, world_save=args.world)  # align viewer, no label authoring
     else:
-        generate_output(config, align=True)     # DEFAULT: manual-alignment viewer
+        generate_output(config, align=True, world_save=args.world)  # DEFAULT: manual-alignment viewer
