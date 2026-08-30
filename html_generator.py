@@ -77,6 +77,13 @@ def generate_javascript() -> str:
             tileBoundaries: false,
             trains: false
         },
+        // Train display options (the "Options" button next to the Trains overlay).
+        trainOptions: {
+            coloredCars: true,      // false = paint every non-loco car the box-car colour
+            hideNonTrains: false,   // true = show only consists led by a locomotive
+            showOnlyMoving: false,  // true = only plot trains moving between saves (live only)
+            highlightPlayers: false // true = highlight player trains (moving && not AI) with a bright spine
+        },
 
         // Base map layers
         baseLayers: {},  // {name: layer}
@@ -625,9 +632,17 @@ def generate_javascript() -> str:
                     border-bottom: 1px solid #eee;
                     color: #333;
                 }
+                #sim-time {
+                    display: none;
+                    margin-bottom: 3px;
+                    padding-bottom: 3px;
+                    border-bottom: 1px solid #eee;
+                    color: #333;
+                }
                 #mouse-coords { display: block; }
             </style>
             <span id="train-count"></span>
+            <span id="sim-time"></span>
             <span id="mouse-coords">---, ---</span>
         `;
         document.body.appendChild(display);
@@ -974,6 +989,23 @@ def generate_javascript() -> str:
     // back to [colors] train_loco; other cars use the per-type colour from
     // [car_type_colors] (keyed by INDUSTRY_CONFIG_CAR_TYPE), falling back to
     // [colors] train.
+    const PLAYER_HL_COLOR = '#00e5ff';   // bright cyan spine for player-crewed trains
+    function _isLocoType(unitType) {
+        return /DieselEngine|Electric|Steam|Engine/i.test(unitType || '');
+    }
+    // A "train" is a consist whose lead (first) vehicle is a locomotive; a cut of
+    // cars with no lead loco is a "non-train" (hidden by the Hide non-trains option).
+    function _isConsist(train) {
+        const lead = train && train.vehicles && train.vehicles[0];
+        return !!(lead && _isLocoType(lead.unit_type));
+    }
+    // A "player" train (heuristic): MOVING and NOT AI-crewed (TrainWasAI false). The
+    // world save has no crew field, so this is the best proxy - a moving non-AI train
+    // is almost certainly under a player. `moving` is computed server-side by diffing
+    // consecutive saves (serve.py); absent (static output) => never a player here.
+    function _isPlayerTrain(train) {
+        return !!(train.moving && train.was_ai === false);
+    }
     function carTypeColor(t) {
         const m = (MapApp.manifest && MapApp.manifest.car_type_colors) || {};
         return t ? m[String(t).toLowerCase()] : null;
@@ -984,6 +1016,9 @@ def generate_javascript() -> str:
     }
     function rvBodyColor(v, isLoco) {
         if (isLoco) return locoCompanyColor(v.company) || COLORS.trainLoco;
+        // "Colored Cars" off: paint every non-loco car the box-car colour.
+        if (MapApp.trainOptions && !MapApp.trainOptions.coloredCars)
+            return carTypeColor('Box_Car') || COLORS.train;
         return carTypeColor(v.car_type) || COLORS.train;
     }
 
@@ -1008,9 +1043,13 @@ def generate_javascript() -> str:
             if (region.layers && region.layers.trains)
                 region.layers.trains.eachLayer(l => {
                     if (l._rvBody && l.setStyle) l.setStyle({ weight: w });
+                    // Player-highlight spine stays a touch wider than the car so it
+                    // reads as a coloured casing at every zoom.
+                    else if (l._rvHighlight && l.setStyle) l.setStyle({ weight: _highlightWeight(w) });
                 });
         });
     }
+    function _highlightWeight(carWeight) { return Math.max(carWeight * 1.6, 4); }
 
     // Centered destination-tag label for one RV (shown only when zoomed in).
     function trainDestLabelIcon(text) {
@@ -1032,15 +1071,22 @@ def generate_javascript() -> str:
         // Idempotent per region: drop prior entries (e.g. a re-align rebuild).
         MapApp.trainIndex = MapApp.trainIndex.filter(it => it.regionId !== regionId);
 
-        // Resolve every train's drawable cars once.
+        const opts = MapApp.trainOptions || {};
+
+        // Resolve every train's drawable cars once (honouring the Train Options).
         const drawn = [];
         for (const train of (data.trains || [])) {
+            const isConsist = _isConsist(train);
+            if (opts.hideNonTrains && !isConsist) continue;    // hide cuts with no lead loco
+            if (opts.showOnlyMoving && !train.moving) continue; // hide stationary trains
             const cars = [];
             for (const v of train.vehicles) {
                 if (!v.resolved || !v.body || v.body.length < 2) continue;
-                cars.push({v, isLoco: /DieselEngine|Electric|Steam|Engine/i.test(v.unit_type || '')});
+                cars.push({v, isLoco: _isLocoType(v.unit_type)});
             }
-            drawn.push({train, cars});
+            if (!cars.length) continue;
+            const highlight = !!(opts.highlightPlayers && _isPlayerTrain(train));
+            drawn.push({train, cars, highlight});
         }
 
         // Zoom LOD: when zoomed out past the threshold (scale bar >= lodScaleM,
@@ -1051,16 +1097,16 @@ def generate_javascript() -> str:
         MapApp._trainLOD = _trainCollapsed() ? 'collapsed' : 'detailed';
         if (MapApp._trainLOD === 'collapsed') {
             const minCars = (window.TRAIN_STYLE && TRAIN_STYLE.lodMinCars) || 3;
-            for (const {train, cars} of drawn) {
-                if (cars.length > minCars) drawCollapsedTrain(regionId, train, cars, layers.trains);
+            for (const {train, cars, highlight} of drawn) {
+                if (cars.length > minCars) drawCollapsedTrain(regionId, train, cars, layers.trains, highlight);
             }
             return;
         }
 
         // Pass 1: every train's connecting spine FIRST, so the RV bodies drawn in
         // pass 2 sit ON TOP of it (the spine reads as a thin backbone behind the
-        // cars instead of a line painted across them).
-        for (const {cars} of drawn) drawTrainOutline(cars.map(c => c.v.body), layers.trains);
+        // cars instead of a line painted across them). Player trains get a bright spine.
+        for (const {cars, highlight} of drawn) drawTrainOutline(cars.map(c => c.v.body), layers.trains, highlight);
 
         // Pass 2: RV bodies + destination tags, above the spines.
         for (const {train, cars} of drawn) {
@@ -1099,7 +1145,7 @@ def generate_javascript() -> str:
     // Draw one train as a single solid line tracing its length (front tip -> car
     // centres -> rear tip), coloured by the lead car/loco. One trainIndex entry
     // (lead vehicle) keeps search / follow working while collapsed.
-    function drawCollapsedTrain(regionId, train, cars, layerGroup) {
+    function drawCollapsedTrain(regionId, train, cars, layerGroup, highlight) {
         const bodies = cars.map(c => c.v.body);
         const centers = bodies.map(_midpoint);
         const order = _chainOrder(centers);
@@ -1108,8 +1154,9 @@ def generate_javascript() -> str:
         const frontEnd = _outerEnd(ob[0], cen.length > 1 ? cen[1] : null);
         const rearEnd = _outerEnd(ob[ob.length - 1], cen.length > 1 ? cen[cen.length - 2] : null);
         const lead = cars[0];
+        // A player-crewed train collapses to a bright line so it stands out at a glance.
         const line = L.polyline([frontEnd, ...cen, rearEnd], {
-            color: rvBodyColor(lead.v, lead.isLoco),
+            color: highlight ? PLAYER_HL_COLOR : rvBodyColor(lead.v, lead.isLoco),
             weight: rvBodyWeightPx(),
             opacity: 0.95,
             lineCap: 'round'
@@ -1172,7 +1219,28 @@ def generate_javascript() -> str:
         if (!el) return;
         const wt = MapApp._liveTotals || (MapApp.manifest && MapApp.manifest.world_totals);
         if (!MapApp.overlayStates.trains || !wt) { el.style.display = 'none'; return; }
-        el.textContent = `Trains: ${wt.trains}  ·  Rail vehicles: ${wt.vehicles}`;
+        let txt = `Trains: ${wt.trains}  ·  Rail vehicles: ${wt.vehicles}`;
+        if (MapApp._movingCount != null) txt += `  ·  Moving: ${MapApp._movingCount}`;
+        el.textContent = txt;
+        el.style.display = 'block';
+    }
+
+    // Last world-save simulation time (the save's <date> tag). Live value from
+    // serve.py overrides the baked manifest value. "2026-04-11T08:31:52.87Z" ->
+    // "2026-04-11 08:31:52".
+    function _fmtSimTime(iso) {
+        if (!iso) return null;
+        const m = String(iso).match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/);
+        return m ? (m[1] + ' ' + m[2]) : String(iso);
+    }
+    function updateSimTime(iso) {
+        const el = document.getElementById('sim-time');
+        if (!el) return;
+        if (iso !== undefined) MapApp._simTime = iso;   // remember the latest value
+        const t = _fmtSimTime(MapApp._simTime
+            || (MapApp.manifest && MapApp.manifest.world_sim_time));
+        if (!t) { el.style.display = 'none'; return; }
+        el.textContent = 'Sim time: ' + t;
         el.style.display = 'block';
     }
 
@@ -1212,7 +1280,7 @@ def generate_javascript() -> str:
         return (!neighbour || _distLL(e0, neighbour) >= _distLL(eL, neighbour)) ? e0 : eL;
     }
 
-    function drawTrainOutline(carBodies, layerGroup) {
+    function drawTrainOutline(carBodies, layerGroup, highlight) {
         // A single-vehicle train has no consist to connect, so draw no spine
         // (otherwise the end->centre->end line shows as a stub through the one car).
         if (carBodies.length < 2) return;
@@ -1224,9 +1292,14 @@ def generate_javascript() -> str:
         const frontEnd = _outerEnd(bodies[0], cen.length > 1 ? cen[1] : null);
         const rearEnd = _outerEnd(bodies[bodies.length-1], cen.length > 1 ? cen[cen.length-2] : null);
 
-        // Thin spine: one end -> each car centre -> the other end.
-        L.polyline([frontEnd, ...cen, rearEnd],
-            { color: COLORS.trainOutline, weight: TRAIN_STYLE.spine, opacity: 0.9 }).addTo(layerGroup);
+        // Spine: one end -> each car centre -> the other end. A player-crewed train
+        // gets a bright, wider spine (a coloured casing) so it stands out; others get
+        // the thin dark backbone.
+        const line = L.polyline([frontEnd, ...cen, rearEnd], highlight
+            ? { color: PLAYER_HL_COLOR, weight: _highlightWeight(rvBodyWeightPx()), opacity: 0.95 }
+            : { color: COLORS.trainOutline, weight: TRAIN_STYLE.spine, opacity: 0.9 });
+        if (highlight) line._rvHighlight = true;   // rescales with zoom in updateTrainWidths
+        line.addTo(layerGroup);
     }
 
     function trainVehicleTooltip(train, v) {
@@ -1937,6 +2010,8 @@ ALIGN_JS = r'''
         addTrackOpacitySlider();
         MapApp.overlayStates.areaLabels = false;
         addAreaLabelToggle();
+        addTrainOptionsButton();
+        updateSimTime();   // show baked sim time (the live poll overrides it later)
         buildAreaLabels();
         // Probe for the optional authoring backend (serve.py) without blocking the
         // initial render; if present, rebuild the labels so their markers become
@@ -2211,7 +2286,9 @@ ALIGN_JS = r'''
         if (!j || !j.trains) return;
         // Whole-save totals are region-independent; update the status line even if
         // the render below early-returns (no regions loaded yet / unchanged version).
+        if ('moving_count' in j) MapApp._movingCount = j.moving_count;
         if (j.totals) { MapApp._liveTotals = j.totals; updateTrainCount(); }
+        if ('sim_time' in j) updateSimTime(j.sim_time);   // live save clock
         // Regions load asynchronously (and can be toggled on later); re-apply when
         // either the save changed OR the set of loaded regions changed, so the
         // initial poll that arrives before regions finish loading is not lost.
@@ -2271,8 +2348,10 @@ ALIGN_JS = r'''
         initAreaTypeVisible();
         // Master "Area Labels" toggle + a "Filter" button that opens the per-category
         // checkboxes in a popover (keeps the overlay panel tidy).
+        // The .overlay-item class already lays this out like the other rows (flex +
+        // an 8px label margin); the Filter button uses margin-left:auto to sit at the
+        // right. Adding a `gap` here would misalign this row's label - so don't.
         const item = document.createElement('div'); item.className = 'overlay-item';
-        item.style.cssText = 'display:flex;align-items:center;gap:6px;';
         item.innerHTML = '<input type="checkbox" id="overlay-areaLabels"><label for="overlay-areaLabels">Area Labels</label>'
             + '<button id="area-filter-btn" type="button" title="Choose which label types to show"'
             + ' style="margin-left:auto;font-size:11px;padding:1px 7px;cursor:pointer;">Filter</button>';
@@ -2330,6 +2409,75 @@ ALIGN_JS = r'''
         pop.style.top = (r.bottom + 4) + 'px';
         pop.style.left = Math.max(6, left) + 'px';
         setTimeout(()=> document.addEventListener('mousedown', areaFilterAway, true), 0);
+    }
+
+    // ---- Trains "Options" button + popover (display options for the Trains overlay) ----
+    // Inject an "Options" button beside the existing Trains overlay checkbox, mirroring
+    // the Area Labels "Filter" button.
+    function addTrainOptionsButton(){
+        const cb = document.getElementById('overlay-trains');
+        if (!cb) return;
+        // The .overlay-item class is already flex with a label margin matching the
+        // other rows; just append the button (margin-left:auto pushes it right). Do
+        // NOT add a `gap` here - it would shift this row's label out of alignment.
+        const item = cb.closest('.overlay-item') || cb.parentElement;
+        const btn = document.createElement('button');
+        btn.id = 'train-options-btn'; btn.type = 'button';
+        btn.title = 'Train display options';
+        btn.textContent = 'Options';
+        btn.style.cssText = 'margin-left:auto;font-size:11px;padding:1px 7px;cursor:pointer;';
+        item.appendChild(btn);
+        btn.addEventListener('click', (e)=>{ e.stopPropagation(); toggleTrainOptionsPopover(e.currentTarget); });
+    }
+    function closeTrainOptionsPopover(){
+        const pop = document.getElementById('train-options-popover');
+        if (pop) pop.remove();
+        document.removeEventListener('mousedown', trainOptionsAway, true);
+    }
+    function trainOptionsAway(e){
+        const pop = document.getElementById('train-options-popover');
+        if (pop && !pop.contains(e.target) && e.target.id !== 'train-options-btn') closeTrainOptionsPopover();
+    }
+    function toggleTrainOptionsPopover(anchorBtn){
+        if (document.getElementById('train-options-popover')){ closeTrainOptionsPopover(); return; }
+        const o = MapApp.trainOptions;
+        const rows = [
+            ['coloredCars', 'Colored cars', 'Colour non-loco cars by type. Off: all cars use the box-car colour.'],
+            ['hideNonTrains', 'Hide non-trains', 'Show only consists led by a locomotive (hide loose cuts of cars).'],
+            ['showOnlyMoving', 'Show only moving', 'Only plot trains that moved since the last world save (live only).'],
+            ['highlightPlayers', 'Highlight player trains', 'Highlight trains that are moving and not AI-crewed (likely player-driven) with a bright spine (live only).']
+        ];
+        const pop = document.createElement('div'); pop.id = 'train-options-popover';
+        pop.style.cssText = 'position:fixed;z-index:3000;background:#fff;border:1px solid #888;border-radius:6px;'
+            + 'box-shadow:0 2px 12px rgba(0,0,0,.3);padding:8px 10px;font:12px Arial;min-width:170px;';
+        pop.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;">Train display options</div>';
+        for (const [key,label,tip] of rows){
+            const row = document.createElement('label');
+            row.title = tip;
+            row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;';
+            row.innerHTML = '<input type="checkbox"'+(o[key]?' checked':'')+'>' + label;
+            pop.appendChild(row);
+            row.querySelector('input').addEventListener('change', (e)=>{ o[key] = e.target.checked; applyTrainOptions(); });
+        }
+        document.body.appendChild(pop);
+        const r = anchorBtn.getBoundingClientRect();
+        const pw = pop.offsetWidth;
+        let left = r.left; if (left + pw > window.innerWidth - 6) left = window.innerWidth - 6 - pw;
+        pop.style.top = (r.bottom + 4) + 'px';
+        pop.style.left = Math.max(6, left) + 'px';
+        setTimeout(()=> document.addEventListener('mousedown', trainOptionsAway, true), 0);
+    }
+    // Re-render every loaded region's trains with the current options (same as the
+    // LOD re-render). Cheap: reuses each region's already-loaded data.
+    function applyTrainOptions(){
+        MapApp.loadedRegions.forEach((region, regionId) => {
+            if (!region.layers || !region.layers.trains) return;
+            region.layers.trains.clearLayers();
+            region.layers.trainLabels.clearLayers();
+            renderTrains(regionId, region.data, region.layers);
+            if (MapApp.overlayStates.trains) region.layers.trains.addTo(MapApp.map);
+        });
+        updateTrainLabelVisibility();
     }
 
     // ---- Area-label authoring (click to place; second click sets the angle) ----

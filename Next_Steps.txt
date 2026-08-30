@@ -277,3 +277,89 @@ KEPT (align depends on it): the tile-COORDINATE extraction (TileBasedConfig / [t
 use_tile_coords / convert_run8_to_tile_coords / compute_align_seed). --align kept as a no-op alias.
 CLAUDE.md Output-modes table + stale tile-based references updated. Verified: all modules compile;
 align viewer regenerates and runs clean in-browser (trains load, follow works, no console errors).
+
+--- Beta UI round 2 (Notes 30Aug26) - implemented 2026-08-30 ---
+#4 "only moving trains" DROPPED by user (not worth it).
+* Train "Options" button (beside the Trains overlay checkbox, mirrors the Area Labels Filter
+  button) -> popover with three toggles, each re-renders trains via applyTrainOptions:
+    1. Colored cars (default ON) - OFF paints every non-loco car the Box_Car colour
+       (rvBodyColor; locos keep their company colour either way).
+    2. Hide non-trains (default OFF) - show only consists whose LEAD (first) vehicle is a
+       locomotive (_isConsist); loose cuts of cars are hidden. Verified 184->72 bodies.
+    3. Highlight players (default OFF) - consists that are NOT TrainWasAI get a bright cyan
+       spine (PLAYER_HL_COLOR, wider casing via _highlightWeight, marked _rvHighlight so it
+       rescales on zoom; collapsed-LOD line also turns cyan). was_ai already reached the viewer.
+  State in MapApp.trainOptions. NOTE: "Hide non-trains" affects the MAP only; the lower-right
+  count stays whole-save totals (region-independent) - did not switch to filtered counts.
+* Sim-time stamp (lower-right, under the train count): the world save's <date> tag (top-level
+  ISO-8601 sim clock). world_parser.parse_sim_time(); serve.py adds sim_time to /api/trains;
+  output_generator bakes manifest.world_sim_time; viewer updateSimTime() (live poll overrides
+  the baked value) formats "2026-04-11T08:31:52.8Z" -> "2026-04-11 08:31:52".
+GOTCHA fixed during build: adding a call between setupUI() and loadDefaultRegions() in
+  loadManifest broke generate_align_html's string-replace anchor for inserting alignInit()
+  (whole align init silently skipped). updateSimTime() is now called inside alignInit instead.
+Validated in-browser (real socal save): all toggles + sim time work, no console errors.
+Colours (cyan highlight) hardcoded for now - can move to [colors]/[trains] config after review.
+Needs a REGEN to ship (viewer changes) + serve.py restart (payload sim_time).
+
+--- Pivot: "Highlight players" -> "Highlight moving" (2026-08-30) ---
+Flaw found: TrainWasAI=false is true for the MAJORITY of trains (parked/free-agent cuts, not
+just player-crewed), so highlighting on !was_ai lit up nearly everything. The world save has NO
+crew/engineer field and NO actual speed field (only ManuallyAppliedSpeedLimitMPH, a limit =
+int-max). So "player" is not derivable from a single save; that info only exists live via
+DispatcherComms (EngineerType/Name).
+Solution (implemented): detect MOVEMENT by diffing consecutive saves.
+  * serve.py: cache _prev_positions {train_id -> (x,y)} (lead vehicle's first body point);
+    each new save, a train that moved > MOVE_THRESHOLD_M (5 m) since the previous save is
+    tagged d['moving']=true, plus payload['moving_count']. Live-only (needs 2 saves; first save
+    baseline = nothing moving). Unit-tested: baseline 0; shifting 3 prev-positions -> exactly
+    those 3 flagged, moving_count=3.
+  * Viewer: option renamed highlightPlayers -> highlightMoving ("Highlight moving"); highlight
+    predicate is _shouldHighlightTrain(train) = train.moving (bright cyan spine). Status line
+    now shows "... Moving: N".
+  * FORWARD-LOOKING per user: a moving train that is also was_ai===false is almost certainly
+    player-controlled. _shouldHighlightTrain has a PLAYER_ONLY flag (currently false) that, when
+    flipped, narrows the highlight to "moving && was_ai===false" - the player heuristic.
+Static/baked output can't compute movement (one save) -> nothing highlighted there; live serve.py
+only. Validated in-browser: popover reads "Highlight moving", "Moving: 0" on first poll, no errors.
+
+--- Moving-highlight hysteresis (2026-08-30) ---
+Added [trains] moving_hysteresis (int, default 2; 0 = strict) so a train stays flagged "moving"
+for N stationary save-cycles after its last real movement - a train holding briefly (e.g. at a
+signal) keeps the highlight instead of flickering off. serve.py: per-train _still_since counter;
+moved this cycle -> still=0, moving=True; stationary -> still+=1, moving = still <= H; new train
+starts stationary (still = H+1). config_parser train_moving_hysteresis; AuthoringState.move_hysteresis.
+Purely server-side (viewer unchanged - still reads train.moving + moving_count). Unit-tested with
+H=2: sequence move,stop,stop,stop,move -> [T,T,T,F,T] (1 move cycle + 2 hysteresis cycles lit).
+Tune per config; each cycle ~= the save cadence (~2 min).
+
+--- serve.py robustness: benign client-disconnect + torn-read hardening (2026-08-30) ---
+Symptom: noisy traceback on startup - "Exception occurred during processing of request ...
+ConnectionAbortedError [WinError 10053]" during a GET /api/trains write. Cause: a client (a
+superseded 3s poll / reload / closed tab) drops the connection mid-response; sendall raises.
+Recovers (per-thread) but logs an ugly trace, PLUS a secondary bug: do_GET's except caught the
+disconnect and called _error(), which tried to write AGAIN to the dead socket -> second exception.
+Fixes:
+  1. _send_json wraps its send in try/except _CLIENT_DISCONNECT (ConnectionAborted/Reset/BrokenPipe)
+     -> swallows the write-side disconnect and stops the do_GET re-error cascade.
+  2. New _QuietThreadingHTTPServer(ThreadingHTTPServer) overrides handle_error to swallow any
+     ConnectionError (covers BOTH read-side recv 10054 and write-side send 10053) with no traceback;
+     everything else logs normally. daemon_threads=True. main() uses it.
+  3. trains_payload wraps parse_world_save in try/except -> on a torn/partial read (Run8 rewrites
+     the live save ~every 2 min) it serves the LAST-GOOD payload and retries next poll (cache mtime
+     left unchanged), instead of 500-ing the client. Verified: torn read -> last-good, recovers on
+     next valid save.
+Tested: 6 RST-aborted requests -> 0 tracebacks in the log, server keeps serving (ping/trains 200).
+
+--- Moving options split: "Show only moving" + "Highlight player trains" (2026-08-30) ---
+Replaced the single "Highlight moving" toggle with TWO, per user:
+  * "Show only moving" (trainOptions.showOnlyMoving) - a FILTER: renderTrains skips any train
+    whose train.moving is falsy, so only moving trains plot. Live-only (needs serve.py movement).
+  * "Highlight player trains" (trainOptions.highlightPlayers) - the player heuristic made explicit:
+    _isPlayerTrain(train) = train.moving && train.was_ai === false (a moving, non-AI train is
+    almost certainly player-driven, since the save has no crew field). Bright cyan spine in
+    detailed mode / cyan collapsed line in LOD mode. (Dropped the old PLAYER_ONLY flag - this IS it.)
+Hysteresis still feeds train.moving, so both survive brief holds per [trains] moving_hysteresis.
+Verified in-browser (moving/was_ai injected via a fetch patch): Show only moving 187->62 bodies;
+Highlight player trains -> 34 cyan collapsed lines (zoomed out) / 52 cyan highlight spines (zoomed
+in), visible on the yard. moving_count still shown in the status line.

@@ -31,6 +31,7 @@ color?,font_size?,box?,rotation?}.
 import argparse
 import gzip
 import json
+import math
 import os
 import sys
 import threading
@@ -43,7 +44,7 @@ from config_parser import (parse_config, collect_areas, resolve_areas_files,
                             AREA_TYPE_DEFAULT)
 from area_store import AreaStore, AreaStoreError, slugify, _area_to_dict
 from region_extractor import SectionData, extract_trains, build_section_placer
-from world_parser import parse_world_save
+from world_parser import parse_world_save, parse_sim_time
 from output_generator import train_to_dict
 from rv_length_db import load_rv_lengths
 
@@ -60,6 +61,43 @@ class WorldUploadError(Exception):
     def __init__(self, message, status=400):
         super().__init__(message)
         self.status = status
+
+
+# Socket errors that just mean the client went away mid-response (a superseded 3 s
+# poll, a reload, a closed tab). These are benign - swallow them instead of logging a
+# noisy traceback (and never try to write an error response back over a dead socket).
+_CLIENT_DISCONNECT = (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)
+
+
+class _QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Like ThreadingHTTPServer, but a client that simply disconnects mid-request (a
+    superseded poll, a reload, a closed tab) raises ConnectionError on the read or
+    write side - benign, so don't dump a traceback for it. Anything else logs normally."""
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return
+        super().handle_error(request, client_address)
+
+
+# A train whose representative position moved more than this (tile-world metres)
+# between consecutive saves is considered "moving".
+MOVE_THRESHOLD_M = 5.0
+
+
+def _train_repr_pos(train_dict):
+    """A representative (x, y) for a train: the first placed vehicle's first body
+    point. Returns None when the train has no drawable vehicles."""
+    for v in train_dict.get('vehicles', []):
+        body = v.get('body')
+        if body:
+            return (body[0][0], body[0][1])
+    return None
+
+
+def _pos_dist(a, b):
+    return math.hypot(a[0] - b[0], a[1] - b[1])
 
 
 class AuthoringState:
@@ -88,6 +126,10 @@ class AuthoringState:
         self.region_prefix = {r.id: r.route_prefix for r in (config.regions if config else [])}
         self._sections_cache = {}   # regionId -> [SectionData] (rebuilt from region JSON)
         self._trains_cache = {'mtime': None, 'payload': {'version': 0, 'trains': {}}}
+        self._prev_positions = {}   # train_id -> (x, y) from the previous save, for movement
+        self._still_since = {}      # train_id -> consecutive stationary save-cycles (hysteresis)
+        # Keep a train flagged "moving" this many stationary cycles after its last move.
+        self.move_hysteresis = int(getattr(config, 'train_moving_hysteresis', 0)) if config else 0
 
         self.train_deoverlap = getattr(config, 'train_deoverlap', True) if config else True
 
@@ -135,7 +177,13 @@ class AuthoringState:
         if mtime == self._trains_cache['mtime']:
             return self._trains_cache['payload']
 
-        parsed = parse_world_save(str(self.world_save))
+        try:
+            parsed = parse_world_save(str(self.world_save))
+        except Exception:  # noqa: BLE001
+            # Torn / partial read while Run8 is rewriting the save (~every 2 min).
+            # Serve the last good payload and retry on the next poll (the cache mtime
+            # is left unchanged, so the next poll re-parses once the write completes).
+            return self._trains_cache['payload']
         # Whole-save totals (region-independent) for the viewer status line.
         totals = {'trains': len(parsed),
                   'vehicles': sum(len(tr.vehicles) for tr in parsed)}
@@ -155,12 +203,47 @@ class AuthoringState:
                                    deoverlap=self.train_deoverlap)
 
         trains_by_region = {}
+        cur_pos = {}
         for prefix, trains in by_prefix.items():
             region_id = prefix_to_region.get(prefix)
-            if region_id:
-                trains_by_region[region_id] = [train_to_dict(t) for t in trains]
+            if not region_id:
+                continue
+            dicts = []
+            for t in trains:
+                d = train_to_dict(t)
+                pos = _train_repr_pos(d)
+                if pos is not None:
+                    cur_pos[d['train_id']] = pos
+                dicts.append(d)
+            trains_by_region[region_id] = dicts
 
-        payload = {'version': mtime, 'trains': trains_by_region, 'totals': totals}
+        # Movement: a train whose representative position changed since the previous
+        # save moved this cycle. Hysteresis (H = self.move_hysteresis save-cycles) keeps
+        # a train flagged "moving" for H further STATIONARY cycles after its last real
+        # movement, so a brief hold (e.g. at a signal) doesn't flicker the highlight off
+        # (H = 0 -> strict per-cycle). Live-only (needs two saves; first save = baseline).
+        H = self.move_hysteresis
+        still_since, moving = {}, {}
+        for tid, pos in cur_pos.items():
+            prev = self._prev_positions.get(tid)
+            if prev is not None and _pos_dist(prev, pos) > MOVE_THRESHOLD_M:
+                still_since[tid] = 0            # moved this cycle
+                moving[tid] = True
+            else:
+                prev_still = self._still_since.get(tid)
+                s = (prev_still + 1) if prev_still is not None else (H + 1)  # new train = stationary
+                still_since[tid] = s
+                moving[tid] = s <= H           # within the trailing hysteresis window
+        self._prev_positions = cur_pos
+        self._still_since = still_since
+        for dicts in trains_by_region.values():
+            for d in dicts:
+                d['moving'] = bool(moving.get(d['train_id'], False))
+        moving_count = sum(1 for v in moving.values() if v)
+
+        payload = {'version': mtime, 'trains': trains_by_region, 'totals': totals,
+                   'sim_time': parse_sim_time(str(self.world_save)),
+                   'moving_count': moving_count}
         self._trains_cache = {'mtime': mtime, 'payload': payload}
         return payload
 
@@ -312,12 +395,17 @@ def make_handler(state: AuthoringState, authoring: bool):
         # ---- helpers ---------------------------------------------------
         def _send_json(self, obj, status=200):
             body = json.dumps(obj).encode('utf-8')
-            self.send_response(status)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Content-Length', str(len(body)))
-            self.send_header('Cache-Control', 'no-store')
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                self.wfile.write(body)
+            except _CLIENT_DISCONNECT:
+                # Client closed the connection mid-response - nothing to send. Drop it
+                # quietly (also stops do_GET's handler from re-erroring on a dead socket).
+                pass
 
         def _error(self, message, status=400):
             self._send_json({'error': message}, status=status)
@@ -637,7 +725,7 @@ def main():
             print(f"WARNING: could not sync manifest at startup: {e}")
 
     handler = make_handler(state, args.authoring)
-    httpd = ThreadingHTTPServer((args.host, args.port), handler)
+    httpd = _QuietThreadingHTTPServer((args.host, args.port), handler)
 
     print(f"\nRun8 area-label authoring server")
     print(f"  Serving : {output_dir}")

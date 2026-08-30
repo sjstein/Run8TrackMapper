@@ -361,14 +361,16 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
     # Load an optional world save (CLI --world overrides config world_save).
     world_trains = None
     world_totals = None
+    world_sim_time = None
     world_save_path = world_save or (str(config.world_save) if config.world_save else None)
     if world_save_path:
-        from world_parser import parse_world_save
+        from world_parser import parse_world_save, parse_sim_time
         print(f"\nLoading world save: {world_save_path}")
         world_trains = parse_world_save(world_save_path)
         n_veh = sum(len(t.vehicles) for t in world_trains)
         # Whole-save totals for the viewer status line (region-independent).
         world_totals = {"trains": len(world_trains), "vehicles": n_veh}
+        world_sim_time = parse_sim_time(world_save_path)   # sim clock (<date> tag)
         print(f"  Parsed {len(world_trains)} train(s), {n_veh} rail vehicle(s)")
 
     # Load the optional rail-vehicle length DB (draws true car length over trucks).
@@ -433,6 +435,8 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
 
     manifest = generate_manifest(config, regions_data, tile_corrections, True,
                                  world_totals=world_totals)
+    if world_sim_time:
+        manifest["world_sim_time"] = world_sim_time
     seed = compute_align_seed(regions_data, tile_based_config, str(config.terrain_tile_dir))
     if seed:
         manifest["align"] = seed

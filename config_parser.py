@@ -168,6 +168,10 @@ class VisualizationConfig:
                                       # trains collapse to a single line (zoom level-of-detail).
     train_lod_min_cars: float = 3.0   # [trains] lod_min_cars: while collapsed, only trains with
                                       # MORE than this many cars are drawn (shorter ones hidden).
+    train_moving_hysteresis: int = 2  # [trains] moving_hysteresis: keep a train flagged "moving"
+                                      # this many stationary save-cycles after its last real
+                                      # movement, so brief holds (e.g. at a signal) don't flicker
+                                      # off the highlight. 0 = strict per-cycle. serve.py live only.
     train_deoverlap: bool = True    # [trains] deoverlap: lay each consist's cars end-to-end
                                     # (front->back XML order, DB length, midpoint anchor) so
                                     # coupled cars don't overlap. False = raw per-truck placement.
@@ -495,6 +499,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
     train_label_size = 14.0
     train_lod_scale_m = 300.0
     train_lod_min_cars = 3.0
+    train_moving_hysteresis = 2
     train_deoverlap = True
     if 'trains' in parser:
         ts = parser['trains']
@@ -505,6 +510,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
         train_label_size = _cfg_float(ts, 'label_size', train_label_size)
         train_lod_scale_m = _cfg_float(ts, 'lod_scale_m', train_lod_scale_m)
         train_lod_min_cars = _cfg_float(ts, 'lod_min_cars', train_lod_min_cars)
+        train_moving_hysteresis = int(_cfg_float(ts, 'moving_hysteresis', train_moving_hysteresis))
         _do = ts.get('deoverlap', '').split(';', 1)[0].split('#', 1)[0].strip().lower()
         if _do:
             train_deoverlap = _do in ('1', 'true', 'yes', 'on')
@@ -598,6 +604,7 @@ def parse_config(config_path: str) -> VisualizationConfig:
         train_label_size=train_label_size,
         train_lod_scale_m=train_lod_scale_m,
         train_lod_min_cars=train_lod_min_cars,
+        train_moving_hysteresis=train_moving_hysteresis,
         train_deoverlap=train_deoverlap,
         car_type_colors=car_type_colors,
         loco_company_colors=loco_company_colors,
