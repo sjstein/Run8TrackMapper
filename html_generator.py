@@ -46,6 +46,33 @@ def generate_javascript() -> str:
     // car = min px floor; carM = real car width (m) the body widens to with zoom.
     const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14, lodScaleM: 300, lodMinCars: 3};
 
+    // Track line width from [track] config: full `width` px at/above `fullZoom`,
+    // halving per zoom level below that down to `minWidth` (fullZoom 0 = fixed width).
+    const TRACK_STYLE = window.TRACK_STYLE || {width: 5, minWidth: 1.5, fullZoom: 14};
+    // Track line weight (px) for the current zoom.
+    function trackWeightPx() {
+        const max = TRACK_STYLE.width || 5;
+        const min = TRACK_STYLE.minWidth || 0;
+        const anchor = TRACK_STYLE.fullZoom || 0;
+        if (!anchor || !MapApp.map) return max;   // scaling disabled / map not ready
+        const w = max * Math.pow(2, MapApp.map.getZoom() - anchor);
+        return Math.max(min, Math.min(max, w));
+    }
+    // Re-weight all (non-selected) track sections for the current zoom.
+    function updateTrackWidths() {
+        const w = trackWeightPx();
+        MapApp.loadedRegions.forEach(region => {
+            if (!region.layers || !region.layers.sections) return;
+            region.layers.sections.eachLayer(group => {
+                if (!group.eachLayer) return;
+                group.eachLayer(pl => {
+                    if (pl._trackLine && pl.setStyle && !MapApp.selectedSections.has(pl._sectionId))
+                        pl.setStyle({ weight: w });
+                });
+            });
+        });
+    }
+
     // ========================================
     // MapApp - Main Application State
     // ========================================
@@ -429,6 +456,8 @@ def generate_javascript() -> str:
             applyLocalSymbolHighlighting();
         });
 
+        // Zoom-scale the track line width (thinner when zoomed out).
+        MapApp.map.on('zoomend', updateTrackWidths);
         // Re-weight rail-vehicle bodies so they stay wider than the track at any zoom.
         MapApp.map.on('zoomend', updateTrainWidths);
         // Show/hide per-RV destination labels by zoom (visible at ~20 m scale or tighter).
@@ -726,9 +755,11 @@ def generate_javascript() -> str:
                     const trackColor = section.is_switch ? COLORS.switch : regionTrackColor;
                     const polyline = L.polyline(path, {
                         color: trackColor,
-                        weight: 5,
+                        weight: trackWeightPx(),   // zoom-scaled (updateTrackWidths on zoomend)
                         opacity: 0.8
                     });
+                    polyline._trackLine = true;
+                    polyline._sectionId = section.id;
 
                     // Build detailed section popup
                     const sectionType = section.is_switch ? ' (Switch)' : '';
@@ -1652,10 +1683,12 @@ def generate_javascript() -> str:
         }
 
         if (MapApp.selectedSections.has(sectionId)) {
-            // Deselect - apply style to all layers in the feature group
+            // Deselect - restore the section's original colour + the zoom-scaled width.
             MapApp.selectedSections.delete(sectionId);
+            const idx = MapApp.sectionIndex.get(sectionId);
+            const restoreColor = (idx && idx.originalColor) || COLORS.track;
             featureGroup.eachLayer(layer => {
-                if (layer.setStyle) layer.setStyle({color: data.originalColor || COLORS.track, weight: 3});
+                if (layer.setStyle) layer.setStyle({color: restoreColor, weight: trackWeightPx()});
             });
 
             if (MapApp.selectedSections.size === 0) {
@@ -1675,8 +1708,10 @@ def generate_javascript() -> str:
 
     function clearSelection() {
         for (const [sectionId, data] of MapApp.selectedSections) {
+            const idx = MapApp.sectionIndex.get(sectionId);
+            const restoreColor = (idx && idx.originalColor) || COLORS.track;
             data.polyline.eachLayer(layer => {
-                if (layer.setStyle) layer.setStyle({color: data.originalColor || COLORS.track, weight: 3});
+                if (layer.setStyle) layer.setStyle({color: restoreColor, weight: trackWeightPx()});
             });
         }
         MapApp.selectedSections.clear();
@@ -2901,7 +2936,8 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
 </head><body>
 <div id="map"></div>
 {color_config}
-<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}, lodScaleM: {config.train_lod_scale_m}, lodMinCars: {config.train_lod_min_cars}}};</script>
+<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}, lodScaleM: {config.train_lod_scale_m}, lodMinCars: {config.train_lod_min_cars}}};
+window.TRACK_STYLE = {{width: {config.track_width}, minWidth: {config.track_min_width}, fullZoom: {config.track_full_zoom}}};</script>
 <script>window.__run8_authoring = {authoring_js}; window.__run8map = L.map('map', {{preferCanvas:true, maxZoom:22, zoomControl:true}}).setView([35,-117.8],9);</script>
 {js}
 </body></html>'''

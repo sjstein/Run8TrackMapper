@@ -363,3 +363,21 @@ Hysteresis still feeds train.moving, so both survive brief holds per [trains] mo
 Verified in-browser (moving/was_ai injected via a fetch patch): Show only moving 187->62 bodies;
 Highlight player trains -> 34 cyan collapsed lines (zoomed out) / 52 cyan highlight spines (zoomed
 in), visible on the yard. moving_count still shown in the status line.
+
+--- Zoom-scaled track line width (2026-08-30) ---
+Track polylines were a fixed weight:5 px at every zoom, so they looked too thick when zoomed
+out (compressed geography, constant px). Now the width scales with zoom via new [track] config:
+  width      (px) - full line width at/above full_zoom (default 5)
+  min_width  (px) - floor when zoomed far out (default 1.5)
+  full_zoom        - zoom at/above which the line is full width; below it the width HALVES per
+                     zoom level (proportional to metres-per-pixel) down to min_width. 0 = fixed
+                     `width`, no scaling. (default 14)
+Impl: config_parser [track] -> track_width/track_min_width/track_full_zoom; injected as
+window.TRACK_STYLE; trackWeightPx() = clamp(width*2^(zoom-full_zoom), min_width, width); sections
+render at trackWeightPx() (tagged _trackLine/_sectionId); new updateTrackWidths() on zoomend
+re-weights all non-selected sections. Verified: zoom9/12=1.5, zoom13=2.5, zoom14+=5 (capped).
+Also fixed a latent bug: section DEselect / clearSelection restored weight:3 AND referenced an
+undefined `data.originalColor` -> now restore the section's real colour (from sectionIndex) at
+trackWeightPx(). Selected sections stay weight 5 and are skipped by the zoom re-weighter.
+config-socal.ini: added a [track] section with the defaults as a reference.
+Needs a REGEN (viewer change).

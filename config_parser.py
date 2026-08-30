@@ -156,6 +156,12 @@ class VisualizationConfig:
     initial_track_opacity: float = 0.8  # [visualization] initial_track_opacity: track slider (fraction)
     world_save: Optional[Path] = None  # optional Run8 world save (.xml) to plot trains from
     railvehicle_db: Optional[Path] = None  # optional SQLite DB of rail-vehicle lengths
+    # ---- track line width (zoom-scaled) ----
+    track_width: float = 5.0        # [track] width: full track line width (px) at/above full_zoom
+    track_min_width: float = 1.5    # [track] min_width: floor width (px) when zoomed far out
+    track_full_zoom: float = 14.0   # [track] full_zoom: zoom at/above which the line shows full
+                                    # width; below it the width halves per zoom level down to
+                                    # min_width. 0 disables scaling (fixed `width` at every zoom).
     train_car_width: float = 7.0    # [trains] car_width: RV body min line width (px floor)
     train_spine_width: float = 1.5  # [trains] spine_width: train connecting-line width (px)
     train_car_width_m: float = 3.5  # [trains] car_width_m: real RV width (m); RVs widen with
@@ -515,6 +521,14 @@ def parse_config(config_path: str) -> VisualizationConfig:
         if _do:
             train_deoverlap = _do in ('1', 'true', 'yes', 'on')
 
+    # Parse [track] section (optional): zoom-scaled track line width.
+    track_width, track_min_width, track_full_zoom = 5.0, 1.5, 14.0
+    if 'track' in parser:
+        tk = parser['track']
+        track_width = _cfg_float(tk, 'width', track_width)
+        track_min_width = _cfg_float(tk, 'min_width', track_min_width)
+        track_full_zoom = _cfg_float(tk, 'full_zoom', track_full_zoom)
+
     # Parse [car_type_colors] (optional): INDUSTRY_CONFIG_CAR_TYPE -> hex colour for
     # the RV body. configparser lower-cases keys, so match car types case-insensitively.
     car_type_colors = {}
@@ -606,6 +620,9 @@ def parse_config(config_path: str) -> VisualizationConfig:
         train_lod_min_cars=train_lod_min_cars,
         train_moving_hysteresis=train_moving_hysteresis,
         train_deoverlap=train_deoverlap,
+        track_width=track_width,
+        track_min_width=track_min_width,
+        track_full_zoom=track_full_zoom,
         car_type_colors=car_type_colors,
         loco_company_colors=loco_company_colors,
         areas=areas,
