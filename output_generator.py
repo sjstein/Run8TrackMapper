@@ -318,15 +318,18 @@ def copy_leaflet_assets(output_dir: Path) -> None:
 
 
 def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_html: bool = True,
-                    tile_based: bool = False, align: bool = False, authoring: bool = True,
-                    world_save: str = None) -> None:
-    """Generate all output files (manifest.json, per-region JSON files, and index.html)
+                    authoring: bool = True, world_save: str = None) -> None:
+    """Generate all output files (manifest.json, per-region JSON files, and the
+    manual-alignment index.html).
+
+    The manual-alignment viewer is the only viewer, so output is always built in
+    the tile-coordinate ("uniform grid") mode that viewer aligns onto a real map.
 
     Args:
         config: Visualization configuration
         tile_dir: Override tile directory
         generate_html: Whether to generate index.html
-        tile_based: Use tile-based coordinates instead of lat/lon
+        authoring: When False, hide the align viewer's "Add Label" button (for hosting)
         world_save: Optional Run8 world save (.xml) to plot trains from; overrides
             config.world_save when given.
     """
@@ -340,25 +343,20 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
     print(f"\nOutput directory: {output_dir}")
     print(f"Data directory: {data_dir}")
 
-    # Determine tile_based_config
-    tile_based_config = None
-    if tile_based or align:
-        if config.tile_based:
-            tile_based_config = config.tile_based
-            print(f"\nUsing tile-based coordinates:")
-            print(f"  Home tile: {tile_based_config.home_tile}")
-            print(f"  Tile size: {tile_based_config.tile_width}m x {tile_based_config.tile_height}m")
-        else:
-            print("\nWarning: --tile-based flag specified but no [tile_based_plot] section in config")
-            print("Using default tile parameters")
-            from config_parser import TileBasedConfig
-            tile_based_config = TileBasedConfig()
+    # The align viewer always uses tile (uniform-grid) coordinates.
+    if config.tile_based:
+        tile_based_config = config.tile_based
+        print(f"\nUsing tile-based coordinates:")
+        print(f"  Home tile: {tile_based_config.home_tile}")
+        print(f"  Tile size: {tile_based_config.tile_width}m x {tile_based_config.tile_height}m")
+    else:
+        print("\nWarning: no [tile_based_plot] section in config; using default tile parameters")
+        from config_parser import TileBasedConfig
+        tile_based_config = TileBasedConfig()
 
-    # Load tile corrections (geographic mode only; align uses the uniform grid)
+    # Tile corrections are a geographic-viewer concept; the align viewer uses the
+    # uniform grid, so none are applied.
     tile_corrections = {}
-    if not (tile_based or align):
-        print(f"\nLoading tile corrections from: {config.tile_corrections}")
-        tile_corrections = load_tile_corrections(str(config.tile_corrections))
 
     # Load an optional world save (CLI --world overrides config world_save).
     world_trains = None
@@ -433,31 +431,25 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
     manifest_file = output_dir / "manifest.json"
     print(f"\nWriting manifest: {manifest_file}")
 
-    manifest = generate_manifest(config, regions_data, tile_corrections, tile_based or align,
+    manifest = generate_manifest(config, regions_data, tile_corrections, True,
                                  world_totals=world_totals)
-    if align:
-        seed = compute_align_seed(regions_data, tile_based_config, str(config.terrain_tile_dir))
-        if seed:
-            manifest["align"] = seed
-            print(f"  Align seed: {seed['lat']:.5f}, {seed['lon']:.5f}")
-        else:
-            print("  WARNING: could not compute align seed (no tile .tr4 found)")
+    seed = compute_align_seed(regions_data, tile_based_config, str(config.terrain_tile_dir))
+    if seed:
+        manifest["align"] = seed
+        print(f"  Align seed: {seed['lat']:.5f}, {seed['lon']:.5f}")
+    else:
+        print("  WARNING: could not compute align seed (no tile .tr4 found)")
     with open(manifest_file, 'w', encoding='utf-8') as f:
         json.dump(manifest, f, indent=2)
 
-    # Generate HTML if requested
+    # Generate HTML if requested (always the manual-alignment viewer).
     if generate_html:
         html_file = output_dir / "index.html"
         print(f"\nGenerating HTML: {html_file}")
-        if align:
-            from html_generator import generate_align_html
-            generate_align_html(config, html_file, authoring=authoring)
-        else:
-            from html_generator import generate_html as gen_html
-            gen_html(config, html_file, tile_based=tile_based)
-        # Standalone viewers (align, tile-based) load Leaflet locally; copy it in.
-        if align or tile_based:
-            copy_leaflet_assets(output_dir)
+        from html_generator import generate_align_html
+        generate_align_html(config, html_file, authoring=authoring)
+        # The standalone align viewer loads Leaflet locally; copy it in.
+        copy_leaflet_assets(output_dir)
 
     print(f"\nOutput generation complete!")
     print(f"  Manifest: {manifest_file}")
@@ -493,24 +485,11 @@ if __name__ == '__main__':
         help='Generate tile list report to FILE (skip normal output generation)'
     )
     parser.add_argument(
-        '--tile-based',
-        action='store_true',
-        dest='tile_based',
-        help='Generate plot using tile-based coordinates instead of lat/lon'
-    )
-    parser.add_argument(
-        '--minimal',
-        action='store_true',
-        dest='minimal',
-        help='Generate the minimal geographic viewer: per-tile bilinear georeference '
-             'with tile_corrections.csv applied (this was the previous default / no-flag behavior)'
-    )
-    parser.add_argument(
         '--align',
         action='store_true',
         dest='align',
-        help='Manual-alignment viewer (this is now the DEFAULT with no flag): contiguous '
-             'tile-based track over a real OSM/Satellite/ORM map, draggable to align, with all overlays'
+        help='Manual-alignment viewer. This is the DEFAULT (and now the only) viewer, '
+             'so this flag is a harmless no-op kept for backward compatibility.'
     )
     parser.add_argument(
         '--production',
@@ -533,11 +512,7 @@ if __name__ == '__main__':
 
     if args.tile_report:
         generate_tile_report(config, args.tile_report)
-    elif args.tile_based:
-        generate_output(config, tile_based=True, world_save=args.world)
-    elif args.minimal:
-        generate_output(config, world_save=args.world)   # minimal geographic (per-tile bilinear + corrections)
     elif args.production:
-        generate_output(config, align=True, authoring=False, world_save=args.world)  # align viewer, no label authoring
+        generate_output(config, authoring=False, world_save=args.world)  # align viewer, no label authoring
     else:
-        generate_output(config, align=True, world_save=args.world)  # DEFAULT: manual-alignment viewer
+        generate_output(config, world_save=args.world)  # DEFAULT: manual-alignment viewer

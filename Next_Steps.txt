@@ -266,3 +266,14 @@ Live-view FREEZE bug (found 2026-08-29, fixed before deploy):
   FOLLOW-UP: the P3 staleness/heartbeat badge is now higher value - it would have surfaced this
   as "stale" immediately instead of needing a live autopsy. Consider a periodic heap sanity check
   too. Re-test: run the map for >1 hr and watch DevTools Performance monitor JS heap stay flat.
+--- Viewer cleanup: removed --tile-based and --minimal viewers (2026-08-30) ---
+Both were subsets of the align viewer (which reproduces the undistorted contiguous grid with
+Base Map = None; its worldToLatLon is a pure uniform-scale + translate, so no shape distortion).
+They had also drifted - none of this session's train/UI work went into the tile-based copy.
+Removed: html_generator.generate_tile_based_html + generate_html (~1390 lines), the folium import;
+output_generator --tile-based / --minimal flags + their dispatch + generate_output's tile_based/
+align params (generate_output now always builds the align viewer in tile-coordinate mode).
+KEPT (align depends on it): the tile-COORDINATE extraction (TileBasedConfig / [tile_based_plot] /
+use_tile_coords / convert_run8_to_tile_coords / compute_align_seed). --align kept as a no-op alias.
+CLAUDE.md Output-modes table + stale tile-based references updated. Verified: all modules compile;
+align viewer regenerates and runs clean in-browser (trains load, follow works, no console errors).
