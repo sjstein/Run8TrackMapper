@@ -1933,11 +1933,18 @@ def _layout_consist(group, placer):
     sec_run = {k: ri for ri, run in enumerate(runs) for k in run}
 
     def car_run(ta, tb):
-        if ta is not None and ta[2] in sec_run:
-            return sec_run[ta[2]]
-        if tb is not None and tb[2] in sec_run:
-            return sec_run[tb[2]]
-        return None
+        # A car belongs to a run only if all of its trucks that land in *some* run
+        # land in the SAME one. A car whose two trucks fall in DIFFERENT runs (a
+        # boundary straddler, e.g. one truck each side of a yard gap the chain split
+        # on) must NOT be force-packed into one run: anchored on a single truck its
+        # footprint runs off the end of that run's polyline and _point_at_distance
+        # clamps it to a short stub. Returning None drops it to the per-truck
+        # fallback, which draws a full-length straight body bridging the two trucks.
+        hit = set()
+        for t in (ta, tb):
+            if t is not None and t[2] in sec_run:
+                hit.add(sec_run[t[2]])
+        return next(iter(hit)) if len(hit) == 1 else None
 
     def car_slot(ta, tb, full_len_m, body_len_m):
         # Layout slot = the coupled footprint (cars abut like a real coupled train,

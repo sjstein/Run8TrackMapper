@@ -15,7 +15,11 @@ refreshes manifest.json's "areas" so a fresh page load stays in sync too.
 Stdlib only - no third-party dependency (this replaces `python -m http.server`).
 
 API:
-    GET    /api/ping              -> {ok, areas_file, authoring}
+    GET    /api/ping              -> {ok, areas_file, authoring, uploads, world}
+    POST   /api/world             -> {ok, trains, vehicles, bytes, version}
+                                     push a (gzip-optional) world save into the slot;
+                                     enabled by --accept-uploads, gated by --upload-token
+    GET    /api/trains            -> {version, trains:{regionId:[...]}}  (re-plots on change)
     GET    /api/areas             -> {areas: [...]}          (merged: all sources)
     POST   /api/areas             -> created area dict       (writes writable file)
     PUT    /api/areas/<id>        -> updated area dict
@@ -25,6 +29,7 @@ color?,font_size?,box?,rotation?}.
 """
 
 import argparse
+import gzip
 import json
 import os
 import sys
@@ -43,11 +48,26 @@ from output_generator import train_to_dict
 from rv_length_db import load_rv_lengths
 
 
+# Upload guards for POST /api/world (world saves are ~1.7 MB; caps are generous
+# so a busy server's save still fits, while rejecting anything absurd / hostile).
+MAX_UPLOAD_COMPRESSED = 64 * 1024 * 1024     # bytes read off the wire
+MAX_UPLOAD_DECOMPRESSED = 256 * 1024 * 1024  # bytes after gunzip (zip-bomb guard)
+
+
+class WorldUploadError(Exception):
+    """Raised when an uploaded world save is rejected (bad size / not valid XML)."""
+
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
 class AuthoringState:
     """Shared, thread-safe state for the request handlers."""
 
     def __init__(self, config_path: Path, output_dir: Path, areas_file: Path,
-                 config=None, world_save: Path = None):
+                 config=None, world_save: Path = None,
+                 accept_uploads: bool = False, upload_token: str = None):
         self.config_path = config_path
         self.output_dir = output_dir
         self.manifest_path = output_dir / "manifest.json"
@@ -58,6 +78,12 @@ class AuthoringState:
         # ---- world-save train plotting (optional, with live mtime watch) ----
         self.config = config
         self.world_save = world_save
+        # When accept_uploads is set, POST /api/world writes the pushed save into
+        # `world_save` (a server-owned "slot"); the /api/trains mtime-watch then
+        # re-plots it exactly as if Run8 had written the file locally. An optional
+        # bearer token gates the endpoint (required for any non-localhost host).
+        self.accept_uploads = accept_uploads
+        self.upload_token = upload_token or None
         # regionId -> route_prefix (for filtering vehicles to each region)
         self.region_prefix = {r.id: r.route_prefix for r in (config.regions if config else [])}
         self._sections_cache = {}   # regionId -> [SectionData] (rebuilt from region JSON)
@@ -137,6 +163,46 @@ class AuthoringState:
         payload = {'version': mtime, 'trains': trains_by_region, 'totals': totals}
         self._trains_cache = {'mtime': mtime, 'payload': payload}
         return payload
+
+    # ---- world-save upload (call under self.lock) ----------------------
+    def ingest_world(self, xml_bytes: bytes) -> dict:
+        """Validate and atomically install a pushed world save into the slot.
+
+        `xml_bytes` is the already-decompressed XML. It is written to a temp file
+        beside `world_save`, parsed (a torn / non-XML upload raises and is
+        rejected, leaving the previous good save in place), then os.replace()'d
+        into the slot. Bumping the file's mtime makes /api/trains re-plot it.
+        Returns a small summary for the agent's response.
+        """
+        if not self.accept_uploads or self.world_save is None:
+            raise WorldUploadError("This server is not accepting world uploads", 403)
+        if len(xml_bytes) > MAX_UPLOAD_DECOMPRESSED:
+            raise WorldUploadError("World save too large", 413)
+
+        slot = self.world_save
+        slot.parent.mkdir(parents=True, exist_ok=True)
+        tmp = slot.with_suffix(slot.suffix + '.tmp')
+        try:
+            tmp.write_bytes(xml_bytes)
+            # Validate: parse_world_save raises ET.ParseError on a torn/non-XML
+            # body, so a half-written or garbage upload never clobbers the slot.
+            try:
+                parsed = parse_world_save(str(tmp))
+            except Exception as e:  # noqa: BLE001
+                raise WorldUploadError(f"Not a valid world save: {e}", 422)
+            os.replace(tmp, slot)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+        return {'ok': True,
+                'bytes': len(xml_bytes),
+                'trains': len(parsed),
+                'vehicles': sum(len(tr.vehicles) for tr in parsed),
+                'version': slot.stat().st_mtime}
 
     # ---- label operations (call under self.lock) -----------------------
     def merged_areas(self):
@@ -218,9 +284,30 @@ def make_handler(state: AuthoringState, authoring: bool):
 
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
+            # Track whether the response already set Cache-Control (API replies do,
+            # via _send_json) so end_headers only supplies a default for static
+            # assets. Must be set before super().__init__, which handles the request.
+            self._sent_cache_control = False
             # Serve static assets (index.html, manifest.json, data/*) from the
             # generated output directory rather than the process CWD.
             super().__init__(*args, directory=str(state.output_dir), **kwargs)
+
+        def send_header(self, key, value):
+            if key.lower() == 'cache-control':
+                self._sent_cache_control = True
+            super().send_header(key, value)
+
+        def end_headers(self):
+            # Without this, SimpleHTTPRequestHandler sends only Last-Modified on
+            # static files, so browsers apply heuristic freshness and serve a stale
+            # index.html / manifest.json / region JSON WITHOUT revalidating on a
+            # normal reload (the "F5 stale, Ctrl-F5 fixes it" bug). "no-cache" keeps
+            # the file cacheable but forces a revalidation every load (cheap 304s),
+            # so a live map never shows stale geometry. API replies keep their own
+            # no-store. This also makes behaviour deterministic behind Caddy.
+            if not self._sent_cache_control:
+                self.send_header('Cache-Control', 'no-cache')
+            super().end_headers()
 
         # ---- helpers ---------------------------------------------------
         def _send_json(self, obj, status=200):
@@ -261,7 +348,12 @@ def make_handler(state: AuthoringState, authoring: bool):
                 self._send_json({'ok': True,
                                  'areas_file': state.areas_file.name,
                                  'authoring': authoring,
-                                 'world': bool(state.world_save and state.world_save.exists())})
+                                 'uploads': state.accept_uploads,
+                                 # Report a world as present when uploads are enabled even
+                                 # before the first push, so the viewer starts polling
+                                 # /api/trains right away and picks up trains on arrival.
+                                 'world': bool(state.accept_uploads
+                                               or (state.world_save and state.world_save.exists()))})
                 return
             if path == '/api/trains':
                 try:
@@ -284,6 +376,9 @@ def make_handler(state: AuthoringState, authoring: bool):
 
         def do_POST(self):
             path = urlsplit(self.path).path
+            if path == '/api/world':
+                self._handle_world_upload()
+                return
             if path != '/api/areas':
                 self._error('Not found', 404)
                 return
@@ -367,6 +462,61 @@ def make_handler(state: AuthoringState, authoring: bool):
             except Exception as e:  # noqa: BLE001
                 self._error(str(e), 500)
 
+        # ---- world-save upload (POST /api/world) -----------------------
+        def _upload_authorized(self):
+            """True if the request may push a world save. When a token is
+            configured it must be presented as `Authorization: Bearer <token>`."""
+            if not state.upload_token:
+                return True
+            auth = self.headers.get('Authorization', '')
+            prefix = 'Bearer '
+            return auth.startswith(prefix) and auth[len(prefix):] == state.upload_token
+
+        def _handle_world_upload(self):
+            if not state.accept_uploads:
+                self._error('This server is not accepting world uploads '
+                            '(start it with --accept-uploads)', 403)
+                return
+            if not self._upload_authorized():
+                self._error('Unauthorized', 401)
+                return
+            length = self.headers.get('Content-Length')
+            if length is None:
+                self._error('Content-Length required', 411)
+                return
+            try:
+                length = int(length)
+            except ValueError:
+                self._error('Bad Content-Length')
+                return
+            if length > MAX_UPLOAD_COMPRESSED:
+                self._error('Upload too large', 413)
+                return
+            raw = self.rfile.read(length) if length else b''
+
+            enc = (self.headers.get('Content-Encoding') or '').lower()
+            if 'gzip' in enc:
+                try:
+                    xml_bytes = gzip.decompress(raw)
+                except (OSError, EOFError) as e:
+                    self._error(f'Could not gunzip body: {e}')
+                    return
+            else:
+                xml_bytes = raw
+
+            try:
+                with state.lock:
+                    summary = state.ingest_world(xml_bytes)
+            except WorldUploadError as e:
+                self._error(str(e), e.status)
+                return
+            except Exception as e:  # noqa: BLE001
+                self._error(str(e), 500)
+                return
+            print(f"  world upload: {summary['trains']} train(s), "
+                  f"{summary['vehicles']} vehicle(s), {summary['bytes']} bytes")
+            self._send_json(summary)
+
         # ---- build a new area from a POST payload ----------------------
         def _build_new_area(self, payload):
             label = str(payload.get('label', '')).strip()
@@ -437,7 +587,15 @@ def main():
                         help='Serve read-only (disable the create/edit/delete API)')
     parser.add_argument('--world', metavar='FILE', dest='world',
                         help='Run8 world save (.xml) to plot trains from, watched for live '
-                             'updates (overrides [visualization] world_save in the config)')
+                             'updates (overrides [visualization] world_save in the config). '
+                             'With --accept-uploads this is the server-owned slot the pushed '
+                             'save is written to (default: <output>/_world_upload.xml).')
+    parser.add_argument('--accept-uploads', dest='accept_uploads', action='store_true',
+                        help='Enable POST /api/world so a remote agent can push world saves '
+                             'into the slot (see --world). Trains re-plot on each push.')
+    parser.add_argument('--upload-token', dest='upload_token', metavar='TOKEN',
+                        help='Require this bearer token on POST /api/world. Strongly '
+                             'recommended for any non-localhost host.')
     args = parser.parse_args()
 
     config = parse_config(args.config)
@@ -451,6 +609,10 @@ def main():
             world_save = Path.cwd() / world_save
     elif config.world_save:
         world_save = Path(config.world_save)
+    # With uploads on but no explicit save path, use a server-owned slot so the
+    # agent has somewhere to push to (and we never touch Run8's own autosave).
+    if args.accept_uploads and world_save is None:
+        world_save = output_dir / '_world_upload.xml'
     if not (output_dir / 'index.html').exists():
         print(f"ERROR: {output_dir / 'index.html'} not found. Generate it first:\n"
               f"    python output_generator.py {args.config}", file=sys.stderr)
@@ -464,7 +626,9 @@ def main():
 
     state = AuthoringState(Path(args.config), output_dir,
                            areas_file or output_dir / '_noauthoring.ini',
-                           config=config, world_save=world_save)
+                           config=config, world_save=world_save,
+                           accept_uploads=args.accept_uploads,
+                           upload_token=args.upload_token)
     if args.authoring:
         # Make sure the served manifest matches the areas files on disk at startup.
         try:
@@ -483,7 +647,11 @@ def main():
         print(f"  Mode    : read-only (no label authoring)")
     if world_save:
         exists = " (not found yet)" if not world_save.exists() else ""
-        print(f"  World   : {world_save}{exists}  [live-watched]")
+        role = "upload slot" if args.accept_uploads else "live-watched"
+        print(f"  World   : {world_save}{exists}  [{role}]")
+    if args.accept_uploads:
+        tok = "token required" if args.upload_token else "NO TOKEN (localhost only!)"
+        print(f"  Uploads : POST /api/world enabled  [{tok}]")
     print(f"  URL     : http://{args.host}:{args.port}/")
     print(f"\nPress Ctrl+C to stop.\n")
     try:

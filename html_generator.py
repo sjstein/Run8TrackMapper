@@ -50,7 +50,7 @@ def generate_javascript() -> str:
     const COLORS = window.COLORS;
     // Rail-vehicle line widths from [trains] config, with safe defaults.
     // car = min px floor; carM = real car width (m) the body widens to with zoom.
-    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30};
+    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14};
 
     // ========================================
     // MapApp - Main Application State
@@ -63,7 +63,6 @@ def generate_javascript() -> str:
         signalIndex: new Map(),    // signal_id -> {region_id, marker, metadata}
         industryIndex: [],         // [{region_id, data}]
         aiLocationIndex: [],       // [{region_id, data}]
-        trainLayers: [],           // all rendered rail-vehicle polylines
         trainIndex: [],            // [{regionId, trainId, vehicle, layer}] for search
         industrySectionIds: new Set(),  // Set of "regionId_sectionId" keys for industry tracks
 
@@ -523,6 +522,13 @@ def generate_javascript() -> str:
                 <option value="section">Track Section</option>
                 <option value="train">Train / Rail Vehicle</option>
             </select>
+            <div id="train-field-row" style="display:none;margin:6px 0;font-size:13px;">
+                <span style="color:#555;">Match:</span>
+                <label style="margin-left:4px;"><input type="radio" name="train-field" value="all" checked> All</label>
+                <label style="margin-left:6px;"><input type="radio" name="train-field" value="unit"> Unit&nbsp;#</label>
+                <label style="margin-left:6px;"><input type="radio" name="train-field" value="tag"> Tag</label>
+                <label style="margin-left:6px;"><input type="radio" name="train-field" value="trainId"> Train&nbsp;ID</label>
+            </div>
             <input type="text" id="search-input" placeholder="Enter search term...">
             <div id="search-results"></div>
         `;
@@ -541,6 +547,18 @@ def generate_javascript() -> str:
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') closeSearch();
         });
+
+        // The Train / Rail Vehicle search can be narrowed to one field via radios
+        // (All / Unit # / Tag / Train ID), shown only for that search type.
+        const typeSel = document.getElementById('search-type');
+        const trainFieldRow = document.getElementById('train-field-row');
+        const syncTrainFieldRow = () => {
+            trainFieldRow.style.display = (typeSel.value === 'train') ? 'block' : 'none';
+        };
+        typeSel.addEventListener('change', () => { syncTrainFieldRow(); performSearch(); });
+        trainFieldRow.querySelectorAll('input[name="train-field"]')
+            .forEach(r => r.addEventListener('change', performSearch));
+        syncTrainFieldRow();
 
         MapApp.searchDialog = dialog;
     }
@@ -1003,7 +1021,7 @@ def generate_javascript() -> str:
         return L.divIcon({
             className: 'rv-dest-label',
             html: `<div style="transform:translate(-50%,-50%);color:#fff;`
-                + `font:bold 11px/1 system-ui,sans-serif;white-space:nowrap;`
+                + `font:bold ${TRAIN_STYLE.labelSize||14}px/1 system-ui,sans-serif;white-space:nowrap;`
                 + `text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000;">`
                 + `${text}</div>`,
             iconSize: null, iconAnchor: [0, 0]
@@ -1017,11 +1035,26 @@ def generate_javascript() -> str:
     function renderTrains(regionId, data, layers) {
         // Idempotent per region: drop prior entries (e.g. a re-align rebuild).
         MapApp.trainIndex = MapApp.trainIndex.filter(it => it.regionId !== regionId);
+
+        // Resolve every train's drawable cars once.
+        const drawn = [];
         for (const train of (data.trains || [])) {
-            const carBodies = [];  // resolved bodies, for the connecting spine
+            const cars = [];
             for (const v of train.vehicles) {
                 if (!v.resolved || !v.body || v.body.length < 2) continue;
-                const isLoco = /DieselEngine|Electric|Steam|Engine/i.test(v.unit_type || '');
+                cars.push({v, isLoco: /DieselEngine|Electric|Steam|Engine/i.test(v.unit_type || '')});
+            }
+            drawn.push({train, cars});
+        }
+
+        // Pass 1: every train's connecting spine FIRST, so the RV bodies drawn in
+        // pass 2 sit ON TOP of it (the spine reads as a thin backbone behind the
+        // cars instead of a line painted across them).
+        for (const {cars} of drawn) drawTrainOutline(cars.map(c => c.v.body), layers.trains);
+
+        // Pass 2: RV bodies + destination tags, above the spines.
+        for (const {train, cars} of drawn) {
+            for (const {v, isLoco} of cars) {
                 const line = L.polyline(v.body, {
                     color: rvBodyColor(v, isLoco),
                     weight: rvBodyWeightPx(),
@@ -1034,9 +1067,7 @@ def generate_javascript() -> str:
                 line.bindTooltip(trainVehicleTooltip(train, v), {sticky: true});
                 line.bindPopup(trainVehiclePopup(train, v), {maxWidth: 300});
                 line.addTo(layers.trains);
-                MapApp.trainLayers.push(line);
                 MapApp.trainIndex.push({regionId, trainId: train.train_id, vehicle: v, layer: line});
-                carBodies.push(v.body);
 
                 // Destination tag centered on the car (zoom-gated visibility).
                 if (v.destination_tag) {
@@ -1046,8 +1077,6 @@ def generate_javascript() -> str:
                     }).addTo(layers.trainLabels);
                 }
             }
-            // A thin line joins all the cars in this train so a consist reads as one unit.
-            drawTrainOutline(carBodies, layers.trains);
         }
     }
 
@@ -1161,8 +1190,94 @@ def generate_javascript() -> str:
         if (v.car_type) html += `Car type: ${v.car_type}<br>`;
         html += `Destination: ${v.destination_tag || 'N/A'}`;
         if (v.rv_filename) html += `<br><span style="color:#888;font-size:11px;">${v.rv_filename}</span>`;
+        html += `<br><button type="button" style="margin-top:6px;cursor:pointer;"`
+             + ` onclick="MapApp.followTrain(${train.train_id})">Follow this train</button>`;
         return html;
     }
+
+    // ---- Follow a train: auto-center the map on it as it moves each poll ----
+    MapApp.followTrainId = null;
+    function _followBannerEl() {
+        let el = document.getElementById('follow-banner');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'follow-banner';
+            el.style.cssText = 'position:absolute;top:10px;left:50%;transform:translateX(-50%);'
+                + 'z-index:1500;background:rgba(0,0,0,0.78);color:#fff;padding:6px 10px;'
+                + 'border-radius:6px;font:13px system-ui,sans-serif;display:none;'
+                + 'align-items:center;gap:8px;';
+            document.body.appendChild(el);
+        }
+        return el;
+    }
+    function _escHtml(s) {
+        return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    }
+    // Lead locomotive = first vehicle in the train's world-save order.
+    function _leadVehicle(trainId) {
+        for (const [, region] of MapApp.loadedRegions) {
+            for (const tr of (region.data && region.data.trains) || []) {
+                if (tr.train_id === trainId) return (tr.vehicles && tr.vehicles[0]) || null;
+            }
+        }
+        return null;
+    }
+    // Banner label: the lead loco's destination tag + unit number (train ID is not
+    // interesting to end users), e.g. "Z-LPSD-2040 (#3342)". Falls back gracefully.
+    function _followLabel(trainId) {
+        const lead = _leadVehicle(trainId);
+        if (lead) {
+            const tag = (lead.destination_tag || '').trim();
+            const unit = (lead.unit_number || '').trim();
+            if (tag && unit) return `${_escHtml(tag)} (#${_escHtml(unit)})`;
+            if (tag) return _escHtml(tag);
+            if (unit) return `#${_escHtml(unit)}`;
+        }
+        return `${trainId}`;
+    }
+    function updateFollowBanner() {
+        const el = _followBannerEl();
+        if (MapApp.followTrainId == null) { el.style.display = 'none'; return; }
+        el.innerHTML = `Following Train ${_followLabel(MapApp.followTrainId)} `
+            + `<button type="button" style="cursor:pointer;" onclick="MapApp.stopFollow()">Stop</button>`;
+        el.style.display = 'flex';
+    }
+    function _followedLatLngs() {
+        const pts = [];
+        for (const it of MapApp.trainIndex) {
+            if (it.trainId === MapApp.followTrainId && it.layer && it.layer.getLatLngs)
+                for (const ll of it.layer.getLatLngs()) pts.push(ll);
+        }
+        return pts;
+    }
+    // Re-center on the followed train. `fit` (start of follow) zooms to frame the
+    // whole consist once; subsequent calls just pan to keep it centred as it moves.
+    function centerOnFollowed(fit) {
+        if (MapApp.followTrainId == null) return;
+        const pts = _followedLatLngs();
+        if (!pts.length) return;   // followed train not currently loaded / placed
+        const b = L.latLngBounds(pts);
+        if (fit && !MapApp._followFitDone) {
+            MapApp.map.fitBounds(b, { padding: [60, 60], maxZoom: 16 });
+            MapApp._followFitDone = true;
+        } else {
+            MapApp.map.panTo(b.getCenter(), { animate: true });
+        }
+    }
+    MapApp.centerOnFollowed = centerOnFollowed;
+    MapApp.followTrain = function (trainId) {
+        MapApp.followTrainId = trainId;
+        MapApp._followFitDone = false;
+        if (MapApp.map.closePopup) MapApp.map.closePopup();
+        // Following implies the Trains overlay should be on and visible.
+        if (!MapApp.overlayStates.trains && typeof toggleOverlay === 'function') toggleOverlay('trains', true);
+        updateFollowBanner();
+        centerOnFollowed(true);
+    };
+    MapApp.stopFollow = function () {
+        MapApp.followTrainId = null;
+        updateFollowBanner();
+    };
 
     function unloadRegion(regionId) {
         const region = MapApp.loadedRegions.get(regionId);
@@ -1570,12 +1685,18 @@ def generate_javascript() -> str:
                 }
             }
         } else if (searchType === 'train') {
-            // Match trainID, destinationTag, or unitNumber (substring, case-insensitive)
+            // Match on the field chosen by the radios (default All): Unit #, Tag,
+            // Train ID, or all three (substring, case-insensitive).
+            const field = (document.querySelector('input[name="train-field"]:checked') || {}).value || 'all';
             for (let i = 0; i < MapApp.trainIndex.length; i++) {
                 const it = MapApp.trainIndex[i];
                 const v = it.vehicle;
-                const hay = [String(it.trainId), v.unit_number || '', v.destination_tag || '']
-                    .join(' ').toLowerCase();
+                const hay = (
+                    field === 'unit'    ? (v.unit_number || '') :
+                    field === 'tag'     ? (v.destination_tag || '') :
+                    field === 'trainId' ? String(it.trainId) :
+                    [String(it.trainId), v.unit_number || '', v.destination_tag || ''].join(' ')
+                ).toLowerCase();
                 if (hay.includes(query)) {
                     results.push({
                         type: 'train',
@@ -1680,7 +1801,10 @@ def generate_javascript() -> str:
         openSearch,
         closeSearch,
         goToResult,
-        clearSelection: clearSelection
+        clearSelection: clearSelection,
+        // Exposed for inline onclick handlers (train popup / follow banner).
+        followTrain: MapApp.followTrain,
+        stopFollow: MapApp.stopFollow
     };
 
     // Start initialization
@@ -1906,13 +2030,13 @@ window.COLORS = {{
     trainLoco: '{colors.train_loco}',
     trainOutline: '{colors.train_outline}'
 }};
-window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}}};
+window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}}};
 
 (function() {{
     'use strict';
 
     const COLORS = window.COLORS;
-    const TRAIN_STYLE = window.TRAIN_STYLE || {{car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30}};
+    const TRAIN_STYLE = window.TRAIN_STYLE || {{car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14}};
 
     const MapApp = {{
         map: null,
@@ -1930,7 +2054,6 @@ window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine
         industryLayers: [],
         aiLayers: [],
         tileLayers: [],
-        trainLayers: [],
         trainIndex: [],   // {{ regionId, trainId, vehicle, layer }} for search
         // Local symbol filtering state
         localSymbolIndex: new Set(),
@@ -2272,7 +2395,6 @@ window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine
                 line.bindTooltip(tip, {{ sticky: true }});
                 line.bindPopup(trainVehiclePopup(train, v), {{ maxWidth: 300 }});
                 line.addTo(layerGroup);
-                MapApp.trainLayers.push(line);
                 MapApp.trainIndex.push({{ regionId, trainId: train.train_id, vehicle: v, layer: line }});
             }}
         }}
@@ -3403,6 +3525,20 @@ ALIGN_JS = r'''
         if (MapApp._trainsPoll) return;
         pollTrainsOnce();
         MapApp._trainsPoll = setInterval(pollTrainsOnce, 3000);
+        // Recover from background-timer throttling / machine sleep: when the tab
+        // becomes visible again, browsers may have stalled the 3s interval, leaving
+        // the map frozen on stale positions. Force an immediate refresh (and revive
+        // the interval if it was cleared), so returning to the tab self-heals with
+        // no reload needed. Reset the version guard so the re-poll always re-renders.
+        if (!MapApp._trainsVisHooked){
+            MapApp._trainsVisHooked = true;
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState !== 'visible') return;
+                MapApp.trainsVersion = null;
+                if (!MapApp._trainsPoll) MapApp._trainsPoll = setInterval(pollTrainsOnce, 3000);
+                pollTrainsOnce();
+            });
+        }
     }
     function applyLiveTrains(j){
         if (!j || !j.trains) return;
@@ -3431,6 +3567,8 @@ ALIGN_JS = r'''
             if (MapApp.overlayStates.trains) region.layers.trains.addTo(MapApp.map);
         }
         updateTrainLabelVisibility();
+        // Keep the followed train centred as its new positions land.
+        if (MapApp.centerOnFollowed) MapApp.centerOnFollowed(false);
     }
     function apiArea(method, id, body){
         const url = 'api/areas' + (id != null ? '/' + encodeURIComponent(id) : '');
@@ -3948,7 +4086,7 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
 </head><body>
 <div id="map"></div>
 {color_config}
-<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}}};</script>
+<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}}};</script>
 <script>window.__run8_authoring = {authoring_js}; window.__run8map = L.map('map', {{preferCanvas:true, maxZoom:22, zoomControl:true}}).setView([35,-117.8],9);</script>
 {js}
 </body></html>'''
