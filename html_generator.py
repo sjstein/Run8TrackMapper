@@ -50,7 +50,7 @@ def generate_javascript() -> str:
     const COLORS = window.COLORS;
     // Rail-vehicle line widths from [trains] config, with safe defaults.
     // car = min px floor; carM = real car width (m) the body widens to with zoom.
-    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14};
+    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14, lodScaleM: 300, lodMinCars: 3};
 
     // ========================================
     // MapApp - Main Application State
@@ -432,6 +432,8 @@ def generate_javascript() -> str:
         MapApp.map.on('zoomend', updateTrainWidths);
         // Show/hide per-RV destination labels by zoom (visible at ~20 m scale or tighter).
         MapApp.map.on('zoomend', updateTrainLabelVisibility);
+        // Switch train detail level (full cars <-> single collapsed line) by zoom.
+        MapApp.map.on('zoomend', updateTrainLOD);
     }
 
     function createSearchDialog() {
@@ -1047,6 +1049,20 @@ def generate_javascript() -> str:
             drawn.push({train, cars});
         }
 
+        // Zoom LOD: when zoomed out past the threshold (scale bar >= lodScaleM,
+        // default 300 m), drop singles / short trains and draw each longer train
+        // (> lodMinCars cars, default 3) as ONE solid line in its lead car's colour
+        // that just shows the train's length. Thresholds live in TRAIN_STYLE (moved
+        // to config after review; fall back to 300 / 3 here).
+        MapApp._trainLOD = _trainCollapsed() ? 'collapsed' : 'detailed';
+        if (MapApp._trainLOD === 'collapsed') {
+            const minCars = (window.TRAIN_STYLE && TRAIN_STYLE.lodMinCars) || 3;
+            for (const {train, cars} of drawn) {
+                if (cars.length > minCars) drawCollapsedTrain(regionId, train, cars, layers.trains);
+            }
+            return;
+        }
+
         // Pass 1: every train's connecting spine FIRST, so the RV bodies drawn in
         // pass 2 sit ON TOP of it (the spine reads as a thin backbone behind the
         // cars instead of a line painted across them).
@@ -1078,6 +1094,51 @@ def generate_javascript() -> str:
                 }
             }
         }
+    }
+
+    // ---- Zoom LOD: collapse long trains to a single line when zoomed out ----
+    // True when the scale bar reads >= lodScaleM metres (default 300) - i.e. far out.
+    function _trainCollapsed() {
+        const thr = (window.TRAIN_STYLE && TRAIN_STYLE.lodScaleM) || 300;
+        return _scaleBarMeters() >= thr;
+    }
+    // Draw one train as a single solid line tracing its length (front tip -> car
+    // centres -> rear tip), coloured by the lead car/loco. One trainIndex entry
+    // (lead vehicle) keeps search / follow working while collapsed.
+    function drawCollapsedTrain(regionId, train, cars, layerGroup) {
+        const bodies = cars.map(c => c.v.body);
+        const centers = bodies.map(_midpoint);
+        const order = _chainOrder(centers);
+        const cen = order.map(i => centers[i]);
+        const ob = order.map(i => bodies[i]);
+        const frontEnd = _outerEnd(ob[0], cen.length > 1 ? cen[1] : null);
+        const rearEnd = _outerEnd(ob[ob.length - 1], cen.length > 1 ? cen[cen.length - 2] : null);
+        const lead = cars[0];
+        const line = L.polyline([frontEnd, ...cen, rearEnd], {
+            color: rvBodyColor(lead.v, lead.isLoco),
+            weight: rvBodyWeightPx(),
+            opacity: 0.95,
+            lineCap: 'round'
+        });
+        line._rvBody = true;   // rescales with zoom like a normal RV body
+        line.bindTooltip(trainVehicleTooltip(train, lead.v), {sticky: true});
+        line.bindPopup(trainVehiclePopup(train, lead.v), {maxWidth: 300});
+        line.addTo(layerGroup);
+        MapApp.trainIndex.push({regionId, trainId: train.train_id, vehicle: lead.v, layer: line});
+    }
+    // Re-render all loaded regions' trains when a zoom change crosses the LOD
+    // threshold (detailed <-> collapsed), reusing each region's stored data.
+    function updateTrainLOD() {
+        const mode = _trainCollapsed() ? 'collapsed' : 'detailed';
+        if (mode === MapApp._trainLOD) return;
+        MapApp.loadedRegions.forEach((region, regionId) => {
+            if (!region.layers || !region.layers.trains) return;
+            region.layers.trains.clearLayers();
+            region.layers.trainLabels.clearLayers();
+            renderTrains(regionId, region.data, region.layers);
+            if (MapApp.overlayStates.trains) region.layers.trains.addTo(MapApp.map);
+        });
+        updateTrainLabelVisibility();
     }
 
     // meters per screen pixel at the current view (for zoom-gated RV labels).
@@ -2030,13 +2091,13 @@ window.COLORS = {{
     trainLoco: '{colors.train_loco}',
     trainOutline: '{colors.train_outline}'
 }};
-window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}}};
+window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}, lodScaleM: {config.train_lod_scale_m}, lodMinCars: {config.train_lod_min_cars}}};
 
 (function() {{
     'use strict';
 
     const COLORS = window.COLORS;
-    const TRAIN_STYLE = window.TRAIN_STYLE || {{car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14}};
+    const TRAIN_STYLE = window.TRAIN_STYLE || {{car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14, lodScaleM: 300, lodMinCars: 3}};
 
     const MapApp = {{
         map: null,
@@ -4086,7 +4147,7 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
 </head><body>
 <div id="map"></div>
 {color_config}
-<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}}};</script>
+<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}, lodScaleM: {config.train_lod_scale_m}, lodMinCars: {config.train_lod_min_cars}}};</script>
 <script>window.__run8_authoring = {authoring_js}; window.__run8map = L.map('map', {{preferCanvas:true, maxZoom:22, zoomControl:true}}).setView([35,-117.8],9);</script>
 {js}
 </body></html>'''

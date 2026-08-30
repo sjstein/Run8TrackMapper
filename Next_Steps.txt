@@ -213,8 +213,15 @@ P1 STATUS - IMPLEMENTED 2026-08-28 (single-tenant; push path proven end-to-end):
       (all client-side in the generated index.html). NOTE for regen: I only touched the
       GEOGRAPHIC/align renderTrains + search; the separate --tile-based copies (generate_tile_based_html)
       were left as-is - mirror #2/#5 there later if the tile viewer needs parity.
-      [TODO] #3 Zoom LOD (shrink/remove spine + squash train to one shape when zoomed out) and
-             #4 (plot only moving trains + count on the move; needs server-side save-diffing).
+      [DONE] #3 Zoom LOD - when the scale bar reads >= lod_scale_m (config, default 300 m),
+             trains collapse: singles/short trains (<= lod_min_cars cars, config, default 3) are
+             hidden, and each longer train draws as ONE solid line tracing its length, coloured by
+             the lead car/loco. A zoomend handler (updateTrainLOD) re-renders on threshold cross;
+             search/follow keep working (one lead entry per collapsed train). Gates are config-
+             driven: [trains] lod_scale_m / lod_min_cars (config_parser + injected TRAIN_STYLE.
+             lodScaleM/lodMinCars; JS falls back to 300/3). Validated in-browser (collapsed at
+             ~390 m, detailed at ~30 m, no console errors). Needs a REGEN to ship.
+      [TODO] #4 (plot only moving trains + count on the move; needs server-side save-diffing).
              Deferred by choice - design first.
 
 P1 live-run verdict (2026-08-28): client/server connection worked with no surprises - refresh
