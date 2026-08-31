@@ -381,3 +381,39 @@ undefined `data.originalColor` -> now restore the section's real colour (from se
 trackWeightPx(). Selected sections stay weight 5 and are skipped by the zoom re-weighter.
 config-socal.ini: added a [track] section with the defaults as a reference.
 Needs a REGEN (viewer change).
+
+--- Collapsed-train head-end arrow (2026-08-30) ---
+When zoomed out past lod_scale_m, a collapsed train used to be ONE line in the railroad-leader
+colour. Now the body line is neutral GREY and the LEAD locomotive gets a small filled arrow in
+the railroad's colour, pointing the way it faces (head-end differentiation). A highlighted player
+train stays fully cyan (body + arrow).
+Cost: cheap - one extra canvas polygon per collapsed train (no DOM, no plugins). The arrow is
+computed in PIXEL space (_arrowLatLngs via latLngToLayerPoint) for a constant on-screen size and
+re-fitted on zoomend in updateTrainWidths (alongside the _rvBody reweight / _rvHighlight). Head
+tip = the LEAD car's (cars[0]) body endpoint farthest from car[1] (so it's the true consist head,
+not the geometry-ordered chain end). Constants in _arrowLatLngs (AHEAD/BASE/HALF px) + grey
+COLLAPSED_BODY_COLOR are hardcoded - can move to config after review.
+Verified in-browser at Barstow (zoom 13-15, collapsed): 188 grey bodies + 188 colour head arrows,
+constant size across zoom, no console errors. Needs a REGEN.
+
+--- Head-arrow orientation fix (2026-08-30) ---
+Bug: at wide zoom the arrow spun to a wrong angle (~90 deg off at 3 km). NOT a shape-drawing
+limitation - the heading was derived from the LEAD LOCO's own two body endpoints (~20 m apart),
+which project to sub-pixel when zoomed out, so the direction was rounding noise.
+Fix: _arrowLatLngs now takes the car centres head->tail (`centers`, consist order) and walks them
+to the first that is >= 14 px from the head tip -> a well-separated, stable heading at any zoom
+(adaptive: nearby centre when zoomed in, farther one when zoomed out). Stored as arrow._headRefs
+and re-fitted on zoom. Verified: heading 157.1 deg CONSTANT across zoom 13-16 (was swinging);
+arrows visually align with the track at 3 km. Length stays 14.1 px. No console errors.
+
+--- UI defaults tweak (2026-08-30) ---
+* Base map now defaults to "None" at startup (was OpenStreetMap): setupMap adds baseLayers['None'],
+  currentBaseLayer='None', the None radio is checked.
+* Train option "Colored cars" -> relabelled "Show colored cars" and now defaults OFF (all non-loco
+  cars use the box-car colour by default; locos still company-coloured).
+* Train option "Hide non-trains" -> renamed "Show cuts of cars" with REVERSED sense: CHECKED shows
+  the loose cuts (non-loco-led rail vehicles), default OFF (only consists led by a loco). renderTrains
+  filter is now `if (!isConsist && !opts.showCuts) continue`. State key hideNonTrains -> showCuts.
+Verified in-browser: None base map selected; options read Show colored cars / Show cuts of cars /
+Show only moving / Highlight player trains (all off); toggling Show cuts adds the cuts (5479 -> 8345
+car bodies). No console errors.

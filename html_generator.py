@@ -106,15 +106,15 @@ def generate_javascript() -> str:
         },
         // Train display options (the "Options" button next to the Trains overlay).
         trainOptions: {
-            coloredCars: true,      // false = paint every non-loco car the box-car colour
-            hideNonTrains: false,   // true = show only consists led by a locomotive
+            coloredCars: false,     // false = paint every non-loco car the box-car colour
+            showCuts: false,        // false = only consists led by a loco; true = also loose cuts
             showOnlyMoving: false,  // true = only plot trains moving between saves (live only)
             highlightPlayers: false // true = highlight player trains (moving && not AI) with a bright spine
         },
 
         // Base map layers
         baseLayers: {},  // {name: layer}
-        currentBaseLayer: 'OpenStreetMap',
+        currentBaseLayer: 'None',
 
         // UI elements
         regionCheckboxes: new Map(),
@@ -191,9 +191,9 @@ def generate_javascript() -> str:
             }
         });
 
-        // Add OpenStreetMap as default
-        MapApp.baseLayers['OpenStreetMap'].addTo(MapApp.map);
-        MapApp.currentBaseLayer = 'OpenStreetMap';
+        // Start with no base map ("None"); the user can switch via the radios.
+        MapApp.baseLayers['None'].addTo(MapApp.map);
+        MapApp.currentBaseLayer = 'None';
 
         createControlPanel();
         createSearchDialog();
@@ -324,7 +324,7 @@ def generate_javascript() -> str:
             <h4>Base Map</h4>
             <div id="basemap-list">
                 <div class="basemap-item">
-                    <input type="radio" name="basemap" id="basemap-osm" value="OpenStreetMap" checked>
+                    <input type="radio" name="basemap" id="basemap-osm" value="OpenStreetMap">
                     <label for="basemap-osm">OpenStreetMap</label>
                 </div>
                 <div class="basemap-item">
@@ -332,7 +332,7 @@ def generate_javascript() -> str:
                     <label for="basemap-satellite">Satellite</label>
                 </div>
                 <div class="basemap-item">
-                    <input type="radio" name="basemap" id="basemap-none" value="None">
+                    <input type="radio" name="basemap" id="basemap-none" value="None" checked>
                     <label for="basemap-none">None</label>
                 </div>
                 <div class="basemap-item" style="margin-top:6px;border-top:1px solid #eee;padding-top:6px;">
@@ -1021,6 +1021,8 @@ def generate_javascript() -> str:
     // [car_type_colors] (keyed by INDUSTRY_CONFIG_CAR_TYPE), falling back to
     // [colors] train.
     const PLAYER_HL_COLOR = '#00e5ff';   // bright cyan spine for player-crewed trains
+    const COLLAPSED_BODY_COLOR = '#9aa0a6';  // neutral grey for a collapsed train's body line
+                                             // (the head arrow carries the railroad colour)
     function _isLocoType(unitType) {
         return /DieselEngine|Electric|Steam|Engine/i.test(unitType || '');
     }
@@ -1077,6 +1079,8 @@ def generate_javascript() -> str:
                     // Player-highlight spine stays a touch wider than the car so it
                     // reads as a coloured casing at every zoom.
                     else if (l._rvHighlight && l.setStyle) l.setStyle({ weight: _highlightWeight(w) });
+                    // Head-end arrows keep a constant on-screen size + stable heading across zoom.
+                    else if (l._rvArrow && l.setLatLngs) l.setLatLngs(_arrowLatLngs(l._headTip, l._headRefs));
                 });
         });
     }
@@ -1108,7 +1112,7 @@ def generate_javascript() -> str:
         const drawn = [];
         for (const train of (data.trains || [])) {
             const isConsist = _isConsist(train);
-            if (opts.hideNonTrains && !isConsist) continue;    // hide cuts with no lead loco
+            if (!isConsist && !opts.showCuts) continue;         // cuts (no lead loco) hidden unless shown
             if (opts.showOnlyMoving && !train.moving) continue; // hide stationary trains
             const cars = [];
             for (const v of train.vehicles) {
@@ -1173,9 +1177,39 @@ def generate_javascript() -> str:
         const thr = (window.TRAIN_STYLE && TRAIN_STYLE.lodScaleM) || 300;
         return _scaleBarMeters() >= thr;
     }
-    // Draw one train as a single solid line tracing its length (front tip -> car
-    // centres -> rear tip), coloured by the lead car/loco. One trainIndex entry
-    // (lead vehicle) keeps search / follow working while collapsed.
+    // Triangle (in [lat,lon]) for a head-end arrow, computed in PIXEL space for a
+    // constant on-screen size. Heading = from a reference point back in the consist
+    // toward the head tip. `refsLL` are the car centres head->tail: we walk them to
+    // the first that is >= HEADING_MIN_PX from the tip, so the direction stays stable
+    // even zoomed out (a single loco is sub-pixel then, which made a near-only heading
+    // swing wildly). Falls back to the farthest ref. Re-fitted on zoom by updateTrainWidths.
+    function _arrowLatLngs(tipLL, refsLL) {
+        const map = MapApp.map;
+        const HEADING_MIN_PX = 14;
+        const tp = map.latLngToLayerPoint(tipLL);
+        let rp = null;
+        for (const ll of (refsLL || [])) {
+            const p = map.latLngToLayerPoint(ll);
+            if (Math.hypot(p.x - tp.x, p.y - tp.y) >= HEADING_MIN_PX) { rp = p; break; }
+        }
+        if (!rp && refsLL && refsLL.length) rp = map.latLngToLayerPoint(refsLL[refsLL.length - 1]);
+        if (!rp) return [tipLL, tipLL, tipLL];   // degenerate; nothing sensible to point at
+        let dx = tp.x - rp.x, dy = tp.y - rp.y;
+        const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;   // heading unit (px)
+        const nx = -dy, ny = dx;                                     // perpendicular
+        const AHEAD = 3, BASE = 11, HALF = 6;                        // arrowhead px size
+        const pts = [
+            [tp.x + dx * AHEAD,          tp.y + dy * AHEAD],          // apex (ahead of tip)
+            [tp.x - dx * BASE + nx * HALF, tp.y - dy * BASE + ny * HALF],
+            [tp.x - dx * BASE - nx * HALF, tp.y - dy * BASE - ny * HALF]
+        ];
+        return pts.map(p => map.layerPointToLatLng(L.point(p[0], p[1])));
+    }
+    // Draw one train as a single line tracing its length. Zoomed out, the head end
+    // matters most: the body is a neutral grey and the LEAD locomotive gets a small
+    // arrow in the railroad's colour pointing in the direction of travel. (A
+    // highlighted player train stays fully cyan.) One trainIndex entry (lead vehicle)
+    // keeps search / follow working while collapsed.
     function drawCollapsedTrain(regionId, train, cars, layerGroup, highlight) {
         const bodies = cars.map(c => c.v.body);
         const centers = bodies.map(_midpoint);
@@ -1185,9 +1219,10 @@ def generate_javascript() -> str:
         const frontEnd = _outerEnd(ob[0], cen.length > 1 ? cen[1] : null);
         const rearEnd = _outerEnd(ob[ob.length - 1], cen.length > 1 ? cen[cen.length - 2] : null);
         const lead = cars[0];
-        // A player-crewed train collapses to a bright line so it stands out at a glance.
+        const railColor = rvBodyColor(lead.v, lead.isLoco);   // railroad leader colour
+
         const line = L.polyline([frontEnd, ...cen, rearEnd], {
-            color: highlight ? PLAYER_HL_COLOR : rvBodyColor(lead.v, lead.isLoco),
+            color: highlight ? PLAYER_HL_COLOR : COLLAPSED_BODY_COLOR,
             weight: rvBodyWeightPx(),
             opacity: 0.95,
             lineCap: 'round'
@@ -1197,6 +1232,24 @@ def generate_javascript() -> str:
         line.bindPopup(trainVehiclePopup(train, lead.v), {maxWidth: 300});
         line.addTo(layerGroup);
         MapApp.trainIndex.push({regionId, trainId: train.train_id, vehicle: lead.v, layer: line});
+
+        // Head arrow at the lead loco's outer tip, pointing the way it faces. Heading
+        // is taken from the car centres head->tail (`centers`, in consist order), which
+        // stay well-separated in pixels at any zoom - not from the loco's own tiny body.
+        const lb = lead.v.body;
+        if (lb && lb.length >= 2) {
+            const nb = cars.length > 1 ? _midpoint(cars[1].v.body) : _midpoint(cen);
+            const e0 = lb[0], eN = lb[lb.length - 1];
+            const tip = _distLL(e0, nb) >= _distLL(eN, nb) ? e0 : eN;   // end away from the train
+            const arrowColor = highlight ? PLAYER_HL_COLOR : railColor;
+            const arrow = L.polygon(_arrowLatLngs(tip, centers), {
+                color: arrowColor, fillColor: arrowColor, fillOpacity: 1,
+                weight: 1, opacity: 1, interactive: false
+            });
+            arrow._rvArrow = true;
+            arrow._headTip = tip; arrow._headRefs = centers;
+            arrow.addTo(layerGroup);
+        }
     }
     // Re-render all loaded regions' trains when a zoom change crosses the LOD
     // threshold (detailed <-> collapsed), reusing each region's stored data.
@@ -2477,8 +2530,8 @@ ALIGN_JS = r'''
         if (document.getElementById('train-options-popover')){ closeTrainOptionsPopover(); return; }
         const o = MapApp.trainOptions;
         const rows = [
-            ['coloredCars', 'Colored cars', 'Colour non-loco cars by type. Off: all cars use the box-car colour.'],
-            ['hideNonTrains', 'Hide non-trains', 'Show only consists led by a locomotive (hide loose cuts of cars).'],
+            ['coloredCars', 'Show colored cars', 'Colour non-loco cars by type. Off: all cars use the box-car colour.'],
+            ['showCuts', 'Show cuts of cars', 'Also plot loose cuts of cars (rail vehicles not led by a locomotive).'],
             ['showOnlyMoving', 'Show only moving', 'Only plot trains that moved since the last world save (live only).'],
             ['highlightPlayers', 'Highlight player trains', 'Highlight trains that are moving and not AI-crewed (likely player-driven) with a bright spine (live only).']
         ];
