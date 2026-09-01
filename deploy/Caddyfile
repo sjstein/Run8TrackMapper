@@ -1,0 +1,37 @@
+# Run8 Track Mapper — public reverse proxy (P1, single server)
+#
+# Caddy terminates TLS (automatic Let's Encrypt) and reverse-proxies to serve.py,
+# which is bound to 127.0.0.1:8000. serve.py is a stdlib http.server and MUST NOT
+# face the internet directly — Caddy is the only public listener.
+#
+# Requirements for auto-TLS to succeed on first request:
+#   * an A (and/or AAAA) record for www.b2fengineering.com pointing at this droplet
+#   * ports 80 and 443 open (ufw allow 80,443)
+#
+# Install this file at /etc/caddy/Caddyfile, then: sudo systemctl reload caddy
+
+www.b2fengineering.com {
+	encode zstd gzip
+
+	# Outer request-body cap at the edge. World-save pushes are ~200 KB gzipped;
+	# serve.py itself caps at 64 MB on the wire / 256 MB decompressed. This just
+	# rejects absurd bodies before they reach the app.
+	request_body {
+		max_size 80MB
+	}
+
+	reverse_proxy 127.0.0.1:8000
+
+	log {
+		output file /var/log/caddy/run8map.log
+		format console
+	}
+}
+
+# Optional: if you also point the apex b2fengineering.com at this droplet AND it
+# hosts nothing else, uncomment to redirect it to www. Leave commented if the apex
+# serves another site.
+#
+# b2fengineering.com {
+# 	redir https://www.b2fengineering.com{uri}
+# }

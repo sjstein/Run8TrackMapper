@@ -283,18 +283,27 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
     return result
 
 
-def parse_config(config_path: str) -> VisualizationConfig:
+def parse_config(config_path: str, require_source_files: bool = True) -> VisualizationConfig:
     """
     Parse a multi-region configuration file.
 
     Args:
         config_path: Path to the INI configuration file
+        require_source_files: When True (the default, used by output_generator when
+            baking geometry) the parser validates that every *source* input exists on
+            disk: tile_corrections, region_dir (+ derived industry_db / terrain tiles),
+            and each [region.*] directory / TrackDatabase.r8. When False, those
+            existence checks are skipped. serve.py sets this False because at runtime it
+            reads ONLY the already-generated output/<name>/data/*.json — never the track
+            databases or terrain tiles — so a deploy host (e.g. a Linux droplet with no
+            Run8 install) can run the same config whose source paths point at a Windows
+            box. Syntax/structure validation (required keys, number formats) always runs.
 
     Returns:
         VisualizationConfig with all parsed settings
 
     Raises:
-        ConfigError: If configuration is invalid or files are missing
+        ConfigError: If configuration is invalid or (when require_source_files) files are missing
     """
     config_file = Path(config_path)
     if not config_file.exists():
@@ -630,7 +639,12 @@ def parse_config(config_path: str) -> VisualizationConfig:
         label_types=label_types
     )
 
-    # Validate that all files exist
+    # Validate that all source input files exist. Skipped on a deploy host (serve.py
+    # passes require_source_files=False): those inputs are only needed to *bake*
+    # geometry; at serve time only the generated output/<name>/data/*.json is read.
+    if not require_source_files:
+        return config
+
     file_errors = []
 
     if not config.tile_corrections.exists():

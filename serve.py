@@ -686,7 +686,11 @@ def main():
                              'recommended for any non-localhost host.')
     args = parser.parse_args()
 
-    config = parse_config(args.config)
+    # serve.py reads only the already-generated output/<name>/data/*.json, never the
+    # track DBs / terrain tiles / tile_corrections named in the config. Skip the
+    # source-file existence checks so the same config can run on a deploy host (e.g. a
+    # Linux droplet with no Run8 install) whose source paths point at a Windows box.
+    config = parse_config(args.config, require_source_files=False)
     output_dir = config.output_dir
 
     # Resolve the world save (CLI overrides config); watched for live refresh.

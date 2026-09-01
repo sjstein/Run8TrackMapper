@@ -1,0 +1,24 @@
+; Run8 world-save uploader agent — Windows operator side.
+;
+; Place this file next to r8_world_agent.exe (or r8_world_agent.py), rename it to
+; agent.ini, and edit the three values below. Then double-click the .exe, or run:
+;   r8_world_agent.exe --once     (push once and exit, to test)
+;   r8_world_agent.exe            (watch and push every save, ~every 2 min)
+;
+; The agent pushes ONLY the world save (~200 KB gzipped) outbound over HTTPS 443.
+; No inbound ports / firewall changes are needed on this machine.
+
+[agent]
+; The public host, TLS. Must match the domain in the Caddyfile.
+host_url  = https://www.b2fengineering.com
+
+; The SAME secret as UPLOAD_TOKEN in the server's /opt/run8map/run8map.env.
+token     = replace-with-the-same-secret-as-the-server
+
+; The Run8 SERVER's full-world autosave (NOT a client/near-player save). Run8
+; mirrors the newest full-world autosave to this fixed filename — point at the
+; region your server runs:
+save_file = C:\Run8Studios\Run8 Train Simulator V3\Content\V3Routes\Regions\SouthernCA\AutoSaves\Auto Save World.xml
+
+; Seconds between checks (the save itself is rewritten ~every 120 s).
+poll      = 10

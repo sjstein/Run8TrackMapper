@@ -1,0 +1,51 @@
+# systemd unit for the Run8 Track Mapper serve.py, bound to localhost behind Caddy.
+#
+# Install:
+#   sudo cp deploy/run8map.service /etc/systemd/system/run8map.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now run8map
+#   systemctl status run8map          # check it came up
+#   journalctl -u run8map -f          # follow logs (uploads, movement, errors)
+#
+# The upload token is read from /opt/run8map/run8map.env (see run8map.env.example),
+# so the secret is not baked into this unit. serve.py is started with:
+#   --accept-uploads          enable POST /api/world
+#   --upload-token ${...}      require the bearer token on every push
+#   --world <slot>            server-owned save slot the agent pushes into
+#                             (kept OUTSIDE the served output dir so the raw world
+#                              XML is never publicly downloadable)
+#   --no-authoring           no label add/edit/delete API (public, read-only)
+#
+# serve.py reads only the already-generated output/socal/data/*.json, so the
+# Windows source paths in config-socal.ini are never touched (parse runs with
+# require_source_files=False).
+
+[Unit]
+Description=Run8 Track Mapper (serve.py, localhost-bound behind Caddy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=run8map
+Group=run8map
+WorkingDirectory=/opt/run8map/app
+EnvironmentFile=/opt/run8map/run8map.env
+ExecStart=/usr/bin/python3 serve.py config-socal.ini \
+	--host 127.0.0.1 --port 8000 \
+	--accept-uploads --upload-token ${UPLOAD_TOKEN} \
+	--world /opt/run8map/world/_world_upload.xml \
+	--no-authoring
+Restart=on-failure
+RestartSec=3
+
+# --- hardening ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+# The only path the service must write to is the upload-slot dir.
+ReadWritePaths=/opt/run8map/world
+
+[Install]
+WantedBy=multi-user.target
