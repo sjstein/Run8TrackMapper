@@ -64,8 +64,14 @@ ufw allow 443/tcp
 ufw --force enable
 ufw status verbose
 
-echo "==> log dir for caddy"
-install -d -o caddy -g caddy /var/log/caddy 2>/dev/null || install -d /var/log/caddy
+echo "==> log dir for caddy (owned by the caddy service user)"
+# Always create it, then chown to the caddy user if that account exists (it does,
+# from the caddy install above). The previous "|| install -d" fallback could leave
+# the dir root-owned, which makes caddy fail at startup with EACCES on its log file.
+install -d -m 755 /var/log/caddy
+if id caddy >/dev/null 2>&1; then
+	chown caddy:caddy /var/log/caddy
+fi
 
 cat <<'DONE'
 
