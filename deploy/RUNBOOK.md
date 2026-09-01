@@ -34,7 +34,7 @@ outbound over HTTPS every ~2 min. No inbound ports on the operator's side.
 │   ├── db_railvehicles.db  # (copied from Windows)
 │   └── areas_socal.ini     # (copied from Windows; optional)
 ├── world/                  # writable upload slot; _world_upload.xml lands here
-└── run8map.env             # UPLOAD_TOKEN (chmod 640, root:run8map)
+└── run8map.env             # RUN8_UPLOAD_TOKEN (chmod 640, root:run8map)
 ```
 `output/`, `db_railvehicles.db`, and `areas_socal.ini` are **git-ignored**, so `git clone`
 does not bring them — they are copied separately in Part D.
@@ -123,7 +123,7 @@ python3 -c "from config_parser import parse_config; c=parse_config('config-socal
 ```bash
 sudo cp /opt/run8map/app/deploy/run8map.service /etc/systemd/system/run8map.service
 # If you did NOT let bootstrap generate the token, edit it now:
-sudo nano /opt/run8map/run8map.env          # set UPLOAD_TOKEN=...
+sudo nano /opt/run8map/run8map.env          # set RUN8_UPLOAD_TOKEN=...
 sudo systemctl daemon-reload
 sudo systemctl enable --now run8map
 systemctl status run8map --no-pager
@@ -152,7 +152,7 @@ deploy\build-agent.bat            # -> dist\r8_world_agent.exe
 ```
 Copy `deploy\agent.ini.example` next to the exe as **`agent.ini`** and set:
 - `host_url = https://www.b2fengineering.com`
-- `token   = <the UPLOAD_TOKEN from the server>`
+- `token   = <the RUN8_UPLOAD_TOKEN from the server>`
 - `save_file = …\Regions\<REGION>\AutoSaves\Auto Save World.xml`  (the **server's full-world**
   autosave — NOT a client/near-player save)
 
@@ -182,7 +182,7 @@ dist\r8_world_agent.exe             # watch + push every save (~2 min)
   `/opt/run8map/app/output/socal/`. Check `ls /opt/run8map/app/output/socal`.
 - **No cert / TLS errors:** DNS not resolving to the droplet yet, or 80/443 blocked. Check
   `dig +short www.b2fengineering.com` and `sudo ufw status`; watch `journalctl -u caddy -f`.
-- **Agent: `HTTP 401 Unauthorized`:** the agent `token` ≠ server `UPLOAD_TOKEN`.
+- **Agent: `HTTP 401 Unauthorized`:** the agent `token` ≠ server `RUN8_UPLOAD_TOKEN`.
 - **Agent: `HTTP 403`:** service not started with `--accept-uploads` (it is, in the unit) or
   you hit the wrong host.
 - **Trains never appear:** confirm the agent points at the **full-world** autosave and that

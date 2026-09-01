@@ -48,7 +48,7 @@ install -d -o run8map -g run8map /opt/run8map/world     # writable upload slot d
 echo "==> seed the env file (edit it with your real token!)"
 if [[ ! -f /opt/run8map/run8map.env ]]; then
 	TOKEN=$(openssl rand -hex 32 2>/dev/null || echo replace-with-a-long-random-secret)
-	printf 'UPLOAD_TOKEN=%s\n' "$TOKEN" > /opt/run8map/run8map.env
+	printf 'RUN8_UPLOAD_TOKEN=%s\n' "$TOKEN" > /opt/run8map/run8map.env
 	chown root:run8map /opt/run8map/run8map.env
 	chmod 640 /opt/run8map/run8map.env
 	echo "    wrote /opt/run8map/run8map.env with a generated token."

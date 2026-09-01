@@ -7,10 +7,12 @@
 #   systemctl status run8map          # check it came up
 #   journalctl -u run8map -f          # follow logs (uploads, movement, errors)
 #
-# The upload token is read from /opt/run8map/run8map.env (see run8map.env.example),
-# so the secret is not baked into this unit. serve.py is started with:
+# The upload token is read from /opt/run8map/run8map.env (see run8map.env.example)
+# as RUN8_UPLOAD_TOKEN, which serve.py picks up from the environment. Passing it via
+# the environment (not a CLI flag) keeps the secret out of the process argv, so it
+# does not show up in `ps` or `systemctl status`. serve.py is started with:
 #   --accept-uploads          enable POST /api/world
-#   --upload-token ${...}      require the bearer token on every push
+#                             (the bearer token comes from RUN8_UPLOAD_TOKEN in the env)
 #   --world <slot>            server-owned save slot the agent pushes into
 #                             (kept OUTSIDE the served output dir so the raw world
 #                              XML is never publicly downloadable)
@@ -33,7 +35,7 @@ WorkingDirectory=/opt/run8map/app
 EnvironmentFile=/opt/run8map/run8map.env
 ExecStart=/usr/bin/python3 serve.py config-socal.ini \
 	--host 127.0.0.1 --port 8000 \
-	--accept-uploads --upload-token ${UPLOAD_TOKEN} \
+	--accept-uploads \
 	--world /opt/run8map/world/_world_upload.xml \
 	--no-authoring
 Restart=on-failure

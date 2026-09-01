@@ -12,7 +12,7 @@
 ; The public host, TLS. Must match the domain in the Caddyfile.
 host_url  = https://www.b2fengineering.com
 
-; The SAME secret as UPLOAD_TOKEN in the server's /opt/run8map/run8map.env.
+; The SAME secret as RUN8_UPLOAD_TOKEN in the server's /opt/run8map/run8map.env.
 token     = replace-with-the-same-secret-as-the-server
 
 ; The Run8 SERVER's full-world autosave (NOT a client/near-player save). Run8

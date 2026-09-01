@@ -683,8 +683,15 @@ def main():
                              'into the slot (see --world). Trains re-plot on each push.')
     parser.add_argument('--upload-token', dest='upload_token', metavar='TOKEN',
                         help='Require this bearer token on POST /api/world. Strongly '
-                             'recommended for any non-localhost host.')
+                             'recommended for any non-localhost host. May also be supplied '
+                             'via the RUN8_UPLOAD_TOKEN environment variable (preferred for '
+                             'systemd, so the secret is not in the process argv / `ps`).')
     args = parser.parse_args()
+
+    # Token resolution: --upload-token wins, else the RUN8_UPLOAD_TOKEN env var. Using
+    # the env var keeps the secret out of the command line (visible in `ps` and
+    # `systemctl status`); the systemd unit sets it from an EnvironmentFile.
+    upload_token = args.upload_token or os.environ.get('RUN8_UPLOAD_TOKEN') or None
 
     # serve.py reads only the already-generated output/<name>/data/*.json, never the
     # track DBs / terrain tiles / tile_corrections named in the config. Skip the
@@ -720,7 +727,7 @@ def main():
                            areas_file or output_dir / '_noauthoring.ini',
                            config=config, world_save=world_save,
                            accept_uploads=args.accept_uploads,
-                           upload_token=args.upload_token)
+                           upload_token=upload_token)
     if args.authoring:
         # Make sure the served manifest matches the areas files on disk at startup.
         try:
@@ -742,7 +749,7 @@ def main():
         role = "upload slot" if args.accept_uploads else "live-watched"
         print(f"  World   : {world_save}{exists}  [{role}]")
     if args.accept_uploads:
-        tok = "token required" if args.upload_token else "NO TOKEN (localhost only!)"
+        tok = "token required" if upload_token else "NO TOKEN (localhost only!)"
         print(f"  Uploads : POST /api/world enabled  [{tok}]")
     print(f"  URL     : http://{args.host}:{args.port}/")
     print(f"\nPress Ctrl+C to stop.\n")
