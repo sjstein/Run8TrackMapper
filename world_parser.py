@@ -165,6 +165,17 @@ def parse_world_save(path: str) -> List[Train]:
     return trains
 
 
+def parse_sim_time(path: str) -> Optional[str]:
+    """Return the world save's simulation clock - the top-level ``<date>`` element
+    (an ISO-8601 timestamp), or ``None`` if absent / unparseable."""
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:  # noqa: BLE001 - a torn/missing save just has no sim time
+        return None
+    text = root.findtext("date")
+    return text.strip() if text and text.strip() else None
+
+
 if __name__ == "__main__":
     import sys
 

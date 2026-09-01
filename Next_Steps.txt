@@ -13,3 +13,407 @@ Status: This appears to be working when running on a local machine - the maps ar
 To do: Investigate how to transfer world saves to the machine hosting the track mapper web server. Ideally this would be as lightweight as possible for the server operator. 
 
 Goal #2 (possibly): Live tracking of trains via DispatcherComms.dll - giving a more real-time view of the status of moving trains.
+
+--- DispatcherComms API review (2026-08-28) ---
+Reviewed ExtDSAPIReference.pdf (Run8ExternalDispatcherWork/DispatcherSampleV2/Documentation).
+Key finding that reframes this goal:
+
+* NO train position. TrainData carries NO track-section index, NO distanceTravelled,
+  NO lat/lon. Its only spatial field is BlockID = the signal block detector the LEAD
+  loco occupies (-1 if none). That is BLOCK granularity, not the per-metre placement
+  the world-save pipeline already gives. So DispatcherComms CANNOT move a train dot
+  along a section - it is not a higher-fidelity replacement for world-save positioning,
+  and cannot be interpolated into one.
+
+* What it IS good for = a live CTC / dispatcher board feed (the thing a world save
+  cannot show), refreshed continuously over TCP, per route:
+    - Signal aspects (Signals: every DS-controlled signal's Stop/Proceed/Fleet/FlagBy)
+    - Switch state (ReversedSwitches, UnlockedSwitches, OccupiedSwitches, InterlockErrorSwitches)
+    - Block occupancy (OccupiedBlocks)
+    - Live per-train metadata keyed by TrainID: TrainSpeedMph vs TrainSpeedLimitMPH,
+      EngineerType (Player/AI/None) + EngineerName, TrainSymbol, HoldingForDispatcher, etc.
+    - Sim time, IsClient flag, radio text / DTMF tones.
+  => Complementary to the world save: world save = geometry & position (the spine);
+     DispatcherComms = live signal/switch/block state + train telemetry overlaid on top.
+
+Architecture implications:
+  1. .NET event/push API -> needs a small C# sidecar holding the persistent IRun8
+     connection; it exposes accumulated state to the Python server over local HTTP/ws.
+     Note "V2 cycles routes one by one" -> keep PER-ROUTE state (each event is a full
+     snapshot for one route), not one global dict.
+  2. Requires dispatcher PERMISSION granted in-game (no permission -> zero data) AND a
+     live TCP connection to the r8 instance's dispatcher port. This reintroduces the
+     firewall/live-connection problem the world-save uploader (Goal #1) avoids, so it
+     only works where the web host can reach the r8server. Keep it strictly OPTIONAL
+     behind the existing /api/trains-style contract.
+  3. Stay READ-ONLY: consume only "from Run8" events; never call ThrowSwitch/ChangeSignal/
+     StopAITrain/etc. (IsClient + the doc's dueling-auto-dispatcher warning are why).
+  4. Real work = ID reconciliation with our extracted geometry:
+       - Signals arrive as a POSITIONAL array (indexed) -> need route -> signal-index ->
+         our-signal mapping.
+       - Switches by SwitchID, blocks by block-detector ID -> do we currently capture the
+         dispatcher-facing SwitchID / block-detector ID in region_extractor? (gating item)
+       - Trains by TrainID: OPEN QUESTION whether this equals the world-save train_id; if
+         not, correlate via LocoNumber+RailroadInitials (or TrainSymbol <-> destination tag)
+         to fuse live telemetry onto world-save-positioned trains.
+  5. Convenient: DispatcherComms route IDs (100 Mojave, 110 Needles, 120 Cajon, ...) are
+     exactly our config route_prefix values - route-keying already consistent, no translation.
+
+Bottom line: still a "would be nice", priority unchanged, but the feature is NOT "smoother
+trains" - it is "live signal/switch/block CTC overlay + live train telemetry" via an optional
+C# sidecar, for operators who can give the host a dispatcher connection. Goal #1 (world save)
+stays the universal baseline; this is a richer overlay where the connection exists.
+
+--- Goal #1: remote world-save transport - design + plan (2026-08-28) ---
+Decisions locked this session:
+  * Host = ONE central MULTI-TENANT server on a DigitalOcean Linux droplet (paid, ours).
+    URL path selects the server:  /s/<server_id>/...
+  * Operator runs a SMALL AGENT WE PROVIDE (single-file Windows .exe, no Python install).
+  * STANDARD published Run8 routes ONLY (host already has/gets the geometry).
+
+Transport principle: PUSH, never pull.
+  Remote r8servers sit behind home NAT; pull (SFTP/SMB/port-forward) = operator friction we
+  reject. The agent pushes OUTBOUND over HTTPS (443 always open, no firewall changes). Even
+  "on-demand" stays push-initiated (agent opens/holds an outbound channel; host asks over it).
+
+KEY DEPLOYMENT INSIGHT (DO = Linux, NO Run8 install -> and it doesn't need one):
+  Track GEOMETRY is generated ONCE on a Windows box that HAS Run8
+  (output_generator.py -> output/<name>/ : index.html, manifest.json, data/<region>.json),
+  then DEPLOYED static to DO. Because routes are standard, geometry is identical per route
+  for every operator. The DO host does NOT parse .r8/.tr4 and does NOT need Run8 - it only
+  needs the generated region JSON (+ db_railvehicles.db) to place trains from an uploaded
+  world save. serve.py ALREADY reconstructs section polylines from region JSON with no
+  track-DB reload, so live-placement machinery exists; multi-tenant is mostly per-server
+  bookkeeping around it.  => Only the WORLD SAVE (train state) crosses the wire to DO.
+
+Components to build:
+  A. Uploader agent (Windows, operator side) - Python + PyInstaller -> one .exe.
+     - Config (agent.ini next to exe): host_url, server_id, token, save_folder, poll_seconds.
+     - Watch the FIXED file "Auto Save World.xml" (Run8 always mirrors the newest save to it;
+       see Autosave layout below). No newest-of-glob / prune logic needed. Poll mtime.
+     - It is OVERWRITTEN each cycle, so guard against torn mid-write reads: on mtime change,
+       wait until SIZE is stable across 2 polls (full 2-min gap = plenty of slack) before
+       hashing. Skip if content hash == last uploaded. (Host also validate-parses on ingest,
+       so a torn upload is rejected + last-known-good kept - belt and suspenders.)
+       Optional hardening if torn reads ever appear: watch newest TIMESTAMPED
+       "Auto Save World <ts>.xml" instead (immutable once written).
+     - gzip the XML (~10:1) -> POST https://host/s/<server_id>/world
+       Authorization: Bearer <token>; retry w/ exponential backoff; auto-resume after outage.
+     - v1.5: honor a {watchers:0} response by backing off (idle upload bandwidth -> ~0).
+  B. Multi-tenant host (extends serve.py):
+     - Registry: server_id -> {token hash, display name, region/output set, save slot}.
+     - POST /s/<id>/world (bearer auth): size cap, gunzip, VALIDATE parses via world_parser,
+       atomic temp+rename into that server's slot, keep last-known-good, version = now/mtime.
+     - Generalize serve.py's single --world watch into a dict keyed by server_id; reuse
+       build_section_placer / extract_trains from region JSON per server.
+     - Per-server endpoints: /s/<id>/ (map), /s/<id>/api/trains, /s/<id>/api/ping.
+       Each /api/trains browser poll updates last_seen[id] (drives watcher-gating in A).
+  C. Public-internet hardening (serve.py is stdlib http.server - do NOT expose it raw):
+     - Front with Caddy (auto Let's Encrypt TLS, simplest) or nginx; bind Python to 127.0.0.1.
+     - Proxy enforces TLS + request size cap + rate limiting. ufw: only 80/443 open.
+     - Run serve.py under systemd (restart on fail) + log rotation.
+     - Tokens: long random, store only a HASH; per-server isolation (a token writes only its slot).
+
+Viewer UX (staleness): /api/ping already reports world; surface save AGE in the viewer
+  ("updated 40s ago" / "stale 6m") so users can tell live from frozen. Cheap, high trust value.
+
+Build/deploy flow (per hosted route/region set):
+  Windows(+Run8): output_generator.py <config> -> output/   =>   rsync/scp to DO   =>
+  register server_id + issue token   =>   hand operator the agent .exe + a filled agent.ini.
+
+Autosave layout (CONFIRMED 2026-08-28 via screenshot of a live SouthernCA server):
+  Dir: ...\Run8 Train Simulator V3\Content\V3Routes\Regions\<REGION>\AutoSaves  (per-region!)
+    - "Auto Save World <YYYY.MM.DD HH.MM.SS>.xml"  = journal, ~10 kept, rotated, IMMUTABLE.
+    - "Auto Save World.xml"                        = fixed name, always mirrors NEWEST. <-- TARGET
+    - Each xml has a paired 1 KB ".info" sidecar (ignore for v1; may hold cheap sim-time/region).
+    - "Auto Save Train.*" is a DIFFERENT save (not the world) - ignore.
+    - Cadence ~2 min; size ~1.6-1.8 MB xml (-> ~150-250 KB gzipped). Trivial 24/7.
+    - Dir path encodes the REGION -> free check that operator's server_id matches baked geometry.
+
+Open items to confirm (not blocking the design):
+  * Full-world only: agent must point at the SERVER's full-world autosave dir (a CLIENT save
+    is partial/near-player - avoid/reject). (The AutoSaves dir above is the server's full-world.)
+  * Confirm serve.py has no Windows-only path assumptions before running on Linux.
+  * Multi-tenant config shape: one master registry file vs a per-server config dir on DO.
+
+Phasing:
+  P1: single hard-coded server_id end-to-end (agent push -> DO slot -> trains plot remotely).
+  P2: multi-tenant registry + tokens + per-server routing + hardening (Caddy/systemd/ufw).
+  P3: watcher-gating (v1.5) -> optional reverse-channel on-demand (v2) + staleness badge.
+
+P1 STATUS - IMPLEMENTED 2026-08-28 (single-tenant; push path proven end-to-end):
+  Host (serve.py):
+    - New POST /api/world: accepts (gzip-optional) world XML, bearer-token gated, size-capped
+      (64MB wire / 256MB decompressed), VALIDATES via parse_world_save into a temp file, then
+      os.replace() into the slot -> a torn/garbage upload is rejected (422) and last-known-good
+      is kept. Returns {ok,trains,vehicles,bytes,version}. Existing /api/trains mtime-watch
+      re-plots automatically (no cache invalidation needed).
+    - New flags: --accept-uploads (enable the endpoint; default slot <output>/_world_upload.xml,
+      so we never touch Run8's own autosave) and --upload-token TOKEN (bearer auth).
+    - /api/ping now returns uploads + reports world=true whenever uploads are on (viewer starts
+      polling /api/trains immediately, before the first push arrives).
+  Agent (NEW r8_world_agent.py, stdlib-only -> PyInstaller-ready):
+    - Watches the fixed "Auto Save World.xml"; settle-check (size/mtime stable) guards torn
+      reads and Run8's write-lock; sha256 dedupe skips unchanged re-saves; gzip (~10:1); POSTs
+      to /api/world with optional Bearer token; retry w/ exponential backoff; --once test mode.
+    - Config via CLI or an [agent] section in agent.ini (CLI overrides).
+  Tests (scratchpad, all green): auth 401 on wrong/missing token; gzip + plain 200; atomic slot
+    write; garbage->422 with slot preserved; /api/trains version bump; watch-path skip/dedupe/
+    re-upload incl. same-content-new-mtime.
+
+  LOCAL DEV (both on one machine):
+    Terminal 1 (host, owns the slot):
+      python serve.py <config.ini> --accept-uploads
+      # add --upload-token SECRET to also exercise auth locally
+    Terminal 2 (agent, watches real Run8 autosave):
+      python r8_world_agent.py --host-url http://localhost:8000 \
+        --save-file "C:\Run8Studios\...\Regions\SouthernCA\AutoSaves\Auto Save World.xml"
+      # add --token SECRET if the host set one; --once to push a single save and exit
+    Then open http://localhost:8000/ ; trains appear/refresh as Run8 rewrites the autosave.
+
+  Deferred to P2 (NOT in P1): per-server /s/<id>/... routing + registry; the token is a single
+    shared --upload-token, not yet per-server. Note: pointing --world at Run8's REAL autosave
+    while --accept-uploads is on would let a push overwrite it - keep the slot server-owned.
+
+--- Backlog (deferred, raised 2026-08-28 after first live P1 run) ---
+  * RV plotting oddity: a rail vehicle that SPANS >1 (maybe 2) track sections in a YARD plots
+    wrong. Revisit with the known cross-section ordering work (rv_cross_section_ordering_plan.md
+    / _layout_consist run-splitting). TODO: capture a world save + the offending section ids to
+    reproduce.
+    >> RESOLVED 2026-08-29. Repro: SouthernCA save, train 9999950 unit 304244 (Run8_Tank107RC01)
+       drawn 5.81 m vs 15.55 m true. Root cause: the car's two trucks landed in TWO DIFFERENT
+       runs (truck B sec806 in run[806,802]; truck A sec814 in run[814,1314,1594,1734]) because
+       the yard gap between 802 and 814 exceeds _CHAIN_ADJ_TOL and _split_runs cut there.
+       _layout_consist assigned the car to truck-A's run and anchored it on that ONE truck; as
+       the first car of the run its footprint ran off the polyline start and _point_at_distance
+       CLAMPED both ends -> ~5.8 m stub. Fix (region_extractor.py car_run in _layout_consist): a
+       car is laid in a run only if all its in-run trucks share ONE run; a cross-run straddler
+       returns None -> per-truck fallback (_extend_segment) draws a full-length straight body
+       bridging the two trucks. Validation: target now 15.55 m; scanned ALL 1230 trains / 15396
+       resolved+DB cars -> 0 remain short (<60% expected), 0 overlap regressions. The earlier
+       "similar cases" were the same straddler class, all fixed. Takes effect on serve.py RESTART
+       (placement is server-side at runtime; live view overrides baked, so no regen required -
+       a regen would also refresh baked positions but isn't needed).
+  * Beta-tester UI suggestions (from "Notes 29Aug26.txt"). Status 2026-08-29:
+      [DONE] #1 Bigger destination-tag text - new [trains] label_size (default 14px), injected
+             into TRAIN_STYLE.labelSize, used by trainDestLabelIcon. (config_parser + html_generator)
+      [DONE] #2 Spine behind RV bodies - renderTrains rewritten as two passes (all spines first,
+             then all car bodies) so cars sit on top of the spine instead of the spine painting
+             across them. (html_generator, geographic/align renderTrains)
+      [DONE] #5 Search field radios - Train/Rail-Vehicle search now has All / Unit # / Tag /
+             Train ID radios (shown only for that type) that restrict which field is matched.
+      [DONE] #6 Follow a train - "Follow this train" button in the RV popup sets a followed
+             train; a top banner shows "Following Train <lead-loco dest tag> (#<lead-loco unit>)"
+             (lead loco = first vehicle in the train list; train ID intentionally NOT shown, per
+             user); map fits to it once then pans to keep it centred on each live poll. Exposed
+             on the window.MapApp inline bridge (followTrain/stopFollow); centerOnFollowed hooked
+             into applyLiveTrains; banner label built by _leadVehicle/_followLabel.
+      Validated in-browser against real socal data (1230 trains): no console errors; tags larger;
+      spine behind cars; follow banner + auto-center; search radios present. Needs a REGEN to ship
+      (all client-side in the generated index.html). NOTE for regen: I only touched the
+      GEOGRAPHIC/align renderTrains + search; the separate --tile-based copies (generate_tile_based_html)
+      were left as-is - mirror #2/#5 there later if the tile viewer needs parity.
+      [DONE] #3 Zoom LOD - when the scale bar reads >= lod_scale_m (config, default 300 m),
+             trains collapse: singles/short trains (<= lod_min_cars cars, config, default 3) are
+             hidden, and each longer train draws as ONE solid line tracing its length, coloured by
+             the lead car/loco. A zoomend handler (updateTrainLOD) re-renders on threshold cross;
+             search/follow keep working (one lead entry per collapsed train). Gates are config-
+             driven: [trains] lod_scale_m / lod_min_cars (config_parser + injected TRAIN_STYLE.
+             lodScaleM/lodMinCars; JS falls back to 300/3). Validated in-browser (collapsed at
+             ~390 m, detailed at ~30 m, no console errors). Needs a REGEN to ship.
+      [TODO] #4 (plot only moving trains + count on the move; needs server-side save-diffing).
+             Deferred by choice - design first.
+
+P1 live-run verdict (2026-08-28): client/server connection worked with no surprises - refresh
+  cadence, mid-write handling, agent-over-bash all fine. Greenlit to deploy on the DO droplet.
+
+Live-view FREEZE bug (found 2026-08-29, fixed before deploy):
+  Symptom: after ~40 min idle the map/trains stopped updating; a NORMAL reload did NOT recover
+  it, only a SHIFT-reload (cache-clearing) did. Poll loop itself is fine (errors caught, interval
+  keeps firing), so root causes were two:
+    (1) SERVER: static assets (index.html / manifest.json / data/<region>.json) were served with
+        only Last-Modified and NO Cache-Control, so browsers applied heuristic freshness and
+        served them stale WITHOUT revalidating on a plain reload = the classic "F5 stale,
+        Ctrl-F5 fixes" signature (and worse behind Caddy).
+        FIX: serve.py Handler now sends "Cache-Control: no-cache" on every static reply (API
+        replies keep their own no-store). Cacheable but always revalidated -> cheap 304s, never
+        stale. Takes effect on server RESTART (no regen needed).
+    (2) CLIENT: background-timer throttling / machine sleep stalls the 3s setInterval, leaving
+        the map frozen with nothing to restart it.
+        FIX: html_generator.py startTrainsPolling now adds a visibilitychange handler - on tab
+        re-show it resets the version guard, revives the interval if cleared, and forces an
+        immediate pollTrainsOnce() -> self-heals with no reload. Needs a REGEN to take effect.
+  To CONFIRM root cause next occurrence: note the browser; whether machine slept vs tab just
+  backgrounded; whether agent+server logs kept flowing during the freeze (they should have);
+  and any console errors on the frozen tab. Overlaps the P3 staleness badge (make freezes visible).
+
+  ACTUAL ROOT CAUSE (found 2026-08-29, second freeze): a CLIENT MEMORY LEAK, not caching/timers.
+  Forensics: server + agent kept updating every 2 min (data healthy); DevTools console on the
+  frozen tab threw an "out of memory" error mentioning trainID; map canvas dead (no pan/zoom)
+  while native layer-control checkboxes still toggled = OOM / starved main thread.
+  Bug: MapApp.trainLayers was a WRITE-ONLY array pushed on every renderTrains (each 2-min poll)
+  but NEVER read and NEVER pruned. applyLiveTrains clears the map layers each poll
+  (layers.trains.clearLayers()) but trainLayers still referenced every polyline (with its
+  tooltip/popup) ever drawn -> nothing could be GC'd -> heap grows every save -> OOM after ~40
+  min -> main thread dies -> frozen render. (trainLayers had been superseded by the l._rvBody
+  flag that updateTrainWidths actually uses, so it was vestigial dead weight.)
+  FIX: removed trainLayers entirely (declaration + push) from BOTH renderTrains copies
+  (geographic/align at ~line 66/1037 and tile-based at ~1933/2275); trainIndex is fine (pruned
+  per-region each render at lines 1019/2245 and it is actually read by search). Needs a REGEN.
+  NOTE: the two earlier fixes (static no-cache headers; visibilitychange self-heal) were real
+  improvements but were NOT this freeze's cause - keep them, they harden behaviour behind Caddy
+  and on sleep/resume, but the OOM leak was the actual culprit.
+  FOLLOW-UP: the P3 staleness/heartbeat badge is now higher value - it would have surfaced this
+  as "stale" immediately instead of needing a live autopsy. Consider a periodic heap sanity check
+  too. Re-test: run the map for >1 hr and watch DevTools Performance monitor JS heap stay flat.
+--- Viewer cleanup: removed --tile-based and --minimal viewers (2026-08-30) ---
+Both were subsets of the align viewer (which reproduces the undistorted contiguous grid with
+Base Map = None; its worldToLatLon is a pure uniform-scale + translate, so no shape distortion).
+They had also drifted - none of this session's train/UI work went into the tile-based copy.
+Removed: html_generator.generate_tile_based_html + generate_html (~1390 lines), the folium import;
+output_generator --tile-based / --minimal flags + their dispatch + generate_output's tile_based/
+align params (generate_output now always builds the align viewer in tile-coordinate mode).
+KEPT (align depends on it): the tile-COORDINATE extraction (TileBasedConfig / [tile_based_plot] /
+use_tile_coords / convert_run8_to_tile_coords / compute_align_seed). --align kept as a no-op alias.
+CLAUDE.md Output-modes table + stale tile-based references updated. Verified: all modules compile;
+align viewer regenerates and runs clean in-browser (trains load, follow works, no console errors).
+
+--- Beta UI round 2 (Notes 30Aug26) - implemented 2026-08-30 ---
+#4 "only moving trains" DROPPED by user (not worth it).
+* Train "Options" button (beside the Trains overlay checkbox, mirrors the Area Labels Filter
+  button) -> popover with three toggles, each re-renders trains via applyTrainOptions:
+    1. Colored cars (default ON) - OFF paints every non-loco car the Box_Car colour
+       (rvBodyColor; locos keep their company colour either way).
+    2. Hide non-trains (default OFF) - show only consists whose LEAD (first) vehicle is a
+       locomotive (_isConsist); loose cuts of cars are hidden. Verified 184->72 bodies.
+    3. Highlight players (default OFF) - consists that are NOT TrainWasAI get a bright cyan
+       spine (PLAYER_HL_COLOR, wider casing via _highlightWeight, marked _rvHighlight so it
+       rescales on zoom; collapsed-LOD line also turns cyan). was_ai already reached the viewer.
+  State in MapApp.trainOptions. NOTE: "Hide non-trains" affects the MAP only; the lower-right
+  count stays whole-save totals (region-independent) - did not switch to filtered counts.
+* Sim-time stamp (lower-right, under the train count): the world save's <date> tag (top-level
+  ISO-8601 sim clock). world_parser.parse_sim_time(); serve.py adds sim_time to /api/trains;
+  output_generator bakes manifest.world_sim_time; viewer updateSimTime() (live poll overrides
+  the baked value) formats "2026-04-11T08:31:52.8Z" -> "2026-04-11 08:31:52".
+GOTCHA fixed during build: adding a call between setupUI() and loadDefaultRegions() in
+  loadManifest broke generate_align_html's string-replace anchor for inserting alignInit()
+  (whole align init silently skipped). updateSimTime() is now called inside alignInit instead.
+Validated in-browser (real socal save): all toggles + sim time work, no console errors.
+Colours (cyan highlight) hardcoded for now - can move to [colors]/[trains] config after review.
+Needs a REGEN to ship (viewer changes) + serve.py restart (payload sim_time).
+
+--- Pivot: "Highlight players" -> "Highlight moving" (2026-08-30) ---
+Flaw found: TrainWasAI=false is true for the MAJORITY of trains (parked/free-agent cuts, not
+just player-crewed), so highlighting on !was_ai lit up nearly everything. The world save has NO
+crew/engineer field and NO actual speed field (only ManuallyAppliedSpeedLimitMPH, a limit =
+int-max). So "player" is not derivable from a single save; that info only exists live via
+DispatcherComms (EngineerType/Name).
+Solution (implemented): detect MOVEMENT by diffing consecutive saves.
+  * serve.py: cache _prev_positions {train_id -> (x,y)} (lead vehicle's first body point);
+    each new save, a train that moved > MOVE_THRESHOLD_M (5 m) since the previous save is
+    tagged d['moving']=true, plus payload['moving_count']. Live-only (needs 2 saves; first save
+    baseline = nothing moving). Unit-tested: baseline 0; shifting 3 prev-positions -> exactly
+    those 3 flagged, moving_count=3.
+  * Viewer: option renamed highlightPlayers -> highlightMoving ("Highlight moving"); highlight
+    predicate is _shouldHighlightTrain(train) = train.moving (bright cyan spine). Status line
+    now shows "... Moving: N".
+  * FORWARD-LOOKING per user: a moving train that is also was_ai===false is almost certainly
+    player-controlled. _shouldHighlightTrain has a PLAYER_ONLY flag (currently false) that, when
+    flipped, narrows the highlight to "moving && was_ai===false" - the player heuristic.
+Static/baked output can't compute movement (one save) -> nothing highlighted there; live serve.py
+only. Validated in-browser: popover reads "Highlight moving", "Moving: 0" on first poll, no errors.
+
+--- Moving-highlight hysteresis (2026-08-30) ---
+Added [trains] moving_hysteresis (int, default 2; 0 = strict) so a train stays flagged "moving"
+for N stationary save-cycles after its last real movement - a train holding briefly (e.g. at a
+signal) keeps the highlight instead of flickering off. serve.py: per-train _still_since counter;
+moved this cycle -> still=0, moving=True; stationary -> still+=1, moving = still <= H; new train
+starts stationary (still = H+1). config_parser train_moving_hysteresis; AuthoringState.move_hysteresis.
+Purely server-side (viewer unchanged - still reads train.moving + moving_count). Unit-tested with
+H=2: sequence move,stop,stop,stop,move -> [T,T,T,F,T] (1 move cycle + 2 hysteresis cycles lit).
+Tune per config; each cycle ~= the save cadence (~2 min).
+
+--- serve.py robustness: benign client-disconnect + torn-read hardening (2026-08-30) ---
+Symptom: noisy traceback on startup - "Exception occurred during processing of request ...
+ConnectionAbortedError [WinError 10053]" during a GET /api/trains write. Cause: a client (a
+superseded 3s poll / reload / closed tab) drops the connection mid-response; sendall raises.
+Recovers (per-thread) but logs an ugly trace, PLUS a secondary bug: do_GET's except caught the
+disconnect and called _error(), which tried to write AGAIN to the dead socket -> second exception.
+Fixes:
+  1. _send_json wraps its send in try/except _CLIENT_DISCONNECT (ConnectionAborted/Reset/BrokenPipe)
+     -> swallows the write-side disconnect and stops the do_GET re-error cascade.
+  2. New _QuietThreadingHTTPServer(ThreadingHTTPServer) overrides handle_error to swallow any
+     ConnectionError (covers BOTH read-side recv 10054 and write-side send 10053) with no traceback;
+     everything else logs normally. daemon_threads=True. main() uses it.
+  3. trains_payload wraps parse_world_save in try/except -> on a torn/partial read (Run8 rewrites
+     the live save ~every 2 min) it serves the LAST-GOOD payload and retries next poll (cache mtime
+     left unchanged), instead of 500-ing the client. Verified: torn read -> last-good, recovers on
+     next valid save.
+Tested: 6 RST-aborted requests -> 0 tracebacks in the log, server keeps serving (ping/trains 200).
+
+--- Moving options split: "Show only moving" + "Highlight player trains" (2026-08-30) ---
+Replaced the single "Highlight moving" toggle with TWO, per user:
+  * "Show only moving" (trainOptions.showOnlyMoving) - a FILTER: renderTrains skips any train
+    whose train.moving is falsy, so only moving trains plot. Live-only (needs serve.py movement).
+  * "Highlight player trains" (trainOptions.highlightPlayers) - the player heuristic made explicit:
+    _isPlayerTrain(train) = train.moving && train.was_ai === false (a moving, non-AI train is
+    almost certainly player-driven, since the save has no crew field). Bright cyan spine in
+    detailed mode / cyan collapsed line in LOD mode. (Dropped the old PLAYER_ONLY flag - this IS it.)
+Hysteresis still feeds train.moving, so both survive brief holds per [trains] moving_hysteresis.
+Verified in-browser (moving/was_ai injected via a fetch patch): Show only moving 187->62 bodies;
+Highlight player trains -> 34 cyan collapsed lines (zoomed out) / 52 cyan highlight spines (zoomed
+in), visible on the yard. moving_count still shown in the status line.
+
+--- Zoom-scaled track line width (2026-08-30) ---
+Track polylines were a fixed weight:5 px at every zoom, so they looked too thick when zoomed
+out (compressed geography, constant px). Now the width scales with zoom via new [track] config:
+  width      (px) - full line width at/above full_zoom (default 5)
+  min_width  (px) - floor when zoomed far out (default 1.5)
+  full_zoom        - zoom at/above which the line is full width; below it the width HALVES per
+                     zoom level (proportional to metres-per-pixel) down to min_width. 0 = fixed
+                     `width`, no scaling. (default 14)
+Impl: config_parser [track] -> track_width/track_min_width/track_full_zoom; injected as
+window.TRACK_STYLE; trackWeightPx() = clamp(width*2^(zoom-full_zoom), min_width, width); sections
+render at trackWeightPx() (tagged _trackLine/_sectionId); new updateTrackWidths() on zoomend
+re-weights all non-selected sections. Verified: zoom9/12=1.5, zoom13=2.5, zoom14+=5 (capped).
+Also fixed a latent bug: section DEselect / clearSelection restored weight:3 AND referenced an
+undefined `data.originalColor` -> now restore the section's real colour (from sectionIndex) at
+trackWeightPx(). Selected sections stay weight 5 and are skipped by the zoom re-weighter.
+config-socal.ini: added a [track] section with the defaults as a reference.
+Needs a REGEN (viewer change).
+
+--- Collapsed-train head-end arrow (2026-08-30) ---
+When zoomed out past lod_scale_m, a collapsed train used to be ONE line in the railroad-leader
+colour. Now the body line is neutral GREY and the LEAD locomotive gets a small filled arrow in
+the railroad's colour, pointing the way it faces (head-end differentiation). A highlighted player
+train stays fully cyan (body + arrow).
+Cost: cheap - one extra canvas polygon per collapsed train (no DOM, no plugins). The arrow is
+computed in PIXEL space (_arrowLatLngs via latLngToLayerPoint) for a constant on-screen size and
+re-fitted on zoomend in updateTrainWidths (alongside the _rvBody reweight / _rvHighlight). Head
+tip = the LEAD car's (cars[0]) body endpoint farthest from car[1] (so it's the true consist head,
+not the geometry-ordered chain end). Constants in _arrowLatLngs (AHEAD/BASE/HALF px) + grey
+COLLAPSED_BODY_COLOR are hardcoded - can move to config after review.
+Verified in-browser at Barstow (zoom 13-15, collapsed): 188 grey bodies + 188 colour head arrows,
+constant size across zoom, no console errors. Needs a REGEN.
+
+--- Head-arrow orientation fix (2026-08-30) ---
+Bug: at wide zoom the arrow spun to a wrong angle (~90 deg off at 3 km). NOT a shape-drawing
+limitation - the heading was derived from the LEAD LOCO's own two body endpoints (~20 m apart),
+which project to sub-pixel when zoomed out, so the direction was rounding noise.
+Fix: _arrowLatLngs now takes the car centres head->tail (`centers`, consist order) and walks them
+to the first that is >= 14 px from the head tip -> a well-separated, stable heading at any zoom
+(adaptive: nearby centre when zoomed in, farther one when zoomed out). Stored as arrow._headRefs
+and re-fitted on zoom. Verified: heading 157.1 deg CONSTANT across zoom 13-16 (was swinging);
+arrows visually align with the track at 3 km. Length stays 14.1 px. No console errors.
+
+--- UI defaults tweak (2026-08-30) ---
+* Base map now defaults to "None" at startup (was OpenStreetMap): setupMap adds baseLayers['None'],
+  currentBaseLayer='None', the None radio is checked.
+* Train option "Colored cars" -> relabelled "Show colored cars" and now defaults OFF (all non-loco
+  cars use the box-car colour by default; locos still company-coloured).
+* Train option "Hide non-trains" -> renamed "Show cuts of cars" with REVERSED sense: CHECKED shows
+  the loose cuts (non-loco-led rail vehicles), default OFF (only consists led by a loco). renderTrains
+  filter is now `if (!isConsist && !opts.showCuts) continue`. State key hideNonTrains -> showCuts.
+Verified in-browser: None base map selected; options read Show colored cars / Show cuts of cars /
+Show only moving / Highlight player trains (all off); toggling Show cuts adds the cuts (5479 -> 8345
+car bodies). No console errors.

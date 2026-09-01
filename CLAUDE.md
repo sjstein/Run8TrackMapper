@@ -21,14 +21,17 @@ A web-based visualization system that supports multiple regions with dynamic loa
 python output_generator.py <config.ini>
 ```
 
-**Output modes** (select with a flag; the default is the manual-alignment viewer):
+**Output modes** — the **manual-alignment viewer is the only viewer**. (The former
+`--minimal` geographic and `--tile-based` flat viewers were removed 2026-08-30: both
+were subsets of the align viewer, which reproduces the undistorted contiguous grid when
+its Base Map is set to None. The align viewer's tile-coordinate *extraction* stays — it
+is what the viewer is built on.)
 
 | Flag | Viewer |
 |------|--------|
 | *(none)* | **Manual-alignment viewer (default).** The contiguous tile-based track drawn over a real OSM / Satellite map (with an OpenRailwayMap overlay), draggable by eye to align a chosen area. Includes all overlays, search, the local-symbol filter, Area Label display, and Area Label authoring. |
 | `--production` | Same as the default, but hides the "Add Label" authoring button (for hosting the map to end users). |
-| `--minimal` | Geographic viewer using the per-tile bilinear georeference with `tile_corrections.csv` applied. This was the previous default (no-flag) behavior. |
-| `--tile-based` | Flat tile-based viewer (`L.CRS.Simple`) with no real-world basemap. |
+| `--align` | Explicitly selects the default viewer; now a no-op kept for backward compatibility. |
 
 > **Why manual alignment is the default:** the Run8 route is a *topological* model — section lengths are compressed/stretched and a few tiles carry genuine route-designer defects — so no automatic transform georeferences the whole network. The default viewer instead renders the internally-consistent (contiguous) tile grid on a real map and lets you slide it into place per area of interest. See `openrailways_goals.txt` for background.
 
@@ -148,7 +151,6 @@ Line widths come from an optional `[trains]` section, injected as `window.TRAIN_
   the raster rail do, the RV stays wider than the (fixed-5px vector, zoom-scaling raster) track at
   every zoom. `car_width_m = 0` reverts to a plain fixed `car_width` px. Config-side floats strip
   inline `;`/`#` comments (default ConfigParser keeps them, which would break `float()`).
-  Scaling is align/geographic only; the `--tile-based` viewer uses fixed `car_width`.
 At close zoom each RV also shows its **destination tag centered on the car** (`trainDestLabelIcon`
 divIcons in a per-region `layers.trainLabels` group; `updateTrainLabelVisibility()` adds/removes the
 group on `zoomend` and when the Trains overlay toggles — labels show only when Trains is on and the
@@ -157,9 +159,9 @@ against `_scaleBarMeters()`, which mirrors Leaflet `L.control.scale`'s 1/2/3/5x1
 matches the on-screen bar exactly — note the **3** step: `< 0.5` m/px lands on the 30 m bar, not 20).
 A **Train / Rail
 Vehicle** search type matches **trainID**, **destinationTag**, or **unitNumber** (a hit
-enables the overlay and pans to the vehicle). Wired in the geographic base
+enables the overlay and pans to the vehicle). Wired in the shared base
 (`generate_javascript`: `renderTrains`, overlay entry, search) which the align viewer reuses,
-plus `transformData` in `ALIGN_JS`; the flat `--tile-based` viewer has a parallel copy.
+plus `transformData` in `ALIGN_JS`.
 
 ##### Live world-save watching (`serve.py --world`)
 ```bash
@@ -181,8 +183,7 @@ reset) to restore the live positions - otherwise live-only trains would vanish o
 ```
 output/<name>/
 ├── index.html          # Interactive map viewer (see Output modes above)
-├── manifest.json       # Region metadata, area labels, and mode-specific params
-│                       #   (align: alignment seed + tile params; minimal: tile corrections)
+├── manifest.json       # Region metadata, area labels, alignment seed + tile params
 └── data/
     └── <region_id>.json  # Per-region track, signal, industry, AI, and tile data
 ```
@@ -232,7 +233,7 @@ train_outline = #000000   # thin spine joining a train's cars
 output_dir = ./output/socal/
 ```
 
-#### Area/Place Labels (tile-based mode)
+#### Area/Place Labels
 Optional `[area.*]` sections add always-on text labels (yards, towns, junctions,
 control points) at a tile + Run8 local coordinate. They may live inline in the config
 or in external file(s) referenced by `[visualization] areas_file = a.ini, b.ini`
@@ -252,8 +253,7 @@ type = yard              ; optional category: a [label_types] id (undefined -> w
 Labels scale with the map: full `font_size` at the 50 m scale-bar level, shrinking to
 a small floor by ~15 km (tunable in `updateAreaLabelSizes` in html_generator.py).
 Labels are emitted into `manifest.json` (`areas`) and rendered as a toggleable
-"Area Labels" overlay in **both** the tile-based viewer and the manual-alignment
-(default) viewer.
+"Area Labels" overlay in the manual-alignment viewer.
 
 **Categories (`type`) — config-defined.** Categories come from the config's
 `[label_types]` section (`id = Display Name, #color`, ordered), parsed into
@@ -269,8 +269,7 @@ per-category checkboxes (colour-swatched, with All / None), **plus an auto "Othe
 shown only when some loaded label is undefined (`hasUndefinedLabels`). The add/edit popup (and the
 no-backend INI popup) `Type` selector lists the defined categories + an "Other" (undefined)
 option. New labels default to **`cp`** if defined, else the first category (`newLabelType`).
-The tile-based viewer color-codes by category (via `manifest.label_types`) but keeps a
-single "Area Labels" toggle. Type validation was dropped everywhere (any string is accepted).
+Type validation was dropped everywhere (any string is accepted).
 
 **Config-owned color palette (no colors baked into code).** Both palettes come from the
 config, not from hardcoded defaults:
@@ -281,17 +280,15 @@ config, not from hardcoded defaults:
   `VisualizationConfig.color_presets` and emitted to `manifest.color_presets`. A label
   `color` may be a preset **name** or raw hex. **The name is stored, not the hex** — kept raw in
 the INI / `AreaLabel.color` / REST payload and **resolved to hex at render time** by the
-viewer (`resolveColor` in `ALIGN_JS`; an inline lookup in the tile-based
-`createAreaLabelIcon`), so recoloring a preset updates every label that uses it. In the
+viewer (`resolveColor` in `ALIGN_JS`), so recoloring a preset updates every label that uses it. In the
 align editor the Color control is a dropdown — **Default** (the category color), the
 named presets, or **Custom** (a native RGB `<input type="color">`) — with a live swatch;
 Default stores no color, a preset stores its name, Custom stores hex. `config_parser.resolve_color()`
 is the Python-side resolver (used for tests / any server-side rendering).
 
-Authoring (capturing new labels):
-- **Tile-based viewer:** **Shift+Click** the map to place a label.
-- **Manual-alignment viewer:** toggle the **"Add Label"** button (mutually exclusive
-  with "Align mode"; hidden entirely under `--production`), then **click** to place.
+Authoring (capturing new labels), in the manual-alignment viewer:
+- Toggle the **"Add Label"** button (mutually exclusive with "Align mode"; hidden
+  entirely under `--production`), then **click** to place.
 
 Then **click a second point along a track** to set the text angle (or press **Esc**
 to leave it horizontal). Positions are converted to world meters via

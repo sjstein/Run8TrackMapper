@@ -2,20 +2,14 @@
 """
 HTML generator for Run8 Track Mapper.
 
-Generates index.html with Folium base map and embedded JavaScript
-for dynamic region loading.
+Generates the standalone manual-alignment index.html (Leaflet + embedded
+JavaScript) with dynamic per-region loading.
 """
 
-import folium
 from pathlib import Path
 from typing import List, Tuple, Optional
 
 from config_parser import VisualizationConfig, ColorConfig
-
-
-# Default map center (Southern California)
-DEFAULT_CENTER = [34.9, -118.0]
-DEFAULT_ZOOM = 9
 
 
 def generate_color_config(colors: ColorConfig) -> str:
@@ -50,7 +44,34 @@ def generate_javascript() -> str:
     const COLORS = window.COLORS;
     // Rail-vehicle line widths from [trains] config, with safe defaults.
     // car = min px floor; carM = real car width (m) the body widens to with zoom.
-    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30};
+    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14, lodScaleM: 300, lodMinCars: 3};
+
+    // Track line width from [track] config: full `width` px at/above `fullZoom`,
+    // halving per zoom level below that down to `minWidth` (fullZoom 0 = fixed width).
+    const TRACK_STYLE = window.TRACK_STYLE || {width: 5, minWidth: 1.5, fullZoom: 14};
+    // Track line weight (px) for the current zoom.
+    function trackWeightPx() {
+        const max = TRACK_STYLE.width || 5;
+        const min = TRACK_STYLE.minWidth || 0;
+        const anchor = TRACK_STYLE.fullZoom || 0;
+        if (!anchor || !MapApp.map) return max;   // scaling disabled / map not ready
+        const w = max * Math.pow(2, MapApp.map.getZoom() - anchor);
+        return Math.max(min, Math.min(max, w));
+    }
+    // Re-weight all (non-selected) track sections for the current zoom.
+    function updateTrackWidths() {
+        const w = trackWeightPx();
+        MapApp.loadedRegions.forEach(region => {
+            if (!region.layers || !region.layers.sections) return;
+            region.layers.sections.eachLayer(group => {
+                if (!group.eachLayer) return;
+                group.eachLayer(pl => {
+                    if (pl._trackLine && pl.setStyle && !MapApp.selectedSections.has(pl._sectionId))
+                        pl.setStyle({ weight: w });
+                });
+            });
+        });
+    }
 
     // ========================================
     // MapApp - Main Application State
@@ -63,7 +84,6 @@ def generate_javascript() -> str:
         signalIndex: new Map(),    // signal_id -> {region_id, marker, metadata}
         industryIndex: [],         // [{region_id, data}]
         aiLocationIndex: [],       // [{region_id, data}]
-        trainLayers: [],           // all rendered rail-vehicle polylines
         trainIndex: [],            // [{regionId, trainId, vehicle, layer}] for search
         industrySectionIds: new Set(),  // Set of "regionId_sectionId" keys for industry tracks
 
@@ -84,10 +104,17 @@ def generate_javascript() -> str:
             tileBoundaries: false,
             trains: false
         },
+        // Train display options (the "Options" button next to the Trains overlay).
+        trainOptions: {
+            coloredCars: false,     // false = paint every non-loco car the box-car colour
+            showCuts: false,        // false = only consists led by a loco; true = also loose cuts
+            showOnlyMoving: false,  // true = only plot trains moving between saves (live only)
+            highlightPlayers: false // true = highlight player trains (moving && not AI) with a bright spine
+        },
 
         // Base map layers
         baseLayers: {},  // {name: layer}
-        currentBaseLayer: 'OpenStreetMap',
+        currentBaseLayer: 'None',
 
         // UI elements
         regionCheckboxes: new Map(),
@@ -164,9 +191,9 @@ def generate_javascript() -> str:
             }
         });
 
-        // Add OpenStreetMap as default
-        MapApp.baseLayers['OpenStreetMap'].addTo(MapApp.map);
-        MapApp.currentBaseLayer = 'OpenStreetMap';
+        // Start with no base map ("None"); the user can switch via the radios.
+        MapApp.baseLayers['None'].addTo(MapApp.map);
+        MapApp.currentBaseLayer = 'None';
 
         createControlPanel();
         createSearchDialog();
@@ -297,7 +324,7 @@ def generate_javascript() -> str:
             <h4>Base Map</h4>
             <div id="basemap-list">
                 <div class="basemap-item">
-                    <input type="radio" name="basemap" id="basemap-osm" value="OpenStreetMap" checked>
+                    <input type="radio" name="basemap" id="basemap-osm" value="OpenStreetMap">
                     <label for="basemap-osm">OpenStreetMap</label>
                 </div>
                 <div class="basemap-item">
@@ -305,7 +332,7 @@ def generate_javascript() -> str:
                     <label for="basemap-satellite">Satellite</label>
                 </div>
                 <div class="basemap-item">
-                    <input type="radio" name="basemap" id="basemap-none" value="None">
+                    <input type="radio" name="basemap" id="basemap-none" value="None" checked>
                     <label for="basemap-none">None</label>
                 </div>
                 <div class="basemap-item" style="margin-top:6px;border-top:1px solid #eee;padding-top:6px;">
@@ -429,10 +456,14 @@ def generate_javascript() -> str:
             applyLocalSymbolHighlighting();
         });
 
+        // Zoom-scale the track line width (thinner when zoomed out).
+        MapApp.map.on('zoomend', updateTrackWidths);
         // Re-weight rail-vehicle bodies so they stay wider than the track at any zoom.
         MapApp.map.on('zoomend', updateTrainWidths);
         // Show/hide per-RV destination labels by zoom (visible at ~20 m scale or tighter).
         MapApp.map.on('zoomend', updateTrainLabelVisibility);
+        // Switch train detail level (full cars <-> single collapsed line) by zoom.
+        MapApp.map.on('zoomend', updateTrainLOD);
     }
 
     function createSearchDialog() {
@@ -523,6 +554,13 @@ def generate_javascript() -> str:
                 <option value="section">Track Section</option>
                 <option value="train">Train / Rail Vehicle</option>
             </select>
+            <div id="train-field-row" style="display:none;margin:6px 0;font-size:13px;">
+                <span style="color:#555;">Match:</span>
+                <label style="margin-left:4px;"><input type="radio" name="train-field" value="all" checked> All</label>
+                <label style="margin-left:6px;"><input type="radio" name="train-field" value="unit"> Unit&nbsp;#</label>
+                <label style="margin-left:6px;"><input type="radio" name="train-field" value="tag"> Tag</label>
+                <label style="margin-left:6px;"><input type="radio" name="train-field" value="trainId"> Train&nbsp;ID</label>
+            </div>
             <input type="text" id="search-input" placeholder="Enter search term...">
             <div id="search-results"></div>
         `;
@@ -541,6 +579,18 @@ def generate_javascript() -> str:
         input.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') closeSearch();
         });
+
+        // The Train / Rail Vehicle search can be narrowed to one field via radios
+        // (All / Unit # / Tag / Train ID), shown only for that search type.
+        const typeSel = document.getElementById('search-type');
+        const trainFieldRow = document.getElementById('train-field-row');
+        const syncTrainFieldRow = () => {
+            trainFieldRow.style.display = (typeSel.value === 'train') ? 'block' : 'none';
+        };
+        typeSel.addEventListener('change', () => { syncTrainFieldRow(); performSearch(); });
+        trainFieldRow.querySelectorAll('input[name="train-field"]')
+            .forEach(r => r.addEventListener('change', performSearch));
+        syncTrainFieldRow();
 
         MapApp.searchDialog = dialog;
     }
@@ -611,9 +661,17 @@ def generate_javascript() -> str:
                     border-bottom: 1px solid #eee;
                     color: #333;
                 }
+                #sim-time {
+                    display: none;
+                    margin-bottom: 3px;
+                    padding-bottom: 3px;
+                    border-bottom: 1px solid #eee;
+                    color: #333;
+                }
                 #mouse-coords { display: block; }
             </style>
             <span id="train-count"></span>
+            <span id="sim-time"></span>
             <span id="mouse-coords">---, ---</span>
         `;
         document.body.appendChild(display);
@@ -697,9 +755,11 @@ def generate_javascript() -> str:
                     const trackColor = section.is_switch ? COLORS.switch : regionTrackColor;
                     const polyline = L.polyline(path, {
                         color: trackColor,
-                        weight: 5,
+                        weight: trackWeightPx(),   // zoom-scaled (updateTrackWidths on zoomend)
                         opacity: 0.8
                     });
+                    polyline._trackLine = true;
+                    polyline._sectionId = section.id;
 
                     // Build detailed section popup
                     const sectionType = section.is_switch ? ' (Switch)' : '';
@@ -960,6 +1020,25 @@ def generate_javascript() -> str:
     // back to [colors] train_loco; other cars use the per-type colour from
     // [car_type_colors] (keyed by INDUSTRY_CONFIG_CAR_TYPE), falling back to
     // [colors] train.
+    const PLAYER_HL_COLOR = '#00e5ff';   // bright cyan spine for player-crewed trains
+    const COLLAPSED_BODY_COLOR = '#9aa0a6';  // neutral grey for a collapsed train's body line
+                                             // (the head arrow carries the railroad colour)
+    function _isLocoType(unitType) {
+        return /DieselEngine|Electric|Steam|Engine/i.test(unitType || '');
+    }
+    // A "train" is a consist whose lead (first) vehicle is a locomotive; a cut of
+    // cars with no lead loco is a "non-train" (hidden by the Hide non-trains option).
+    function _isConsist(train) {
+        const lead = train && train.vehicles && train.vehicles[0];
+        return !!(lead && _isLocoType(lead.unit_type));
+    }
+    // A "player" train (heuristic): MOVING and NOT AI-crewed (TrainWasAI false). The
+    // world save has no crew field, so this is the best proxy - a moving non-AI train
+    // is almost certainly under a player. `moving` is computed server-side by diffing
+    // consecutive saves (serve.py); absent (static output) => never a player here.
+    function _isPlayerTrain(train) {
+        return !!(train.moving && train.was_ai === false);
+    }
     function carTypeColor(t) {
         const m = (MapApp.manifest && MapApp.manifest.car_type_colors) || {};
         return t ? m[String(t).toLowerCase()] : null;
@@ -970,6 +1049,9 @@ def generate_javascript() -> str:
     }
     function rvBodyColor(v, isLoco) {
         if (isLoco) return locoCompanyColor(v.company) || COLORS.trainLoco;
+        // "Colored Cars" off: paint every non-loco car the box-car colour.
+        if (MapApp.trainOptions && !MapApp.trainOptions.coloredCars)
+            return carTypeColor('Box_Car') || COLORS.train;
         return carTypeColor(v.car_type) || COLORS.train;
     }
 
@@ -994,16 +1076,22 @@ def generate_javascript() -> str:
             if (region.layers && region.layers.trains)
                 region.layers.trains.eachLayer(l => {
                     if (l._rvBody && l.setStyle) l.setStyle({ weight: w });
+                    // Player-highlight spine stays a touch wider than the car so it
+                    // reads as a coloured casing at every zoom.
+                    else if (l._rvHighlight && l.setStyle) l.setStyle({ weight: _highlightWeight(w) });
+                    // Head-end arrows keep a constant on-screen size + stable heading across zoom.
+                    else if (l._rvArrow && l.setLatLngs) l.setLatLngs(_arrowLatLngs(l._headTip, l._headRefs));
                 });
         });
     }
+    function _highlightWeight(carWeight) { return Math.max(carWeight * 1.6, 4); }
 
     // Centered destination-tag label for one RV (shown only when zoomed in).
     function trainDestLabelIcon(text) {
         return L.divIcon({
             className: 'rv-dest-label',
             html: `<div style="transform:translate(-50%,-50%);color:#fff;`
-                + `font:bold 11px/1 system-ui,sans-serif;white-space:nowrap;`
+                + `font:bold ${TRAIN_STYLE.labelSize||14}px/1 system-ui,sans-serif;white-space:nowrap;`
                 + `text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000;">`
                 + `${text}</div>`,
             iconSize: null, iconAnchor: [0, 0]
@@ -1017,11 +1105,47 @@ def generate_javascript() -> str:
     function renderTrains(regionId, data, layers) {
         // Idempotent per region: drop prior entries (e.g. a re-align rebuild).
         MapApp.trainIndex = MapApp.trainIndex.filter(it => it.regionId !== regionId);
+
+        const opts = MapApp.trainOptions || {};
+
+        // Resolve every train's drawable cars once (honouring the Train Options).
+        const drawn = [];
         for (const train of (data.trains || [])) {
-            const carBodies = [];  // resolved bodies, for the connecting spine
+            const isConsist = _isConsist(train);
+            if (!isConsist && !opts.showCuts) continue;         // cuts (no lead loco) hidden unless shown
+            if (opts.showOnlyMoving && !train.moving) continue; // hide stationary trains
+            const cars = [];
             for (const v of train.vehicles) {
                 if (!v.resolved || !v.body || v.body.length < 2) continue;
-                const isLoco = /DieselEngine|Electric|Steam|Engine/i.test(v.unit_type || '');
+                cars.push({v, isLoco: _isLocoType(v.unit_type)});
+            }
+            if (!cars.length) continue;
+            const highlight = !!(opts.highlightPlayers && _isPlayerTrain(train));
+            drawn.push({train, cars, highlight});
+        }
+
+        // Zoom LOD: when zoomed out past the threshold (scale bar >= lodScaleM,
+        // default 300 m), drop singles / short trains and draw each longer train
+        // (> lodMinCars cars, default 3) as ONE solid line in its lead car's colour
+        // that just shows the train's length. Thresholds live in TRAIN_STYLE (moved
+        // to config after review; fall back to 300 / 3 here).
+        MapApp._trainLOD = _trainCollapsed() ? 'collapsed' : 'detailed';
+        if (MapApp._trainLOD === 'collapsed') {
+            const minCars = (window.TRAIN_STYLE && TRAIN_STYLE.lodMinCars) || 3;
+            for (const {train, cars, highlight} of drawn) {
+                if (cars.length > minCars) drawCollapsedTrain(regionId, train, cars, layers.trains, highlight);
+            }
+            return;
+        }
+
+        // Pass 1: every train's connecting spine FIRST, so the RV bodies drawn in
+        // pass 2 sit ON TOP of it (the spine reads as a thin backbone behind the
+        // cars instead of a line painted across them). Player trains get a bright spine.
+        for (const {cars, highlight} of drawn) drawTrainOutline(cars.map(c => c.v.body), layers.trains, highlight);
+
+        // Pass 2: RV bodies + destination tags, above the spines.
+        for (const {train, cars} of drawn) {
+            for (const {v, isLoco} of cars) {
                 const line = L.polyline(v.body, {
                     color: rvBodyColor(v, isLoco),
                     weight: rvBodyWeightPx(),
@@ -1034,9 +1158,7 @@ def generate_javascript() -> str:
                 line.bindTooltip(trainVehicleTooltip(train, v), {sticky: true});
                 line.bindPopup(trainVehiclePopup(train, v), {maxWidth: 300});
                 line.addTo(layers.trains);
-                MapApp.trainLayers.push(line);
                 MapApp.trainIndex.push({regionId, trainId: train.train_id, vehicle: v, layer: line});
-                carBodies.push(v.body);
 
                 // Destination tag centered on the car (zoom-gated visibility).
                 if (v.destination_tag) {
@@ -1046,9 +1168,102 @@ def generate_javascript() -> str:
                     }).addTo(layers.trainLabels);
                 }
             }
-            // A thin line joins all the cars in this train so a consist reads as one unit.
-            drawTrainOutline(carBodies, layers.trains);
         }
+    }
+
+    // ---- Zoom LOD: collapse long trains to a single line when zoomed out ----
+    // True when the scale bar reads >= lodScaleM metres (default 300) - i.e. far out.
+    function _trainCollapsed() {
+        const thr = (window.TRAIN_STYLE && TRAIN_STYLE.lodScaleM) || 300;
+        return _scaleBarMeters() >= thr;
+    }
+    // Triangle (in [lat,lon]) for a head-end arrow, computed in PIXEL space for a
+    // constant on-screen size. Heading = from a reference point back in the consist
+    // toward the head tip. `refsLL` are the car centres head->tail: we walk them to
+    // the first that is >= HEADING_MIN_PX from the tip, so the direction stays stable
+    // even zoomed out (a single loco is sub-pixel then, which made a near-only heading
+    // swing wildly). Falls back to the farthest ref. Re-fitted on zoom by updateTrainWidths.
+    function _arrowLatLngs(tipLL, refsLL) {
+        const map = MapApp.map;
+        const HEADING_MIN_PX = 14;
+        const tp = map.latLngToLayerPoint(tipLL);
+        let rp = null;
+        for (const ll of (refsLL || [])) {
+            const p = map.latLngToLayerPoint(ll);
+            if (Math.hypot(p.x - tp.x, p.y - tp.y) >= HEADING_MIN_PX) { rp = p; break; }
+        }
+        if (!rp && refsLL && refsLL.length) rp = map.latLngToLayerPoint(refsLL[refsLL.length - 1]);
+        if (!rp) return [tipLL, tipLL, tipLL];   // degenerate; nothing sensible to point at
+        let dx = tp.x - rp.x, dy = tp.y - rp.y;
+        const len = Math.hypot(dx, dy) || 1; dx /= len; dy /= len;   // heading unit (px)
+        const nx = -dy, ny = dx;                                     // perpendicular
+        const AHEAD = 3, BASE = 11, HALF = 6;                        // arrowhead px size
+        const pts = [
+            [tp.x + dx * AHEAD,          tp.y + dy * AHEAD],          // apex (ahead of tip)
+            [tp.x - dx * BASE + nx * HALF, tp.y - dy * BASE + ny * HALF],
+            [tp.x - dx * BASE - nx * HALF, tp.y - dy * BASE - ny * HALF]
+        ];
+        return pts.map(p => map.layerPointToLatLng(L.point(p[0], p[1])));
+    }
+    // Draw one train as a single line tracing its length. Zoomed out, the head end
+    // matters most: the body is a neutral grey and the LEAD locomotive gets a small
+    // arrow in the railroad's colour pointing in the direction of travel. (A
+    // highlighted player train stays fully cyan.) One trainIndex entry (lead vehicle)
+    // keeps search / follow working while collapsed.
+    function drawCollapsedTrain(regionId, train, cars, layerGroup, highlight) {
+        const bodies = cars.map(c => c.v.body);
+        const centers = bodies.map(_midpoint);
+        const order = _chainOrder(centers);
+        const cen = order.map(i => centers[i]);
+        const ob = order.map(i => bodies[i]);
+        const frontEnd = _outerEnd(ob[0], cen.length > 1 ? cen[1] : null);
+        const rearEnd = _outerEnd(ob[ob.length - 1], cen.length > 1 ? cen[cen.length - 2] : null);
+        const lead = cars[0];
+        const railColor = rvBodyColor(lead.v, lead.isLoco);   // railroad leader colour
+
+        const line = L.polyline([frontEnd, ...cen, rearEnd], {
+            color: highlight ? PLAYER_HL_COLOR : COLLAPSED_BODY_COLOR,
+            weight: rvBodyWeightPx(),
+            opacity: 0.95,
+            lineCap: 'round'
+        });
+        line._rvBody = true;   // rescales with zoom like a normal RV body
+        line.bindTooltip(trainVehicleTooltip(train, lead.v), {sticky: true});
+        line.bindPopup(trainVehiclePopup(train, lead.v), {maxWidth: 300});
+        line.addTo(layerGroup);
+        MapApp.trainIndex.push({regionId, trainId: train.train_id, vehicle: lead.v, layer: line});
+
+        // Head arrow at the lead loco's outer tip, pointing the way it faces. Heading
+        // is taken from the car centres head->tail (`centers`, in consist order), which
+        // stay well-separated in pixels at any zoom - not from the loco's own tiny body.
+        const lb = lead.v.body;
+        if (lb && lb.length >= 2) {
+            const nb = cars.length > 1 ? _midpoint(cars[1].v.body) : _midpoint(cen);
+            const e0 = lb[0], eN = lb[lb.length - 1];
+            const tip = _distLL(e0, nb) >= _distLL(eN, nb) ? e0 : eN;   // end away from the train
+            const arrowColor = highlight ? PLAYER_HL_COLOR : railColor;
+            const arrow = L.polygon(_arrowLatLngs(tip, centers), {
+                color: arrowColor, fillColor: arrowColor, fillOpacity: 1,
+                weight: 1, opacity: 1, interactive: false
+            });
+            arrow._rvArrow = true;
+            arrow._headTip = tip; arrow._headRefs = centers;
+            arrow.addTo(layerGroup);
+        }
+    }
+    // Re-render all loaded regions' trains when a zoom change crosses the LOD
+    // threshold (detailed <-> collapsed), reusing each region's stored data.
+    function updateTrainLOD() {
+        const mode = _trainCollapsed() ? 'collapsed' : 'detailed';
+        if (mode === MapApp._trainLOD) return;
+        MapApp.loadedRegions.forEach((region, regionId) => {
+            if (!region.layers || !region.layers.trains) return;
+            region.layers.trains.clearLayers();
+            region.layers.trainLabels.clearLayers();
+            renderTrains(regionId, region.data, region.layers);
+            if (MapApp.overlayStates.trains) region.layers.trains.addTo(MapApp.map);
+        });
+        updateTrainLabelVisibility();
     }
 
     // meters per screen pixel at the current view (for zoom-gated RV labels).
@@ -1088,7 +1303,28 @@ def generate_javascript() -> str:
         if (!el) return;
         const wt = MapApp._liveTotals || (MapApp.manifest && MapApp.manifest.world_totals);
         if (!MapApp.overlayStates.trains || !wt) { el.style.display = 'none'; return; }
-        el.textContent = `Trains: ${wt.trains}  ·  Rail vehicles: ${wt.vehicles}`;
+        let txt = `Trains: ${wt.trains}  ·  Rail vehicles: ${wt.vehicles}`;
+        if (MapApp._movingCount != null) txt += `  ·  Moving: ${MapApp._movingCount}`;
+        el.textContent = txt;
+        el.style.display = 'block';
+    }
+
+    // Last world-save simulation time (the save's <date> tag). Live value from
+    // serve.py overrides the baked manifest value. "2026-04-11T08:31:52.87Z" ->
+    // "2026-04-11 08:31:52".
+    function _fmtSimTime(iso) {
+        if (!iso) return null;
+        const m = String(iso).match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})/);
+        return m ? (m[1] + ' ' + m[2]) : String(iso);
+    }
+    function updateSimTime(iso) {
+        const el = document.getElementById('sim-time');
+        if (!el) return;
+        if (iso !== undefined) MapApp._simTime = iso;   // remember the latest value
+        const t = _fmtSimTime(MapApp._simTime
+            || (MapApp.manifest && MapApp.manifest.world_sim_time));
+        if (!t) { el.style.display = 'none'; return; }
+        el.textContent = 'Sim time: ' + t;
         el.style.display = 'block';
     }
 
@@ -1128,7 +1364,7 @@ def generate_javascript() -> str:
         return (!neighbour || _distLL(e0, neighbour) >= _distLL(eL, neighbour)) ? e0 : eL;
     }
 
-    function drawTrainOutline(carBodies, layerGroup) {
+    function drawTrainOutline(carBodies, layerGroup, highlight) {
         // A single-vehicle train has no consist to connect, so draw no spine
         // (otherwise the end->centre->end line shows as a stub through the one car).
         if (carBodies.length < 2) return;
@@ -1140,9 +1376,14 @@ def generate_javascript() -> str:
         const frontEnd = _outerEnd(bodies[0], cen.length > 1 ? cen[1] : null);
         const rearEnd = _outerEnd(bodies[bodies.length-1], cen.length > 1 ? cen[cen.length-2] : null);
 
-        // Thin spine: one end -> each car centre -> the other end.
-        L.polyline([frontEnd, ...cen, rearEnd],
-            { color: COLORS.trainOutline, weight: TRAIN_STYLE.spine, opacity: 0.9 }).addTo(layerGroup);
+        // Spine: one end -> each car centre -> the other end. A player-crewed train
+        // gets a bright, wider spine (a coloured casing) so it stands out; others get
+        // the thin dark backbone.
+        const line = L.polyline([frontEnd, ...cen, rearEnd], highlight
+            ? { color: PLAYER_HL_COLOR, weight: _highlightWeight(rvBodyWeightPx()), opacity: 0.95 }
+            : { color: COLORS.trainOutline, weight: TRAIN_STYLE.spine, opacity: 0.9 });
+        if (highlight) line._rvHighlight = true;   // rescales with zoom in updateTrainWidths
+        line.addTo(layerGroup);
     }
 
     function trainVehicleTooltip(train, v) {
@@ -1161,8 +1402,94 @@ def generate_javascript() -> str:
         if (v.car_type) html += `Car type: ${v.car_type}<br>`;
         html += `Destination: ${v.destination_tag || 'N/A'}`;
         if (v.rv_filename) html += `<br><span style="color:#888;font-size:11px;">${v.rv_filename}</span>`;
+        html += `<br><button type="button" style="margin-top:6px;cursor:pointer;"`
+             + ` onclick="MapApp.followTrain(${train.train_id})">Follow this train</button>`;
         return html;
     }
+
+    // ---- Follow a train: auto-center the map on it as it moves each poll ----
+    MapApp.followTrainId = null;
+    function _followBannerEl() {
+        let el = document.getElementById('follow-banner');
+        if (!el) {
+            el = document.createElement('div');
+            el.id = 'follow-banner';
+            el.style.cssText = 'position:absolute;top:10px;left:50%;transform:translateX(-50%);'
+                + 'z-index:1500;background:rgba(0,0,0,0.78);color:#fff;padding:6px 10px;'
+                + 'border-radius:6px;font:13px system-ui,sans-serif;display:none;'
+                + 'align-items:center;gap:8px;';
+            document.body.appendChild(el);
+        }
+        return el;
+    }
+    function _escHtml(s) {
+        return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+    }
+    // Lead locomotive = first vehicle in the train's world-save order.
+    function _leadVehicle(trainId) {
+        for (const [, region] of MapApp.loadedRegions) {
+            for (const tr of (region.data && region.data.trains) || []) {
+                if (tr.train_id === trainId) return (tr.vehicles && tr.vehicles[0]) || null;
+            }
+        }
+        return null;
+    }
+    // Banner label: the lead loco's destination tag + unit number (train ID is not
+    // interesting to end users), e.g. "Z-LPSD-2040 (#3342)". Falls back gracefully.
+    function _followLabel(trainId) {
+        const lead = _leadVehicle(trainId);
+        if (lead) {
+            const tag = (lead.destination_tag || '').trim();
+            const unit = (lead.unit_number || '').trim();
+            if (tag && unit) return `${_escHtml(tag)} (#${_escHtml(unit)})`;
+            if (tag) return _escHtml(tag);
+            if (unit) return `#${_escHtml(unit)}`;
+        }
+        return `${trainId}`;
+    }
+    function updateFollowBanner() {
+        const el = _followBannerEl();
+        if (MapApp.followTrainId == null) { el.style.display = 'none'; return; }
+        el.innerHTML = `Following Train ${_followLabel(MapApp.followTrainId)} `
+            + `<button type="button" style="cursor:pointer;" onclick="MapApp.stopFollow()">Stop</button>`;
+        el.style.display = 'flex';
+    }
+    function _followedLatLngs() {
+        const pts = [];
+        for (const it of MapApp.trainIndex) {
+            if (it.trainId === MapApp.followTrainId && it.layer && it.layer.getLatLngs)
+                for (const ll of it.layer.getLatLngs()) pts.push(ll);
+        }
+        return pts;
+    }
+    // Re-center on the followed train. `fit` (start of follow) zooms to frame the
+    // whole consist once; subsequent calls just pan to keep it centred as it moves.
+    function centerOnFollowed(fit) {
+        if (MapApp.followTrainId == null) return;
+        const pts = _followedLatLngs();
+        if (!pts.length) return;   // followed train not currently loaded / placed
+        const b = L.latLngBounds(pts);
+        if (fit && !MapApp._followFitDone) {
+            MapApp.map.fitBounds(b, { padding: [60, 60], maxZoom: 16 });
+            MapApp._followFitDone = true;
+        } else {
+            MapApp.map.panTo(b.getCenter(), { animate: true });
+        }
+    }
+    MapApp.centerOnFollowed = centerOnFollowed;
+    MapApp.followTrain = function (trainId) {
+        MapApp.followTrainId = trainId;
+        MapApp._followFitDone = false;
+        if (MapApp.map.closePopup) MapApp.map.closePopup();
+        // Following implies the Trains overlay should be on and visible.
+        if (!MapApp.overlayStates.trains && typeof toggleOverlay === 'function') toggleOverlay('trains', true);
+        updateFollowBanner();
+        centerOnFollowed(true);
+    };
+    MapApp.stopFollow = function () {
+        MapApp.followTrainId = null;
+        updateFollowBanner();
+    };
 
     function unloadRegion(regionId) {
         const region = MapApp.loadedRegions.get(regionId);
@@ -1409,10 +1736,12 @@ def generate_javascript() -> str:
         }
 
         if (MapApp.selectedSections.has(sectionId)) {
-            // Deselect - apply style to all layers in the feature group
+            // Deselect - restore the section's original colour + the zoom-scaled width.
             MapApp.selectedSections.delete(sectionId);
+            const idx = MapApp.sectionIndex.get(sectionId);
+            const restoreColor = (idx && idx.originalColor) || COLORS.track;
             featureGroup.eachLayer(layer => {
-                if (layer.setStyle) layer.setStyle({color: data.originalColor || COLORS.track, weight: 3});
+                if (layer.setStyle) layer.setStyle({color: restoreColor, weight: trackWeightPx()});
             });
 
             if (MapApp.selectedSections.size === 0) {
@@ -1432,8 +1761,10 @@ def generate_javascript() -> str:
 
     function clearSelection() {
         for (const [sectionId, data] of MapApp.selectedSections) {
+            const idx = MapApp.sectionIndex.get(sectionId);
+            const restoreColor = (idx && idx.originalColor) || COLORS.track;
             data.polyline.eachLayer(layer => {
-                if (layer.setStyle) layer.setStyle({color: data.originalColor || COLORS.track, weight: 3});
+                if (layer.setStyle) layer.setStyle({color: restoreColor, weight: trackWeightPx()});
             });
         }
         MapApp.selectedSections.clear();
@@ -1570,12 +1901,18 @@ def generate_javascript() -> str:
                 }
             }
         } else if (searchType === 'train') {
-            // Match trainID, destinationTag, or unitNumber (substring, case-insensitive)
+            // Match on the field chosen by the radios (default All): Unit #, Tag,
+            // Train ID, or all three (substring, case-insensitive).
+            const field = (document.querySelector('input[name="train-field"]:checked') || {}).value || 'all';
             for (let i = 0; i < MapApp.trainIndex.length; i++) {
                 const it = MapApp.trainIndex[i];
                 const v = it.vehicle;
-                const hay = [String(it.trainId), v.unit_number || '', v.destination_tag || '']
-                    .join(' ').toLowerCase();
+                const hay = (
+                    field === 'unit'    ? (v.unit_number || '') :
+                    field === 'tag'     ? (v.destination_tag || '') :
+                    field === 'trainId' ? String(it.trainId) :
+                    [String(it.trainId), v.unit_number || '', v.destination_tag || ''].join(' ')
+                ).toLowerCase();
                 if (hay.includes(query)) {
                     results.push({
                         type: 'train',
@@ -1680,7 +2017,10 @@ def generate_javascript() -> str:
         openSearch,
         closeSearch,
         goToResult,
-        clearSelection: clearSelection
+        clearSelection: clearSelection,
+        // Exposed for inline onclick handlers (train popup / follow banner).
+        followTrain: MapApp.followTrain,
+        stopFollow: MapApp.stopFollow
     };
 
     // Start initialization
@@ -1692,1396 +2032,6 @@ def generate_javascript() -> str:
 })();
 </script>
 '''
-
-
-def generate_tile_based_html(config: VisualizationConfig) -> str:
-    """Generate HTML for tile-based coordinate mode using L.CRS.Simple"""
-    colors = config.colors
-
-    return f'''<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{config.name} - Tile-Based View</title>
-    <link rel="stylesheet" href="leaflet/leaflet.css" />
-    <script src="leaflet/leaflet.js"></script>
-    <script>window.L||document.write('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>')</script>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        html, body {{ height: 100%; width: 100%; }}
-        #map {{ height: 100%; width: 100%; background-color: {colors.background}; }}
-        .control-panel {{
-            position: absolute;
-            top: 10px;
-            right: 10px;
-            z-index: 1000;
-            background: white;
-            padding: 15px;
-            border-radius: 5px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-            max-width: 280px;
-            max-height: calc(100vh - 40px);
-            overflow-y: auto;
-            font-family: Arial, sans-serif;
-            font-size: 13px;
-        }}
-        .control-panel h3 {{ margin-bottom: 10px; font-size: 14px; }}
-        .control-panel label {{ display: block; margin: 5px 0; cursor: pointer; }}
-        .control-panel input[type="checkbox"] {{ margin-right: 8px; }}
-        .region-list {{ margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #ddd; }}
-        .overlay-toggles {{ margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #ddd; }}
-        #mouse-position {{
-            position: absolute;
-            bottom: 10px;
-            right: 10px;
-            z-index: 1000;
-            background: rgba(255,255,255,0.9);
-            padding: 5px 10px;
-            border-radius: 3px;
-            font-family: monospace;
-            font-size: 12px;
-        }}
-        .search-btn {{
-            position: absolute;
-            top: 10px;
-            left: 50px;
-            z-index: 1000;
-            background: white;
-            border: 2px solid rgba(0,0,0,0.2);
-            border-radius: 4px;
-            padding: 5px 10px;
-            cursor: pointer;
-            font-size: 16px;
-        }}
-        .search-btn:hover {{ background: #f4f4f4; }}
-        .search-overlay {{
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0,0,0,0.5);
-            z-index: 1999;
-        }}
-        .search-overlay.visible {{ display: block; }}
-        .search-dialog {{
-            display: none;
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            z-index: 2000;
-            background: white;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-            min-width: 350px;
-            max-width: 500px;
-            max-height: 80vh;
-            overflow-y: auto;
-        }}
-        .search-dialog.visible {{ display: block; }}
-        .search-dialog h3 {{ margin: 0 0 15px 0; }}
-        .search-dialog select {{
-            width: 100%;
-            padding: 8px;
-            margin-bottom: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }}
-        .search-dialog input {{
-            width: 100%;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-            box-sizing: border-box;
-        }}
-        .search-dialog .search-close {{
-            position: absolute;
-            top: 10px;
-            right: 15px;
-            background: none;
-            border: none;
-            font-size: 20px;
-            cursor: pointer;
-            color: #666;
-        }}
-        .search-results {{
-            margin-top: 15px;
-            max-height: 300px;
-            overflow-y: auto;
-        }}
-        .search-result {{
-            padding: 8px;
-            border-bottom: 1px solid #eee;
-            cursor: pointer;
-        }}
-        .search-result:hover {{ background: #f5f5f5; }}
-        .leaflet-popup-content {{ font-size: 12px; }}
-        .selection-info {{
-            margin-top: 10px;
-            padding-top: 10px;
-            border-top: 1px solid #ddd;
-        }}
-        .scale-control {{
-            position: absolute;
-            bottom: 10px;
-            left: 10px;
-            z-index: 1000;
-            background: rgba(255,255,255,0.9);
-            padding: 3px 8px;
-            border-radius: 3px;
-            font-family: monospace;
-            font-size: 11px;
-        }}
-    </style>
-</head>
-<body>
-    <div id="map"></div>
-
-    <button class="search-btn" onclick="openSearch()">&#128269;</button>
-    <div class="search-overlay" id="search-overlay" onclick="closeSearch()"></div>
-    <div class="search-dialog" id="search-dialog">
-        <button class="search-close" onclick="closeSearch()">&times;</button>
-        <h3>Search</h3>
-        <select id="search-type">
-            <option value="aiLocation">AI Location</option>
-            <option value="industry">Industry</option>
-            <option value="section">Track Section</option>
-            <option value="signal">Signal</option>
-            <option value="train">Train / Rail Vehicle</option>
-        </select>
-        <input type="text" id="search-input" placeholder="Enter search term..." oninput="performSearch()">
-        <div class="search-results" id="search-results"></div>
-    </div>
-
-    <div class="control-panel">
-        <h3>Regions</h3>
-        <div class="region-list" id="region-list"></div>
-
-        <h3>Overlays</h3>
-        <div class="overlay-toggles">
-            <label><input type="checkbox" id="toggle-ai"> AI Locations</label>
-            <label><input type="checkbox" id="toggle-industries"> Industries</label>
-            <label><input type="checkbox" id="toggle-signals"> Signals</label>
-            <label><input type="checkbox" id="toggle-tiles"> Tile Boundaries</label>
-            <label><input type="checkbox" id="toggle-trains"> Trains</label>
-            <label><input type="checkbox" id="toggle-area-labels"> Area Labels</label>
-            <div style="font-size:11px;color:#666;margin-top:4px;">Shift+Click to place a label, then click along a track to set its angle (Esc = flat)</div>
-        </div>
-
-        <h3>Local Filter</h3>
-        <select id="local-symbol-select" style="width:100%;padding:6px;margin-bottom:10px;border:1px solid #ddd;border-radius:4px;">
-            <option value="">-- All Industries --</option>
-        </select>
-
-        <div class="selection-info" id="selection-info" style="display:none;">
-            <strong>Selection</strong>
-            <div id="selection-count">0 sections</div>
-            <div id="selection-length">0 ft</div>
-            <div id="gradient-row" style="display:none">Avg Grade: <span id="selection-gradient"></span></div>
-            <button onclick="clearSelection()" style="margin-top:5px;padding:3px 8px;">Clear</button>
-        </div>
-    </div>
-
-    <div id="mouse-position">X: 0.0m, Y: 0.0m</div>
-    <div class="scale-control" id="scale-control">Scale: calculating...</div>
-
-<script>
-window.COLORS = {{
-    track: '{colors.track}',
-    trackSelected: '{colors.track_selected}',
-    trackHover: '{colors.track_hover}',
-    switch: '{colors.switch}',
-    industryTrack: '{colors.industry_track}',
-    signalAbsolute: '{colors.signal_absolute}',
-    signalIntermediate: '{colors.signal_intermediate}',
-    signalBorderSingle: '{colors.signal_border_single}',
-    signalBorderStacked: '{colors.signal_border_stacked}',
-    areaLabel: '{colors.area_label}',
-    train: '{colors.train}',
-    trainLoco: '{colors.train_loco}',
-    trainOutline: '{colors.train_outline}'
-}};
-window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}}};
-
-(function() {{
-    'use strict';
-
-    const COLORS = window.COLORS;
-    const TRAIN_STYLE = window.TRAIN_STYLE || {{car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30}};
-
-    const MapApp = {{
-        map: null,
-        manifest: null,
-        loadedRegions: new Map(),
-        sectionIndex: new Map(),
-        signalIndex: new Map(),
-        industryIndex: [],
-        aiLocationIndex: [],
-        industrySectionIds: new Set(),
-        selectedSections: new Map(),
-        areaLabelsLayer: null,   // global L.layerGroup for user-defined area labels
-        overlayStates: {{ signals: false, industries: false, aiLocations: false, tileBoundaries: false, trains: false, areaLabels: false }},
-        signalLayers: [],
-        industryLayers: [],
-        aiLayers: [],
-        tileLayers: [],
-        trainLayers: [],
-        trainIndex: [],   // {{ regionId, trainId, vehicle, layer }} for search
-        // Local symbol filtering state
-        localSymbolIndex: new Set(),
-        currentLocalFilter: null,
-        industryMarkers: new Map()
-    }};
-
-    // Initialize map with L.CRS.Simple for tile-based coordinates
-    function init() {{
-        MapApp.map = L.map('map', {{
-            crs: L.CRS.Simple,
-            minZoom: -10,
-            maxZoom: 5,
-            zoomSnap: 0.25,
-            zoomDelta: 0.5
-        }});
-
-        // Set initial view (will be adjusted after loading data)
-        MapApp.map.setView([0, 0], 0);
-
-        // Mouse position display
-        MapApp.map.on('mousemove', (e) => {{
-            const x = e.latlng.lng.toFixed(1);
-            const y = e.latlng.lat.toFixed(1);
-            document.getElementById('mouse-position').textContent = `X: ${{x}}m, Y: ${{y}}m`;
-        }});
-
-        // Shift+Click to capture an area label; the next click sets the angle.
-        MapApp.map.on('click', (e) => {{
-            if (MapApp.areaCapture && MapApp.areaCapture.pending) {{
-                finalizeAreaCapture(e.latlng);
-            }} else if (e.originalEvent && e.originalEvent.shiftKey) {{
-                startAreaCapture(e.latlng);
-            }}
-        }});
-
-        // Update scale on zoom
-        MapApp.map.on('zoomend', updateScale);
-        MapApp.map.on('zoomend', updateAreaLabelSizes);
-
-        loadManifest();
-    }}
-
-    function updateScale() {{
-        // In L.CRS.Simple, 1 unit = 1 pixel at zoom 0
-        // At zoom level z, 1 unit = 2^z pixels
-        const zoom = MapApp.map.getZoom();
-        const pixelsPerMeter = Math.pow(2, zoom);
-        const metersPerPixel = 1 / pixelsPerMeter;
-
-        // Calculate a nice scale bar length
-        const containerWidth = MapApp.map.getContainer().offsetWidth;
-        const targetBarPixels = 100;  // Aim for ~100px bar
-        const targetMeters = targetBarPixels * metersPerPixel;
-
-        // Round to nice numbers
-        let scaleMeters;
-        if (targetMeters >= 1000) scaleMeters = Math.round(targetMeters / 1000) * 1000;
-        else if (targetMeters >= 100) scaleMeters = Math.round(targetMeters / 100) * 100;
-        else if (targetMeters >= 10) scaleMeters = Math.round(targetMeters / 10) * 10;
-        else scaleMeters = Math.round(targetMeters);
-
-        if (scaleMeters < 1) scaleMeters = 1;
-
-        const label = scaleMeters >= 1000 ? `${{scaleMeters/1000}} km` : `${{scaleMeters}} m`;
-        document.getElementById('scale-control').textContent = `Scale: ${{label}}`;
-    }}
-
-    async function loadManifest() {{
-        try {{
-            const response = await fetch('manifest.json');
-            MapApp.manifest = await response.json();
-            setupRegionControls();
-            buildAreaLabels();
-
-            // Load enabled regions
-            for (const region of MapApp.manifest.regions) {{
-                if (region.enabled_by_default) {{
-                    await loadRegion(region.id);
-                }}
-            }}
-
-            fitBoundsToData();
-            MapApp.labelBaseZoom = MapApp.map.getZoom();
-            updateAreaLabelSizes();
-            updateScale();
-        }} catch (error) {{
-            console.error('Failed to load manifest:', error);
-        }}
-    }}
-
-    function setupRegionControls() {{
-        const list = document.getElementById('region-list');
-        list.innerHTML = '';
-
-        for (const region of MapApp.manifest.regions) {{
-            const label = document.createElement('label');
-            const checkbox = document.createElement('input');
-            checkbox.type = 'checkbox';
-            checkbox.checked = region.enabled_by_default;
-            checkbox.onchange = () => toggleRegion(region.id, checkbox.checked);
-            label.appendChild(checkbox);
-            label.appendChild(document.createTextNode(region.display_name));
-            list.appendChild(label);
-        }}
-
-        // Overlay toggles
-        document.getElementById('toggle-signals').onchange = (e) => toggleOverlay('signals', e.target.checked);
-        document.getElementById('toggle-industries').onchange = (e) => toggleOverlay('industries', e.target.checked);
-        document.getElementById('toggle-ai').onchange = (e) => toggleOverlay('aiLocations', e.target.checked);
-        document.getElementById('toggle-tiles').onchange = (e) => toggleOverlay('tileBoundaries', e.target.checked);
-        document.getElementById('toggle-trains').onchange = (e) => toggleOverlay('trains', e.target.checked);
-        document.getElementById('toggle-area-labels').onchange = (e) => toggleOverlay('areaLabels', e.target.checked);
-
-        // Local symbol filter dropdown
-        document.getElementById('local-symbol-select').addEventListener('change', (e) => {{
-            MapApp.currentLocalFilter = e.target.value || null;
-            applyLocalSymbolHighlighting();
-        }});
-    }}
-
-    async function loadRegion(regionId) {{
-        if (MapApp.loadedRegions.has(regionId)) return;
-
-        try {{
-            const response = await fetch(`data/${{regionId}}.json`);
-            const data = await response.json();
-
-            const layers = {{
-                tracks: L.layerGroup().addTo(MapApp.map),
-                signals: L.layerGroup(),
-                industries: L.layerGroup(),
-                aiLocations: L.layerGroup(),
-                tiles: L.layerGroup(),
-                trains: L.layerGroup()
-            }};
-
-            // Build industry section set
-            for (const ind of data.industries) {{
-                for (const secId of ind.track_sections) {{
-                    MapApp.industrySectionIds.add(`${{regionId}}_${{secId}}`);
-                }}
-            }}
-
-            // Get region-specific track color (from manifest) or fall back to global default
-            const regionManifest = MapApp.manifest.regions.find(r => r.id === regionId);
-            const regionTrackColor = regionManifest?.track_color || COLORS.track;
-
-            // Render tracks
-            for (const section of data.sections) {{
-                const isIndustry = MapApp.industrySectionIds.has(`${{regionId}}_${{section.id}}`);
-                const trackColor = section.is_switch ? COLORS.switch : regionTrackColor;
-                const color = section.is_switch ? COLORS.switch :
-                              (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : regionTrackColor;
-
-                // Use LayerGroup to collect all polylines for this section (like geographic mode)
-                const sectionGroup = L.featureGroup();
-
-                for (const path of section.paths) {{
-                    // In tile-based mode, coordinates are [x, y] (stored as [lat, lon] in data)
-                    // Leaflet expects [lat, lng] = [y, x], so we need to swap
-                    const coords = path.map(p => [p[1], p[0]]);  // Swap to [y, x]
-
-                    const polyline = L.polyline(coords, {{
-                        color: color,
-                        weight: 5,
-                        opacity: 0.8
-                    }});
-
-                    polyline.on('click', (e) => handleTrackClick(e, section, regionId, sectionGroup));
-                    polyline.on('mouseover', () => {{
-                        if (!MapApp.selectedSections.has(section.id)) {{
-                            sectionGroup.eachLayer(layer => layer.setStyle({{ color: COLORS.trackHover }}));
-                        }}
-                    }});
-                    polyline.on('mouseout', () => {{
-                        if (!MapApp.selectedSections.has(section.id)) {{
-                            const c = section.is_switch ? COLORS.switch :
-                                      (MapApp.overlayStates.industries && isIndustry) ? COLORS.industryTrack : regionTrackColor;
-                            sectionGroup.eachLayer(layer => layer.setStyle({{ color: c }}));
-                        }}
-                    }});
-
-                    polyline.bindTooltip(`Section ${{section.id}}<br>${{section.length_m.toFixed(1)}}m`, {{ sticky: true }});
-
-                    sectionGroup.addLayer(polyline);
-                }}
-
-                sectionGroup.addTo(layers.tracks);
-                MapApp.sectionIndex.set(section.id, {{ regionId, polyline: sectionGroup, metadata: section, isIndustry, originalColor: trackColor }});
-            }}
-
-            // Render signals
-            for (const signal of data.signals) {{
-                const marker = createSignalMarker(signal);
-                marker.addTo(layers.signals);
-                MapApp.signalLayers.push(marker);
-                MapApp.signalIndex.set(signal.id, {{ regionId, marker, metadata: signal }});
-            }}
-
-            // Render industries
-            for (let i = 0; i < data.industries.length; i++) {{
-                const ind = data.industries[i];
-                const marker = L.marker([ind.lon, ind.lat], {{  // [y, x]
-                    icon: createIndustryIcon(ind.tag, true, false)
-                }}).addTo(layers.industries);
-
-                // Build detailed industry popup
-                let industryPopup = `<b>${{ind.name}}</b><br>`;
-                industryPopup += `Tag: ${{ind.tag}}<br>`;
-                industryPopup += `Local: ${{ind.local_name || 'N/A'}}<br>`;
-                if (ind.track_sections && ind.track_sections.length > 0) {{
-                    industryPopup += `Track Sections: ${{ind.track_sections.join(', ')}}`;
-                }}
-                marker.bindPopup(industryPopup, {{maxWidth: 300}});
-
-                MapApp.industryLayers.push(marker);
-                MapApp.industryIndex.push({{ region_id: regionId, data: ind }});
-
-                // Track marker for highlighting - use index to ensure unique keys
-                const compositeKey = `${{regionId}}_${{i}}`;
-                MapApp.industryMarkers.set(compositeKey, {{
-                    marker: marker,
-                    data: ind,
-                    regionId: regionId
-                }});
-
-                // Track unique local symbols for the filter dropdown
-                if (ind.local_name) {{
-                    MapApp.localSymbolIndex.add(ind.local_name);
-                }}
-
-                // Track which sections are industry tracks
-                if (ind.track_sections) {{
-                    for (const sectionId of ind.track_sections) {{
-                        MapApp.industrySectionIds.add(`${{regionId}}_${{sectionId}}`);
-                    }}
-                }}
-            }}
-
-            // Update local symbol dropdown after loading industries
-            updateLocalSymbolDropdown();
-
-            // Render AI locations
-            for (const loc of data.ai_locations) {{
-                const marker = L.circleMarker([loc.lon, loc.lat], {{  // [y, x]
-                    radius: 6,
-                    fillColor: '#ff6600',
-                    color: '#cc4400',
-                    weight: 2,
-                    fillOpacity: 0.8
-                }}).addTo(layers.aiLocations);
-                marker.bindTooltip(`${{loc.name}}<br>${{loc.type_name}}`, {{ sticky: true }});
-                MapApp.aiLayers.push(marker);
-                MapApp.aiLocationIndex.push({{ regionId, data: loc }});
-            }}
-
-            // Render tile boundaries
-            for (const tile of data.tiles) {{
-                // In tile-based mode, tile bounds are in world coordinates
-                // lat_south/north are y_min/y_max, lon_west/east are x_min/x_max
-                const bounds = [[tile.lat_south, tile.lon_west], [tile.lat_north, tile.lon_east]];
-                const rect = L.rectangle(bounds, {{
-                    color: tile.is_corrected ? 'red' : 'black',
-                    fill: false,
-                    weight: 1,
-                    opacity: 0.5
-                }}).addTo(layers.tiles);
-                rect.bindTooltip(`Tile ${{tile.x}}, ${{tile.z}}`, {{ sticky: true }});
-                MapApp.tileLayers.push(rect);
-
-                // Draw center dot
-                const centerY = (tile.lat_north + tile.lat_south) / 2;
-                const centerX = (tile.lon_east + tile.lon_west) / 2;
-                const dotColor = tile.is_corrected ? 'red' : 'darkgrey';
-                const dotFill = tile.is_corrected ? 'red' : 'white';
-
-                const dot = L.circleMarker([centerY, centerX], {{
-                    radius: 3,
-                    color: dotColor,
-                    fillColor: dotFill,
-                    fillOpacity: 1.0,
-                    weight: 1
-                }}).addTo(layers.tiles);
-                dot.bindTooltip(`Tile ${{tile.x}}, ${{tile.z}}`, {{ sticky: true }});
-                MapApp.tileLayers.push(dot);
-            }}
-
-            // Render trains / rail vehicles (from an optional world save)
-            renderTrains(regionId, data, layers.trains);
-
-            MapApp.loadedRegions.set(regionId, {{ data, layers, visible: true }});
-
-            // Apply overlay states
-            if (MapApp.overlayStates.signals) layers.signals.addTo(MapApp.map);
-            if (MapApp.overlayStates.industries) layers.industries.addTo(MapApp.map);
-            if (MapApp.overlayStates.aiLocations) layers.aiLocations.addTo(MapApp.map);
-            if (MapApp.overlayStates.tileBoundaries) layers.tiles.addTo(MapApp.map);
-            if (MapApp.overlayStates.trains) layers.trains.addTo(MapApp.map);
-
-        }} catch (error) {{
-            console.error(`Failed to load region ${{regionId}}:`, error);
-        }}
-    }}
-
-    // Body colours come from the config ([colors] train / train_loco).
-
-    // Draw each rail vehicle as a body polyline spanning its two trucks. Coords
-    // are stored [x, y]; Leaflet wants [y, x], so swap (same as tracks). The
-    // align transform has already been applied to the body points in
-    // transformData, so vehicles ride the manual alignment for free.
-    function renderTrains(regionId, data, layerGroup) {{
-        // Idempotent per region: drop any prior entries (e.g. a re-align rebuild)
-        // so search does not accumulate stale, detached vehicles.
-        MapApp.trainIndex = MapApp.trainIndex.filter(it => it.regionId !== regionId);
-        for (const train of (data.trains || [])) {{
-            for (const v of train.vehicles) {{
-                if (!v.resolved || !v.body || v.body.length < 2) continue;
-                const coords = v.body.map(p => [p[1], p[0]]);
-                const isLoco = /DieselEngine|Electric|Steam|Engine/i.test(v.unit_type || '');
-                const _ctc = (MapApp.manifest && MapApp.manifest.car_type_colors) || {{}};
-                const _lcc = (MapApp.manifest && MapApp.manifest.loco_company_colors) || {{}};
-                const _bodyColor = isLoco
-                    ? (_lcc[String(v.company || '').toLowerCase()] || COLORS.trainLoco)
-                    : (_ctc[String(v.car_type || '').toLowerCase()] || COLORS.train);
-                const line = L.polyline(coords, {{
-                    color: _bodyColor,
-                    weight: TRAIN_STYLE.car,
-                    opacity: 0.95,
-                    // Locos get rounded end-caps (a pill shape) so they read as
-                    // the powered unit without relying on colour; cars stay blunt.
-                    lineCap: isLoco ? 'round' : 'butt'
-                }});
-                const tip = `<div style="font-family:monospace;white-space:pre;margin:0">`
-                    + `Train  : ${{train.train_id}}<br>`
-                    + `RV num : ${{v.unit_number || ''}}<br>`
-                    + `RV tag : ${{v.destination_tag || ''}}<br>`
-                    + `RV typ : ${{v.car_type || ''}}</div>`;
-                line.bindTooltip(tip, {{ sticky: true }});
-                line.bindPopup(trainVehiclePopup(train, v), {{ maxWidth: 300 }});
-                line.addTo(layerGroup);
-                MapApp.trainLayers.push(line);
-                MapApp.trainIndex.push({{ regionId, trainId: train.train_id, vehicle: v, layer: line }});
-            }}
-        }}
-    }}
-
-    function trainVehiclePopup(train, v) {{
-        let html = `<b>Train ${{train.train_id}}</b>${{train.was_ai ? ' (AI)' : ''}}<br>`;
-        html += `Unit: ${{v.unit_number || 'N/A'}}<br>`;
-        html += `Type: ${{v.unit_type || 'N/A'}}<br>`;
-        if (v.car_type) html += `Car type: ${{v.car_type}}<br>`;
-        html += `Destination: ${{v.destination_tag || 'N/A'}}<br>`;
-        if (v.rv_filename) html += `<span style="color:#888;font-size:11px;">${{v.rv_filename}}</span>`;
-        return html;
-    }}
-
-    function createSignalMarker(signal) {{
-        // Signal as directional triangle
-        const size = 12;
-        // Add Math.PI (180°) to match geographic mode rotation convention
-        const rotation = (signal.rotation * Math.PI / 180) + Math.PI;
-        const cos = Math.cos(rotation);
-        const sin = Math.sin(rotation);
-
-        // Triangle pointing in direction of rotation
-        const points = [
-            [0, -size],        // Tip
-            [-size/2, size/2], // Left base
-            [size/2, size/2]   // Right base
-        ].map(([x, y]) => [
-            x * cos - y * sin,
-            x * sin + y * cos
-        ]);
-
-        const lat = signal.lon;  // y coordinate
-        const lng = signal.lat;  // x coordinate
-
-        const fillColor = signal.type === 'absolute' ? COLORS.signalAbsolute : COLORS.signalIntermediate;
-        // Use stacked border if multi-head signal (stacked_ids has more than one ID)
-        const isStacked = signal.stacked_ids && signal.stacked_ids.length > 1;
-        const borderColor = isStacked ? COLORS.signalBorderStacked : COLORS.signalBorderSingle;
-
-        const svgIcon = L.divIcon({{
-            className: 'signal-icon',
-            html: `<svg width="${{size*2}}" height="${{size*2}}" style="overflow:visible;">
-                     <polygon points="${{points.map(p => `${{p[0]+size}},${{p[1]+size}}`).join(' ')}}"
-                              fill="${{fillColor}}" stroke="${{borderColor}}" stroke-width="2"/>
-                   </svg>`,
-            iconSize: [size*2, size*2],
-            iconAnchor: [size, size]
-        }});
-
-        const marker = L.marker([lat, lng], {{ icon: svgIcon }});
-        // Show all stacked signal IDs in tooltip for multi-head signals
-        let tooltipText = isStacked
-            ? `Signals ${{signal.stacked_ids.join(', ')}}<br>${{signal.type}}`
-            : `Signal ${{signal.id}}<br>${{signal.type}}`;
-        marker.bindTooltip(tooltipText, {{ sticky: true }});
-        return marker;
-    }}
-
-    function handleTrackClick(e, section, regionId, sectionGroup) {{
-        if (e.originalEvent.shiftKey) {{
-            // Shift+click: toggle multi-section selection
-            if (MapApp.selectedSections.has(section.id)) {{
-                MapApp.selectedSections.delete(section.id);
-                const color = section.is_switch ? COLORS.switch : COLORS.track;
-                sectionGroup.eachLayer(layer => layer.setStyle({{ color: color }}));
-            }} else {{
-                MapApp.selectedSections.set(section.id, {{ polyline: sectionGroup, metadata: section }});
-                sectionGroup.eachLayer(layer => layer.setStyle({{ color: COLORS.trackSelected }}));
-            }}
-            updateSelectionInfo();
-        }} else if (e.originalEvent.ctrlKey) {{
-            // Ctrl+click: detailed info popup
-            const sectionType = section.is_switch ? 'Switch/Turnout' : 'Track Section';
-            let content = `<b>Section ${{section.id}}</b> (${{sectionType}})<br>`;
-            content += `Length: ${{section.length_ft.toFixed(1)}} ft (${{section.length_m.toFixed(1)}} m)<br>`;
-            content += `Track Type: ${{section.track_type}}<br>`;
-            content += `Retarder: ${{section.retarder_mph}}`;
-            L.popup({{maxWidth: 300}}).setLatLng(e.latlng).setContent(content).openOn(MapApp.map);
-        }} else {{
-            // Normal click: basic popup
-            const content = `<b>Section ${{section.id}}</b><br>
-                            Length: ${{section.length_m.toFixed(1)}}m (${{section.length_ft.toFixed(1)}}ft)<br>
-                            ${{section.is_switch ? 'Switch/Turnout' : 'Track Section'}}`;
-            L.popup().setLatLng(e.latlng).setContent(content).openOn(MapApp.map);
-        }}
-    }}
-
-    function updateSelectionInfo() {{
-        const count = MapApp.selectedSections.size;
-        const info = document.getElementById('selection-info');
-        const gradientRow = document.getElementById('gradient-row');
-        const gradientSpan = document.getElementById('selection-gradient');
-
-        if (count === 0) {{
-            info.style.display = 'none';
-            if (gradientRow) gradientRow.style.display = 'none';
-            return;
-        }}
-
-        info.style.display = 'block';
-        document.getElementById('selection-count').textContent = `${{count}} section${{count > 1 ? 's' : ''}}`;
-
-        let totalLengthFt = 0;
-        MapApp.selectedSections.forEach(s => totalLengthFt += s.metadata.length_ft);
-        document.getElementById('selection-length').textContent = `${{totalLengthFt.toFixed(1)}} ft`;
-
-        // Gradient: elevation from first-clicked section start to last-clicked section end
-        const entries = Array.from(MapApp.selectedSections.values());
-        if (entries.length >= 2 && gradientRow && gradientSpan) {{
-            const firstMeta = entries[0].metadata;
-            const lastMeta = entries[entries.length - 1].metadata;
-            const totalLengthM = totalLengthFt / 3.28084;
-            const elevDiff = lastMeta.elevation_end_m - firstMeta.elevation_start_m;
-            const gradientPct = totalLengthM > 0 ? (elevDiff / totalLengthM) * 100 : 0;
-            const sign = gradientPct > 0 ? '+' : '';
-            gradientSpan.textContent = `${{sign}}${{gradientPct.toFixed(2)}}%`;
-            gradientRow.style.display = 'block';
-        }} else if (gradientRow) {{
-            gradientRow.style.display = 'none';
-        }}
-    }}
-
-    window.clearSelection = function() {{
-        MapApp.selectedSections.forEach((s) => {{
-            s.polyline.setStyle({{ color: s.metadata.is_switch ? COLORS.switch : COLORS.track }});
-        }});
-        MapApp.selectedSections.clear();
-        updateSelectionInfo();
-    }};
-
-    function toggleRegion(regionId, enabled) {{
-        if (enabled) {{
-            if (!MapApp.loadedRegions.has(regionId)) {{
-                loadRegion(regionId);
-            }} else {{
-                const region = MapApp.loadedRegions.get(regionId);
-                region.layers.tracks.addTo(MapApp.map);
-                if (MapApp.overlayStates.signals) region.layers.signals.addTo(MapApp.map);
-                if (MapApp.overlayStates.industries) region.layers.industries.addTo(MapApp.map);
-                if (MapApp.overlayStates.aiLocations) region.layers.aiLocations.addTo(MapApp.map);
-                if (MapApp.overlayStates.tileBoundaries) region.layers.tiles.addTo(MapApp.map);
-                if (MapApp.overlayStates.trains) region.layers.trains.addTo(MapApp.map);
-                region.visible = true;
-
-                // Rebuild local symbol index when showing region
-                rebuildLocalSymbolIndex();
-                updateLocalSymbolDropdown();
-            }}
-        }} else {{
-            const region = MapApp.loadedRegions.get(regionId);
-            if (region) {{
-                MapApp.map.removeLayer(region.layers.tracks);
-                MapApp.map.removeLayer(region.layers.signals);
-                MapApp.map.removeLayer(region.layers.industries);
-                MapApp.map.removeLayer(region.layers.aiLocations);
-                MapApp.map.removeLayer(region.layers.tiles);
-                MapApp.map.removeLayer(region.layers.trains);
-                region.visible = false;
-
-                // Rebuild local symbol index from visible regions only
-                rebuildLocalSymbolIndex();
-                updateLocalSymbolDropdown();
-            }}
-        }}
-    }}
-
-    function rebuildLocalSymbolIndex() {{
-        MapApp.localSymbolIndex.clear();
-        for (const [regionId, region] of MapApp.loadedRegions) {{
-            if (!region.visible) continue;
-            for (const item of MapApp.industryIndex) {{
-                if (item.region_id === regionId && item.data.local_name) {{
-                    MapApp.localSymbolIndex.add(item.data.local_name);
-                }}
-            }}
-        }}
-    }}
-
-    // ========================================
-    // Area/place labels (user-defined)
-    // ========================================
-    function createAreaLabelIcon(area) {{
-        const _cp = (MapApp.manifest && MapApp.manifest.color_presets) || {{}};
-        const _resolved = area.color ? (_cp[String(area.color).trim().toLowerCase()] || String(area.color).trim()) : '';
-        const _lt = (MapApp.manifest && MapApp.manifest.label_types) || [];
-        const _tc = (_lt.find(x => x.id === String(area.type || '').toLowerCase()) || {{}}).color || '#ffffff';
-        const color = _resolved || _tc;
-        const fontSize = area.font_size || 22;
-        let style = `display:inline-block;color:${{color}};font-size:${{fontSize}}px;font-weight:bold;white-space:nowrap;`;
-        if (area.box) {{
-            style += `background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:3px;text-shadow:0 1px 2px rgba(0,0,0,0.8);`;
-        }} else {{
-            // No box (default): dark outline keeps the text legible over the map.
-            style += `text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000;`;
-        }}
-        // Center the label on its point; rotate around that center if requested.
-        const rot = area.rotation ? ` rotate(${{area.rotation}}deg)` : '';
-        style += `transform:translate(-50%,-50%)${{rot}};`;
-        // iconSize:null lets the container shrink-wrap the text so the box (when
-        // enabled) covers the whole label and centering stays correct.
-        return L.divIcon({{
-            className: 'area-label-marker',
-            html: `<div style="${{style}}">${{area.label}}</div>`,
-            iconSize: null,
-            iconAnchor: [0, 0]
-        }});
-    }}
-
-    // Forward transform: tile + Run8 local coords -> world meters (matches
-    // convert_run8_to_tile_coords in region_extractor.py).
-    function areaToWorld(area, tp) {{
-        const homeX = tp.home_tile[0];
-        const homeZ = tp.home_tile[1];
-        const worldX = (area.tile_x - homeX) * tp.tile_width + area.local_x;
-        const worldY = (area.tile_z - homeZ) * tp.tile_height - area.local_z;
-        return [worldX, worldY];
-    }}
-
-    function buildAreaLabels() {{
-        MapApp.areaLabelsLayer = L.layerGroup();
-        MapApp.areaMarkers = [];
-        const areas = (MapApp.manifest && MapApp.manifest.areas) || [];
-        const tp = MapApp.manifest && MapApp.manifest.tile_params;
-        if (!tp) {{
-            if (areas.length > 0) console.warn('Area labels present but manifest has no tile_params; skipping.');
-            return;
-        }}
-        for (const area of areas) {{
-            const wc = areaToWorld(area, tp);
-            const marker = L.marker([wc[1], wc[0]], {{ icon: createAreaLabelIcon(area) }});
-            MapApp.areaLabelsLayer.addLayer(marker);
-            MapApp.areaMarkers.push({{ marker: marker, baseFont: area.font_size || 22 }});
-        }}
-        if (MapApp.overlayStates.areaLabels) MapApp.areaLabelsLayer.addTo(MapApp.map);
-        updateAreaLabelSizes();
-    }}
-
-    // Scale label text by absolute map scale (meters-per-pixel), matching the
-    // on-screen scale bar: full size at/below ~50 m scale, shrinking to a tiny
-    // floor at/above ~15 km. Interpolated on log(scale) since scale is
-    // exponential in zoom.
-    const AREA_LABEL_SCALE_MAX_M = 50;      // scale bar <= this -> full (baseFont) size
-    const AREA_LABEL_SCALE_MIN_M = 15000;   // scale bar >= this -> minimum size
-    const AREA_LABEL_MIN_PX = 6;            // "too small to read" floor
-    function updateAreaLabelSizes() {{
-        if (!MapApp.areaMarkers) return;
-        // Scale-bar meters ~= 100 px * meters-per-pixel; mpp = 2^-zoom in CRS.Simple.
-        const scaleM = 100 * Math.pow(2, -MapApp.map.getZoom());
-        const lo = Math.log(AREA_LABEL_SCALE_MAX_M), hi = Math.log(AREA_LABEL_SCALE_MIN_M);
-        let t = (Math.log(scaleM) - lo) / (hi - lo);
-        t = Math.max(0, Math.min(1, t));    // 0 at 50 m (zoomed in), 1 at 15 km (zoomed out)
-        for (const rec of MapApp.areaMarkers) {{
-            const el = rec.marker.getElement();
-            if (!el || !el.firstChild) continue;
-            const px = rec.baseFont + t * (AREA_LABEL_MIN_PX - rec.baseFont);
-            el.firstChild.style.fontSize = px.toFixed(1) + 'px';
-        }}
-    }}
-
-    // Shift+Click capture. First click sets the position (inverting the
-    // world-meter transform to recover tile + local coords); the next click sets
-    // the text angle along a track, or Esc leaves it horizontal.
-    function startAreaCapture(latlng) {{
-        const tp = MapApp.manifest && MapApp.manifest.tile_params;
-        if (!tp) {{
-            alert('Tile parameters are not available in this map, so a label position cannot be captured.');
-            return;
-        }}
-        const homeX = tp.home_tile[0];
-        const homeZ = tp.home_tile[1];
-        const worldX = latlng.lng;
-        const worldY = latlng.lat;
-        const tileX = homeX + Math.floor(worldX / tp.tile_width);
-        const tileZ = homeZ + Math.floor(worldY / tp.tile_height);
-        const localX = worldX - (tileX - homeX) * tp.tile_width;
-        const localZ = -(worldY - (tileZ - homeZ) * tp.tile_height);
-
-        MapApp.areaCapture = {{ pending: true, latlng: latlng, tileX: tileX, tileZ: tileZ, localX: localX, localZ: localZ }};
-
-        // Guide line from the anchor to the cursor while choosing the angle.
-        MapApp.areaGuide = L.polyline([latlng, latlng], {{ color: '#ffd11a', weight: 2, dashArray: '5,5' }}).addTo(MapApp.map);
-        MapApp._areaGuideMove = (ev) => {{ if (MapApp.areaGuide) MapApp.areaGuide.setLatLngs([latlng, ev.latlng]); }};
-        MapApp.map.on('mousemove', MapApp._areaGuideMove);
-
-        // Esc = leave the angle horizontal.
-        MapApp._areaEsc = (ev) => {{
-            if (ev.key === 'Escape' && MapApp.areaCapture && MapApp.areaCapture.pending) {{
-                ev.preventDefault();
-                finalizeAreaCapture(null);
-            }}
-        }};
-        document.addEventListener('keydown', MapApp._areaEsc);
-
-        showAreaHint('Click a second point along the track to set the text angle &nbsp;&middot;&nbsp; Esc = horizontal');
-    }}
-
-    function finalizeAreaCapture(secondLatLng) {{
-        const cap = MapApp.areaCapture;
-        if (!cap || !cap.pending) return;
-        cap.pending = false;
-
-        if (MapApp.areaGuide) {{ MapApp.map.removeLayer(MapApp.areaGuide); MapApp.areaGuide = null; }}
-        if (MapApp._areaGuideMove) {{ MapApp.map.off('mousemove', MapApp._areaGuideMove); MapApp._areaGuideMove = null; }}
-        if (MapApp._areaEsc) {{ document.removeEventListener('keydown', MapApp._areaEsc); MapApp._areaEsc = null; }}
-        hideAreaHint();
-
-        let rotation = 0;
-        if (secondLatLng) {{
-            const dx = secondLatLng.lng - cap.latlng.lng;
-            const dy = secondLatLng.lat - cap.latlng.lat;
-            if (dx !== 0 || dy !== 0) {{
-                // Screen is north-up; CSS rotate is clockwise with the y-axis pointing down.
-                let deg = Math.atan2(-dy, dx) * 180 / Math.PI;
-                // A track line has no direction, so fold to [-90, 90] to keep text upright.
-                if (deg > 90) deg -= 180;
-                if (deg < -90) deg += 180;
-                rotation = Math.round(deg);
-            }}
-        }}
-        openAreaLabelPopup(cap, rotation);
-    }}
-
-    function showAreaHint(html) {{
-        let el = document.getElementById('area-capture-hint');
-        if (!el) {{
-            el = document.createElement('div');
-            el.id = 'area-capture-hint';
-            el.style.cssText = 'position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:2500;'
-                + 'background:rgba(0,0,0,0.8);color:#fff;font-family:Arial,sans-serif;font-size:13px;'
-                + 'padding:6px 12px;border-radius:4px;pointer-events:none;';
-            document.body.appendChild(el);
-        }}
-        el.innerHTML = html;
-        el.style.display = 'block';
-    }}
-
-    function hideAreaHint() {{
-        const el = document.getElementById('area-capture-hint');
-        if (el) el.style.display = 'none';
-    }}
-
-    function openAreaLabelPopup(cap, rotation) {{
-        const tileX = cap.tileX, tileZ = cap.tileZ, localX = cap.localX, localZ = cap.localZ;
-        const html = `
-            <div style="min-width:230px;font-family:Arial,sans-serif;font-size:12px;">
-                <b>New Area Label</b><br>
-                <label style="display:block;margin:6px 0 2px;">Label text:</label>
-                <input id="al-text" type="text" placeholder="e.g. Barstow Yard"
-                       style="width:100%;box-sizing:border-box;padding:4px;">
-                <div style="margin-top:6px;color:#555;">
-                    tile ${{tileX}},${{tileZ}} &nbsp; local ${{localX.toFixed(1)}},${{localZ.toFixed(1)}} &nbsp; rot ${{rotation}}&deg;
-                </div>
-                <button id="al-gen" style="margin-top:8px;padding:4px 8px;cursor:pointer;">Generate INI</button>
-                <pre id="al-out" style="display:none;white-space:pre-wrap;background:#f4f4f4;padding:6px;margin-top:6px;border-radius:4px;font-size:11px;"></pre>
-                <button id="al-copy" style="display:none;margin-top:4px;padding:4px 8px;cursor:pointer;">Copy to clipboard</button>
-            </div>`;
-
-        L.popup({{ maxWidth: 340 }})
-            .setLatLng(cap.latlng)
-            .setContent(html)
-            .openOn(MapApp.map);
-
-        setTimeout(() => {{
-            const textEl = document.getElementById('al-text');
-            const genBtn = document.getElementById('al-gen');
-            const outEl = document.getElementById('al-out');
-            const copyBtn = document.getElementById('al-copy');
-            if (!textEl || !genBtn) return;
-            textEl.focus();
-
-            const generate = () => {{
-                const label = (textEl.value || '').trim();
-                let slug = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-                if (!slug) slug = `area_${{tileX}}_${{tileZ}}`;
-                let ini =
-                    `[area.${{slug}}]\n` +
-                    `label = ${{label || 'New Label'}}\n` +
-                    `tile = ${{tileX}},${{tileZ}}\n` +
-                    `local = ${{localX.toFixed(1)}},${{localZ.toFixed(1)}}`;
-                if (rotation) ini += `\nrotation = ${{rotation}}`;
-                outEl.textContent = ini;
-                outEl.style.display = 'block';
-                copyBtn.style.display = 'inline-block';
-            }};
-
-            genBtn.addEventListener('click', generate);
-            textEl.addEventListener('keydown', (ev) => {{ if (ev.key === 'Enter') {{ ev.preventDefault(); generate(); }} }});
-            copyBtn.addEventListener('click', () => {{
-                const text = outEl.textContent;
-                if (navigator.clipboard && navigator.clipboard.writeText) {{
-                    navigator.clipboard.writeText(text).then(() => {{
-                        copyBtn.textContent = 'Copied!';
-                        setTimeout(() => {{ copyBtn.textContent = 'Copy to clipboard'; }}, 1200);
-                    }});
-                }} else {{
-                    const range = document.createRange();
-                    range.selectNodeContents(outEl);
-                    const sel = window.getSelection();
-                    sel.removeAllRanges();
-                    sel.addRange(range);
-                }}
-            }});
-        }}, 0);
-    }}
-
-    function toggleOverlay(overlay, enabled) {{
-        MapApp.overlayStates[overlay] = enabled;
-
-        if (overlay === 'areaLabels') {{
-            if (MapApp.areaLabelsLayer) {{
-                if (enabled) {{ MapApp.areaLabelsLayer.addTo(MapApp.map); updateAreaLabelSizes(); }}
-                else MapApp.map.removeLayer(MapApp.areaLabelsLayer);
-            }}
-            return;
-        }}
-
-        MapApp.loadedRegions.forEach((region) => {{
-            if (!region.visible) return;
-
-            const layerMap = {{
-                signals: region.layers.signals,
-                industries: region.layers.industries,
-                aiLocations: region.layers.aiLocations,
-                tileBoundaries: region.layers.tiles,
-                trains: region.layers.trains
-            }};
-
-            const layer = layerMap[overlay];
-            if (enabled) layer.addTo(MapApp.map);
-            else MapApp.map.removeLayer(layer);
-        }});
-
-        // Update track colors for industry overlay
-        if (overlay === 'industries') {{
-            if (enabled && MapApp.currentLocalFilter) {{
-                // Apply local filter highlighting if a filter is active
-                applyLocalSymbolHighlighting();
-            }} else {{
-                MapApp.sectionIndex.forEach((s) => {{
-                    if (s.isIndustry && !MapApp.selectedSections.has(s.metadata.id)) {{
-                        const color = enabled ? COLORS.industryTrack : s.originalColor;
-                        s.polyline.eachLayer(layer => layer.setStyle({{ color: color }}));
-                    }}
-                }});
-            }}
-        }}
-    }}
-
-    function fitBoundsToData() {{
-        const bounds = [];
-        MapApp.loadedRegions.forEach((region) => {{
-            region.data.sections.forEach((section) => {{
-                section.paths.forEach((path) => {{
-                    path.forEach((p) => bounds.push([p[1], p[0]]));  // [y, x]
-                }});
-            }});
-        }});
-
-        // Include area labels so a newly-added label is within the initial view
-        // (regions are loaded selectively, so a label may sit outside the loaded track).
-        const tp = MapApp.manifest && MapApp.manifest.tile_params;
-        if (tp) {{
-            for (const area of (MapApp.manifest.areas || [])) {{
-                const wc = areaToWorld(area, tp);
-                bounds.push([wc[1], wc[0]]);  // [y, x]
-            }}
-        }}
-
-        if (bounds.length > 0) {{
-            MapApp.map.fitBounds(bounds);
-        }}
-    }}
-
-    // Local Symbol Filtering Functions
-    function createIndustryIcon(tag, isHighlighted, filterActive) {{
-        let style;
-
-        if (!filterActive) {{
-            // No filter active - normal style
-            style = `color:${{COLORS.industryTrack}};font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;`;
-        }} else if (isHighlighted) {{
-            // Filter active AND this matches - highlighted style
-            style = `color:#FF4500;font-size:14px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;background:rgba(255,255,0,0.3);padding:2px 4px;border-radius:3px;`;
-        }} else {{
-            // Filter active but doesn't match - dimmed style
-            style = `color:#888888;font-size:10px;font-weight:normal;white-space:nowrap;text-shadow:none;opacity:0.5;`;
-        }}
-
-        return L.divIcon({{
-            className: 'industry-marker',
-            html: `<div style="${{style}}">${{tag}}</div>`,
-            iconAnchor: [0, 0]
-        }});
-    }}
-
-    function updateLocalSymbolDropdown() {{
-        const select = document.getElementById('local-symbol-select');
-        if (!select) return;
-
-        const currentValue = select.value;
-
-        // Clear existing options except "All"
-        while (select.options.length > 1) {{
-            select.remove(1);
-        }}
-
-        // Get sorted list of local symbols
-        const symbols = Array.from(MapApp.localSymbolIndex).sort();
-
-        // Add options
-        for (const symbol of symbols) {{
-            const option = document.createElement('option');
-            option.value = symbol;
-            option.textContent = symbol;
-            select.appendChild(option);
-        }}
-
-        // Restore previous selection if still valid
-        if (currentValue && MapApp.localSymbolIndex.has(currentValue)) {{
-            select.value = currentValue;
-        }} else if (MapApp.currentLocalFilter && !MapApp.localSymbolIndex.has(MapApp.currentLocalFilter)) {{
-            // Filter is no longer valid, reset
-            MapApp.currentLocalFilter = null;
-            select.value = '';
-        }}
-    }}
-
-    function getIndustriesForSection(regionId, sectionId) {{
-        const industries = [];
-        for (const item of MapApp.industryIndex) {{
-            if (item.region_id === regionId &&
-                item.data.track_sections &&
-                item.data.track_sections.includes(sectionId)) {{
-                industries.push(item.data);
-            }}
-        }}
-        return industries;
-    }}
-
-    function applyLocalSymbolHighlighting() {{
-        const filterSymbol = MapApp.currentLocalFilter;
-        const filterActive = filterSymbol !== null;
-
-        // Update industry markers
-        for (const [compositeKey, entry] of MapApp.industryMarkers) {{
-            const {{ marker, data, regionId }} = entry;
-            const isMatch = filterSymbol ? (data.local_name === filterSymbol) : true;
-
-            // Update marker icon based on match status
-            const icon = createIndustryIcon(data.tag, isMatch, filterActive);
-            marker.setIcon(icon);
-        }}
-
-        // Update track section colors if industries overlay is enabled
-        if (MapApp.overlayStates.industries) {{
-            for (const [sectionId, data] of MapApp.sectionIndex) {{
-                if (!data.isIndustry) continue;
-                if (MapApp.selectedSections.has(sectionId)) continue;
-
-                // Find if any industry using this section matches the filter
-                const industries = getIndustriesForSection(data.regionId, sectionId);
-                let sectionMatches = false;
-                if (filterSymbol) {{
-                    sectionMatches = industries.some(ind => ind.local_name === filterSymbol);
-                }} else {{
-                    sectionMatches = true;  // No filter = all match
-                }}
-
-                let color;
-                if (!filterActive) {{
-                    color = COLORS.industryTrack;
-                }} else if (sectionMatches) {{
-                    color = '#FF4500';  // Orange-red for highlighted
-                }} else {{
-                    color = '#CCCCCC';  // Gray for non-matching
-                }}
-
-                data.polyline.eachLayer(layer => {{
-                    if (layer.setStyle) layer.setStyle({{ color: color }});
-                }});
-            }}
-        }}
-    }}
-
-    // Search functionality
-    window.openSearch = function() {{
-        document.getElementById('search-overlay').classList.add('visible');
-        document.getElementById('search-dialog').classList.add('visible');
-        document.getElementById('search-input').focus();
-    }};
-
-    window.closeSearch = function() {{
-        document.getElementById('search-overlay').classList.remove('visible');
-        document.getElementById('search-dialog').classList.remove('visible');
-        document.getElementById('search-input').value = '';
-        document.getElementById('search-results').innerHTML = '';
-    }};
-
-    // Debounce helper
-    let searchTimeout;
-    window.performSearch = function() {{
-        clearTimeout(searchTimeout);
-        searchTimeout = setTimeout(doSearch, 300);
-    }};
-
-    function doSearch() {{
-        const searchType = document.getElementById('search-type').value;
-        const query = document.getElementById('search-input').value.trim().toLowerCase();
-        const resultsDiv = document.getElementById('search-results');
-
-        if (!query) {{
-            resultsDiv.innerHTML = '';
-            return;
-        }}
-
-        let results = [];
-
-        if (searchType === 'section') {{
-            const queryNum = parseInt(query);
-            for (const [sectionId, data] of MapApp.sectionIndex) {{
-                if (sectionId.toString().includes(query) || sectionId === queryNum) {{
-                    results.push({{
-                        type: 'section',
-                        id: sectionId,
-                        label: `Section ${{sectionId}}`,
-                        region: data.regionId,
-                        data: data
-                    }});
-                }}
-            }}
-        }} else if (searchType === 'signal') {{
-            const queryNum = parseInt(query);
-            for (const [signalId, data] of MapApp.signalIndex) {{
-                if (signalId.toString().includes(query) || signalId === queryNum) {{
-                    results.push({{
-                        type: 'signal',
-                        id: signalId,
-                        label: `Signal ${{signalId}}`,
-                        region: data.regionId,
-                        data: data
-                    }});
-                }}
-            }}
-        }} else if (searchType === 'industry') {{
-            for (const item of MapApp.industryIndex) {{
-                if (item.data.tag.toLowerCase().includes(query) ||
-                    item.data.name.toLowerCase().includes(query)) {{
-                    results.push({{
-                        type: 'industry',
-                        id: item.data.tag,
-                        label: `${{item.data.tag}} - ${{item.data.name}}`,
-                        region: item.region_id,
-                        data: item
-                    }});
-                }}
-            }}
-        }} else if (searchType === 'aiLocation') {{
-            for (const item of MapApp.aiLocationIndex) {{
-                if (item.data.name.toLowerCase().includes(query)) {{
-                    results.push({{
-                        type: 'aiLocation',
-                        id: item.data.id,
-                        label: `${{item.data.name}} (${{item.data.type_name}})`,
-                        region: item.region_id,
-                        data: item
-                    }});
-                }}
-            }}
-        }} else if (searchType === 'train') {{
-            // Match trainID, destinationTag, or unitNumber (substring, case-insensitive)
-            for (let i = 0; i < MapApp.trainIndex.length; i++) {{
-                const it = MapApp.trainIndex[i];
-                const v = it.vehicle;
-                const hay = [String(it.trainId), v.unit_number || '', v.destination_tag || '']
-                    .join(' ').toLowerCase();
-                if (hay.includes(query)) {{
-                    results.push({{
-                        type: 'train',
-                        id: i,
-                        label: `Train ${{it.trainId}} &middot; ${{v.unit_number || '?'}}`
-                            + (v.destination_tag ? ` &rarr; ${{v.destination_tag}}` : ''),
-                        region: it.regionId,
-                        data: it
-                    }});
-                }}
-            }}
-        }}
-
-        // Limit results
-        results = results.slice(0, 50);
-
-        resultsDiv.innerHTML = results.length === 0
-            ? '<div style="padding:10px;color:#666;">No results found</div>'
-            : results.map(r => {{
-                const idStr = typeof r.id === 'string'
-                    ? `'${{r.id.replace(/'/g, "\\'")}}'`
-                    : r.id;
-                return `
-                <div class="search-result" onclick="goToResult('${{r.type}}', ${{idStr}}, '${{r.region}}')">
-                    <strong>${{r.label}}</strong>
-                    <span style="color:#666;font-size:11px;"> (${{r.region}})</span>
-                </div>
-                `;
-            }}).join('');
-    }}
-
-    window.goToResult = function(type, id, regionId) {{
-        closeSearch();
-
-        if (type === 'section') {{
-            const data = MapApp.sectionIndex.get(id);
-            if (data) {{
-                MapApp.map.fitBounds(data.polyline.getBounds(), {{padding: [50, 50]}});
-                // Open tooltip on first layer in the group
-                data.polyline.eachLayer(layer => {{
-                    if (layer.openTooltip) {{
-                        layer.openTooltip();
-                        return false; // Stop after first
-                    }}
-                }});
-            }}
-        }} else if (type === 'signal') {{
-            const data = MapApp.signalIndex.get(id);
-            if (data) {{
-                // In tile-based mode, coords are [y, x] so we need to use marker position
-                MapApp.map.setView(data.marker.getLatLng(), 2);
-                data.marker.openTooltip();
-            }}
-        }} else if (type === 'industry') {{
-            const item = MapApp.industryIndex.find(i => i.data.tag === id && i.region_id === regionId);
-            if (item) {{
-                MapApp.map.setView([item.data.lon, item.data.lat], 16);
-            }}
-        }} else if (type === 'aiLocation') {{
-            const item = MapApp.aiLocationIndex.find(i => i.data.id === id && i.region_id === regionId);
-            if (item) {{
-                MapApp.map.setView([item.data.lon, item.data.lat], 16);
-            }}
-        }} else if (type === 'train') {{
-            const it = MapApp.trainIndex[id];
-            if (it && it.layer) {{
-                // Make sure the Trains overlay is visible so the hit is shown.
-                if (!MapApp.overlayStates.trains) {{
-                    const cb = document.getElementById('toggle-trains');
-                    if (cb) cb.checked = true;
-                    toggleOverlay('trains', true);
-                }}
-                MapApp.map.fitBounds(it.layer.getBounds(), {{ padding: [80, 80], maxZoom: 5 }});
-                it.layer.openPopup();
-            }}
-        }}
-    }};
-
-    // Initialize
-    init();
-}})();
-</script>
-</body>
-</html>
-'''
-
-
-def generate_html(config: VisualizationConfig, output_path: Path, tile_based: bool = False) -> None:
-    """Generate index.html with Folium map and JavaScript
-
-    Args:
-        config: Visualization configuration
-        output_path: Path to write HTML file
-        tile_based: If True, generate for tile-based coordinates (L.CRS.Simple)
-    """
-    if tile_based:
-        # For tile-based mode, we generate a custom HTML without Folium
-        # since Folium doesn't easily support L.CRS.Simple
-        html_content = generate_tile_based_html(config)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        print(f"Generated HTML (tile-based): {output_path}")
-        return
-
-    # Geographic mode - use Folium as before
-    # Use initial_center from config if specified, otherwise use default
-    if config.initial_center:
-        center = list(config.initial_center)
-    else:
-        center = DEFAULT_CENTER
-    zoom = DEFAULT_ZOOM
-
-    # Create Folium map with canvas renderer and no default tiles
-    # Base layers are handled in JavaScript for proper switching
-    m = folium.Map(
-        location=center,
-        zoom_start=zoom,
-        max_zoom=22,
-        prefer_canvas=True,
-        control_scale=False,  # We add our own scale control
-        tiles=None  # No default tiles - we create them in JavaScript
-    )
-
-    # Add color configuration and JavaScript
-    color_config = generate_color_config(config.colors)
-    m.get_root().html.add_child(folium.Element(color_config))
-    js_code = generate_javascript()
-    m.get_root().html.add_child(folium.Element(js_code))
-
-    # Save the map
-    m.save(str(output_path))
-    print(f"Generated HTML: {output_path}")
 
 
 ALIGN_JS = r'''
@@ -3148,6 +2098,8 @@ ALIGN_JS = r'''
         addTrackOpacitySlider();
         MapApp.overlayStates.areaLabels = false;
         addAreaLabelToggle();
+        addTrainOptionsButton();
+        updateSimTime();   // show baked sim time (the live poll overrides it later)
         buildAreaLabels();
         // Probe for the optional authoring backend (serve.py) without blocking the
         // initial render; if present, rebuild the labels so their markers become
@@ -3403,12 +2355,28 @@ ALIGN_JS = r'''
         if (MapApp._trainsPoll) return;
         pollTrainsOnce();
         MapApp._trainsPoll = setInterval(pollTrainsOnce, 3000);
+        // Recover from background-timer throttling / machine sleep: when the tab
+        // becomes visible again, browsers may have stalled the 3s interval, leaving
+        // the map frozen on stale positions. Force an immediate refresh (and revive
+        // the interval if it was cleared), so returning to the tab self-heals with
+        // no reload needed. Reset the version guard so the re-poll always re-renders.
+        if (!MapApp._trainsVisHooked){
+            MapApp._trainsVisHooked = true;
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState !== 'visible') return;
+                MapApp.trainsVersion = null;
+                if (!MapApp._trainsPoll) MapApp._trainsPoll = setInterval(pollTrainsOnce, 3000);
+                pollTrainsOnce();
+            });
+        }
     }
     function applyLiveTrains(j){
         if (!j || !j.trains) return;
         // Whole-save totals are region-independent; update the status line even if
         // the render below early-returns (no regions loaded yet / unchanged version).
+        if ('moving_count' in j) MapApp._movingCount = j.moving_count;
         if (j.totals) { MapApp._liveTotals = j.totals; updateTrainCount(); }
+        if ('sim_time' in j) updateSimTime(j.sim_time);   // live save clock
         // Regions load asynchronously (and can be toggled on later); re-apply when
         // either the save changed OR the set of loaded regions changed, so the
         // initial poll that arrives before regions finish loading is not lost.
@@ -3431,6 +2399,8 @@ ALIGN_JS = r'''
             if (MapApp.overlayStates.trains) region.layers.trains.addTo(MapApp.map);
         }
         updateTrainLabelVisibility();
+        // Keep the followed train centred as its new positions land.
+        if (MapApp.centerOnFollowed) MapApp.centerOnFollowed(false);
     }
     function apiArea(method, id, body){
         const url = 'api/areas' + (id != null ? '/' + encodeURIComponent(id) : '');
@@ -3466,8 +2436,10 @@ ALIGN_JS = r'''
         initAreaTypeVisible();
         // Master "Area Labels" toggle + a "Filter" button that opens the per-category
         // checkboxes in a popover (keeps the overlay panel tidy).
+        // The .overlay-item class already lays this out like the other rows (flex +
+        // an 8px label margin); the Filter button uses margin-left:auto to sit at the
+        // right. Adding a `gap` here would misalign this row's label - so don't.
         const item = document.createElement('div'); item.className = 'overlay-item';
-        item.style.cssText = 'display:flex;align-items:center;gap:6px;';
         item.innerHTML = '<input type="checkbox" id="overlay-areaLabels"><label for="overlay-areaLabels">Area Labels</label>'
             + '<button id="area-filter-btn" type="button" title="Choose which label types to show"'
             + ' style="margin-left:auto;font-size:11px;padding:1px 7px;cursor:pointer;">Filter</button>';
@@ -3525,6 +2497,75 @@ ALIGN_JS = r'''
         pop.style.top = (r.bottom + 4) + 'px';
         pop.style.left = Math.max(6, left) + 'px';
         setTimeout(()=> document.addEventListener('mousedown', areaFilterAway, true), 0);
+    }
+
+    // ---- Trains "Options" button + popover (display options for the Trains overlay) ----
+    // Inject an "Options" button beside the existing Trains overlay checkbox, mirroring
+    // the Area Labels "Filter" button.
+    function addTrainOptionsButton(){
+        const cb = document.getElementById('overlay-trains');
+        if (!cb) return;
+        // The .overlay-item class is already flex with a label margin matching the
+        // other rows; just append the button (margin-left:auto pushes it right). Do
+        // NOT add a `gap` here - it would shift this row's label out of alignment.
+        const item = cb.closest('.overlay-item') || cb.parentElement;
+        const btn = document.createElement('button');
+        btn.id = 'train-options-btn'; btn.type = 'button';
+        btn.title = 'Train display options';
+        btn.textContent = 'Options';
+        btn.style.cssText = 'margin-left:auto;font-size:11px;padding:1px 7px;cursor:pointer;';
+        item.appendChild(btn);
+        btn.addEventListener('click', (e)=>{ e.stopPropagation(); toggleTrainOptionsPopover(e.currentTarget); });
+    }
+    function closeTrainOptionsPopover(){
+        const pop = document.getElementById('train-options-popover');
+        if (pop) pop.remove();
+        document.removeEventListener('mousedown', trainOptionsAway, true);
+    }
+    function trainOptionsAway(e){
+        const pop = document.getElementById('train-options-popover');
+        if (pop && !pop.contains(e.target) && e.target.id !== 'train-options-btn') closeTrainOptionsPopover();
+    }
+    function toggleTrainOptionsPopover(anchorBtn){
+        if (document.getElementById('train-options-popover')){ closeTrainOptionsPopover(); return; }
+        const o = MapApp.trainOptions;
+        const rows = [
+            ['coloredCars', 'Show colored cars', 'Colour non-loco cars by type. Off: all cars use the box-car colour.'],
+            ['showCuts', 'Show cuts of cars', 'Also plot loose cuts of cars (rail vehicles not led by a locomotive).'],
+            ['showOnlyMoving', 'Show only moving', 'Only plot trains that moved since the last world save (live only).'],
+            ['highlightPlayers', 'Highlight player trains', 'Highlight trains that are moving and not AI-crewed (likely player-driven) with a bright spine (live only).']
+        ];
+        const pop = document.createElement('div'); pop.id = 'train-options-popover';
+        pop.style.cssText = 'position:fixed;z-index:3000;background:#fff;border:1px solid #888;border-radius:6px;'
+            + 'box-shadow:0 2px 12px rgba(0,0,0,.3);padding:8px 10px;font:12px Arial;min-width:170px;';
+        pop.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;">Train display options</div>';
+        for (const [key,label,tip] of rows){
+            const row = document.createElement('label');
+            row.title = tip;
+            row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;';
+            row.innerHTML = '<input type="checkbox"'+(o[key]?' checked':'')+'>' + label;
+            pop.appendChild(row);
+            row.querySelector('input').addEventListener('change', (e)=>{ o[key] = e.target.checked; applyTrainOptions(); });
+        }
+        document.body.appendChild(pop);
+        const r = anchorBtn.getBoundingClientRect();
+        const pw = pop.offsetWidth;
+        let left = r.left; if (left + pw > window.innerWidth - 6) left = window.innerWidth - 6 - pw;
+        pop.style.top = (r.bottom + 4) + 'px';
+        pop.style.left = Math.max(6, left) + 'px';
+        setTimeout(()=> document.addEventListener('mousedown', trainOptionsAway, true), 0);
+    }
+    // Re-render every loaded region's trains with the current options (same as the
+    // LOD re-render). Cheap: reuses each region's already-loaded data.
+    function applyTrainOptions(){
+        MapApp.loadedRegions.forEach((region, regionId) => {
+            if (!region.layers || !region.layers.trains) return;
+            region.layers.trains.clearLayers();
+            region.layers.trainLabels.clearLayers();
+            renderTrains(regionId, region.data, region.layers);
+            if (MapApp.overlayStates.trains) region.layers.trains.addTo(MapApp.map);
+        });
+        updateTrainLabelVisibility();
     }
 
     // ---- Area-label authoring (click to place; second click sets the angle) ----
@@ -3948,7 +2989,8 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
 </head><body>
 <div id="map"></div>
 {color_config}
-<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}}};</script>
+<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}, lodScaleM: {config.train_lod_scale_m}, lodMinCars: {config.train_lod_min_cars}}};
+window.TRACK_STYLE = {{width: {config.track_width}, minWidth: {config.track_min_width}, fullZoom: {config.track_full_zoom}}};</script>
 <script>window.__run8_authoring = {authoring_js}; window.__run8map = L.map('map', {{preferCanvas:true, maxZoom:22, zoomControl:true}}).setView([35,-117.8],9);</script>
 {js}
 </body></html>'''
@@ -3968,9 +3010,5 @@ if __name__ == '__main__':
     from config_parser import parse_config
     config = parse_config(sys.argv[1])
 
-    # Generate JSON files first
+    # generate_output writes the region JSON files and the align index.html.
     generate_output(config)
-
-    # Generate HTML
-    output_path = config.output_dir / "index.html"
-    generate_html(config, output_path)

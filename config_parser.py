@@ -156,6 +156,12 @@ class VisualizationConfig:
     initial_track_opacity: float = 0.8  # [visualization] initial_track_opacity: track slider (fraction)
     world_save: Optional[Path] = None  # optional Run8 world save (.xml) to plot trains from
     railvehicle_db: Optional[Path] = None  # optional SQLite DB of rail-vehicle lengths
+    # ---- track line width (zoom-scaled) ----
+    track_width: float = 5.0        # [track] width: full track line width (px) at/above full_zoom
+    track_min_width: float = 1.5    # [track] min_width: floor width (px) when zoomed far out
+    track_full_zoom: float = 14.0   # [track] full_zoom: zoom at/above which the line shows full
+                                    # width; below it the width halves per zoom level down to
+                                    # min_width. 0 disables scaling (fixed `width` at every zoom).
     train_car_width: float = 7.0    # [trains] car_width: RV body min line width (px floor)
     train_spine_width: float = 1.5  # [trains] spine_width: train connecting-line width (px)
     train_car_width_m: float = 3.5  # [trains] car_width_m: real RV width (m); RVs widen with
@@ -163,6 +169,15 @@ class VisualizationConfig:
                                     # than the track at every zoom. 0 = fixed px (car_width).
     train_label_scale_m: float = 30.0  # [trains] label_scale_m: show per-RV destination tags
                                        # when the scale bar reads this many m or tighter.
+    train_label_size: float = 14.0  # [trains] label_size: destination-tag text size (px).
+    train_lod_scale_m: float = 300.0  # [trains] lod_scale_m: at/above this scale-bar reading (m)
+                                      # trains collapse to a single line (zoom level-of-detail).
+    train_lod_min_cars: float = 3.0   # [trains] lod_min_cars: while collapsed, only trains with
+                                      # MORE than this many cars are drawn (shorter ones hidden).
+    train_moving_hysteresis: int = 2  # [trains] moving_hysteresis: keep a train flagged "moving"
+                                      # this many stationary save-cycles after its last real
+                                      # movement, so brief holds (e.g. at a signal) don't flicker
+                                      # off the highlight. 0 = strict per-cycle. serve.py live only.
     train_deoverlap: bool = True    # [trains] deoverlap: lay each consist's cars end-to-end
                                     # (front->back XML order, DB length, midpoint anchor) so
                                     # coupled cars don't overlap. False = raw per-truck placement.
@@ -487,6 +502,10 @@ def parse_config(config_path: str) -> VisualizationConfig:
 
     train_car_width, train_spine_width, train_car_width_m = 7.0, 1.5, 3.5
     train_label_scale_m = 30.0
+    train_label_size = 14.0
+    train_lod_scale_m = 300.0
+    train_lod_min_cars = 3.0
+    train_moving_hysteresis = 2
     train_deoverlap = True
     if 'trains' in parser:
         ts = parser['trains']
@@ -494,9 +513,21 @@ def parse_config(config_path: str) -> VisualizationConfig:
         train_spine_width = _cfg_float(ts, 'spine_width', train_spine_width)
         train_car_width_m = _cfg_float(ts, 'car_width_m', train_car_width_m)
         train_label_scale_m = _cfg_float(ts, 'label_scale_m', train_label_scale_m)
+        train_label_size = _cfg_float(ts, 'label_size', train_label_size)
+        train_lod_scale_m = _cfg_float(ts, 'lod_scale_m', train_lod_scale_m)
+        train_lod_min_cars = _cfg_float(ts, 'lod_min_cars', train_lod_min_cars)
+        train_moving_hysteresis = int(_cfg_float(ts, 'moving_hysteresis', train_moving_hysteresis))
         _do = ts.get('deoverlap', '').split(';', 1)[0].split('#', 1)[0].strip().lower()
         if _do:
             train_deoverlap = _do in ('1', 'true', 'yes', 'on')
+
+    # Parse [track] section (optional): zoom-scaled track line width.
+    track_width, track_min_width, track_full_zoom = 5.0, 1.5, 14.0
+    if 'track' in parser:
+        tk = parser['track']
+        track_width = _cfg_float(tk, 'width', track_width)
+        track_min_width = _cfg_float(tk, 'min_width', track_min_width)
+        track_full_zoom = _cfg_float(tk, 'full_zoom', track_full_zoom)
 
     # Parse [car_type_colors] (optional): INDUSTRY_CONFIG_CAR_TYPE -> hex colour for
     # the RV body. configparser lower-cases keys, so match car types case-insensitively.
@@ -584,7 +615,14 @@ def parse_config(config_path: str) -> VisualizationConfig:
         train_spine_width=train_spine_width,
         train_car_width_m=train_car_width_m,
         train_label_scale_m=train_label_scale_m,
+        train_label_size=train_label_size,
+        train_lod_scale_m=train_lod_scale_m,
+        train_lod_min_cars=train_lod_min_cars,
+        train_moving_hysteresis=train_moving_hysteresis,
         train_deoverlap=train_deoverlap,
+        track_width=track_width,
+        track_min_width=track_min_width,
+        track_full_zoom=track_full_zoom,
         car_type_colors=car_type_colors,
         loco_company_colors=loco_company_colors,
         areas=areas,
