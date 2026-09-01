@@ -55,6 +55,18 @@ python output_generator.py config-socal.ini --production
 
 **4. Copy the regenerated output to the droplet.**
 
+**Easiest — one command** (Git Bash, from the repo root):
+```bash
+deploy/push-output.sh                 # ships output/socal only (the usual case)
+deploy/push-output.sh --all           # also ships db_railvehicles.db + areas_socal.ini
+deploy/push-output.sh --dry-run       # show what it would do
+```
+It packs, uploads, extracts into the app dir, fixes ownership, and verifies `/api/ping`
+(it uses `ssh -t`, so it'll prompt for your sudo password on the droplet). That's the whole of
+step 4. The manual equivalent is below if you ever need it.
+
+<details><summary>By hand</summary>
+
 On your **local** machine (Git Bash):
 ```bash
 cd /c/Users/Josh/dev/Run8TrackMapper
@@ -70,6 +82,7 @@ Then on the **droplet** (your SSH session):
 sudo tar xzf /tmp/deploy-data.tgz -C /opt/run8map/app
 sudo chown -R run8map:run8map /opt/run8map/app
 ```
+</details>
 
 **5. No restart needed.** `serve.py` serves the files fresh and sends `Cache-Control: no-cache`,
 so a normal browser reload picks up the change. (If you ever don't see it: hard-reload, Ctrl-F5.)
