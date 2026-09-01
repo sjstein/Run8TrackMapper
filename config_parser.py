@@ -178,6 +178,7 @@ class VisualizationConfig:
                                       # this many stationary save-cycles after its last real
                                       # movement, so brief holds (e.g. at a signal) don't flicker
                                       # off the highlight. 0 = strict per-cycle. serve.py live only.
+    train_lod_color: str = "#5f6368"  # [trains] lod_color: colour of a collapsed (zoomed-out) train line
     train_deoverlap: bool = True    # [trains] deoverlap: lay each consist's cars end-to-end
                                     # (front->back XML order, DB length, midpoint anchor) so
                                     # coupled cars don't overlap. False = raw per-truck placement.
@@ -514,6 +515,7 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
     train_label_size = 14.0
     train_lod_scale_m = 300.0
     train_lod_min_cars = 3.0
+    train_lod_color = "#5f6368"
     train_moving_hysteresis = 2
     train_deoverlap = True
     if 'trains' in parser:
@@ -525,6 +527,7 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         train_label_size = _cfg_float(ts, 'label_size', train_label_size)
         train_lod_scale_m = _cfg_float(ts, 'lod_scale_m', train_lod_scale_m)
         train_lod_min_cars = _cfg_float(ts, 'lod_min_cars', train_lod_min_cars)
+        train_lod_color = ts.get('lod_color', '').split(';', 1)[0].strip() or train_lod_color
         train_moving_hysteresis = int(_cfg_float(ts, 'moving_hysteresis', train_moving_hysteresis))
         _do = ts.get('deoverlap', '').split(';', 1)[0].split('#', 1)[0].strip().lower()
         if _do:
@@ -627,6 +630,7 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         train_label_size=train_label_size,
         train_lod_scale_m=train_lod_scale_m,
         train_lod_min_cars=train_lod_min_cars,
+        train_lod_color=train_lod_color,
         train_moving_hysteresis=train_moving_hysteresis,
         train_deoverlap=train_deoverlap,
         track_width=track_width,
