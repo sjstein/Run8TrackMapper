@@ -164,9 +164,110 @@ def generate_javascript() -> str:
     }
 
     // ========================================
+    // Theme (light / dark)
+    // ========================================
+    // A single stylesheet defines CSS custom properties for the light theme on
+    // :root and overrides them under html[data-theme="dark"]. The light-styled
+    // chrome (inline <style> blocks) is left untouched; the dark rules below win
+    // by higher specificity (attribute + id). Runtime-built popovers/buttons use
+    // the same var() names inline so they follow the theme too. The map area
+    // itself is only re-coloured (the None base map / gaps); real OSM/Satellite
+    // tiles keep their natural colours.
+    function injectThemeStyles() {
+        if (document.getElementById('r8-theme-vars')) return;
+        const css = `
+:root{
+  --panel-bg:#ffffff; --panel-fg:#1f1f1f; --text-muted:#666666;
+  --border:#dddddd; --border-strong:#888888; --hover-bg:#f5f5f5;
+  --kbd-bg:#eeeeee; --map-bg:#e6e6e6; --accent:#007bff; --shadow:rgba(0,0,0,0.2);
+  color-scheme:light;
+}
+html[data-theme="dark"]{
+  --panel-bg:#2b2b2b; --panel-fg:#e8e8e8; --text-muted:#a8a8a8;
+  --border:#454545; --border-strong:#6a6a6a; --hover-bg:#3a3a3a;
+  --kbd-bg:#4a4a4a; --map-bg:#101418; --accent:#4da3ff; --shadow:rgba(0,0,0,0.6);
+  color-scheme:dark;
+}
+.leaflet-container{ background:var(--map-bg); }
+
+html[data-theme="dark"] #control-panel,
+html[data-theme="dark"] #search-dialog,
+html[data-theme="dark"] #opacity-control,
+html[data-theme="dark"] #mouse-position{
+  background:var(--panel-bg); color:var(--panel-fg); box-shadow:0 2px 10px var(--shadow);
+}
+html[data-theme="dark"] #control-panel h3{ border-bottom-color:var(--border); }
+html[data-theme="dark"] #control-panel h4{ color:var(--text-muted); }
+html[data-theme="dark"] #selection-info{ border-top-color:var(--border); }
+html[data-theme="dark"] #control-toggle{ background:var(--kbd-bg); color:var(--panel-fg); }
+html[data-theme="dark"] #control-toggle:hover{ background:var(--border-strong); }
+html[data-theme="dark"] .search-result{ border-bottom-color:var(--border); }
+html[data-theme="dark"] .search-result:hover{ background:var(--hover-bg); }
+html[data-theme="dark"] .search-close{ color:var(--text-muted); }
+html[data-theme="dark"] #search-dialog input[type="text"],
+html[data-theme="dark"] #search-dialog select,
+html[data-theme="dark"] #local-symbol-select{
+  background:var(--panel-bg); color:var(--panel-fg); border-color:var(--border);
+}
+html[data-theme="dark"] #train-count,
+html[data-theme="dark"] #sim-time{ color:var(--panel-fg); border-bottom-color:var(--border); }
+
+html[data-theme="dark"] .leaflet-popup-content-wrapper,
+html[data-theme="dark"] .leaflet-popup-tip{
+  background:var(--panel-bg); color:var(--panel-fg); box-shadow:0 3px 14px var(--shadow);
+}
+html[data-theme="dark"] .leaflet-popup-close-button{ color:var(--text-muted); }
+html[data-theme="dark"] .leaflet-bar a,
+html[data-theme="dark"] .leaflet-bar a:hover{
+  background:var(--panel-bg); color:var(--panel-fg); border-bottom-color:var(--border);
+}
+html[data-theme="dark"] .leaflet-control-layers,
+html[data-theme="dark"] .leaflet-control-attribution{ background:var(--panel-bg); color:var(--text-muted); }
+html[data-theme="dark"] .leaflet-control-attribution a{ color:var(--accent); }
+html[data-theme="dark"] .leaflet-control-scale-line{
+  background:rgba(0,0,0,.5); color:var(--panel-fg); border-color:var(--border-strong); border-top:none;
+}
+`;
+        const el = document.createElement('style');
+        el.id = 'r8-theme-vars';
+        el.textContent = css;
+        document.head.appendChild(el);
+    }
+    function currentTheme() {
+        return document.documentElement.getAttribute('data-theme') || 'light';
+    }
+    function applyTheme(mode) {
+        document.documentElement.setAttribute('data-theme', mode);
+        const cb = document.getElementById('theme-toggle');
+        if (cb) cb.checked = (mode === 'dark');
+    }
+    function setTheme(mode) {
+        applyTheme(mode);
+        try { localStorage.setItem('run8_theme', mode); } catch (e) {}
+    }
+    // Initial theme: an explicit saved choice wins; otherwise follow the OS
+    // preference (and keep following it until the user picks one explicitly).
+    function initTheme() {
+        injectThemeStyles();
+        let saved = null;
+        try { saved = localStorage.getItem('run8_theme'); } catch (e) {}
+        const prefersDark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        applyTheme((saved === 'dark' || saved === 'light') ? saved : (prefersDark ? 'dark' : 'light'));
+        if (window.matchMedia) {
+            try {
+                window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+                    let s = null; try { s = localStorage.getItem('run8_theme'); } catch (_) {}
+                    if (s !== 'dark' && s !== 'light') applyTheme(e.matches ? 'dark' : 'light');
+                });
+            } catch (e) {}
+        }
+    }
+
+    // ========================================
     // UI Setup
     // ========================================
     function setupUI() {
+        initTheme();
         // Create base tile layers directly (Folium's show=False layers may not be on map)
         MapApp.baseLayers['OpenStreetMap'] = L.tileLayer(
             'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -325,6 +426,10 @@ def generate_javascript() -> str:
             </style>
             <h3 id="control-title"><span>${MapApp.manifest.name}</span><button id="control-toggle" title="Show/hide controls" aria-label="Show/hide controls">&minus;</button></h3>
             <div id="control-body">
+            <div class="overlay-item" style="margin:2px 0 4px 0;">
+                <input type="checkbox" id="theme-toggle">
+                <label for="theme-toggle">Dark mode</label>
+            </div>
             <h4>Base Map</h4>
             <div id="basemap-list">
                 <div class="basemap-item">
@@ -362,6 +467,13 @@ def generate_javascript() -> str:
             </div>
         `;
         document.body.appendChild(panel);
+
+        // Dark-mode toggle (reflects the theme initTheme() already applied).
+        const themeToggle = document.getElementById('theme-toggle');
+        if (themeToggle) {
+            themeToggle.checked = (currentTheme() === 'dark');
+            themeToggle.addEventListener('change', (e) => setTheme(e.target.checked ? 'dark' : 'light'));
+        }
 
         // Collapse/expand the control panel, leaving just the title bar. Remembered
         // per-viewer in localStorage (best-effort; ignore storage errors).
@@ -559,7 +671,7 @@ def generate_javascript() -> str:
                 <option value="train">Train / Rail Vehicle</option>
             </select>
             <div id="train-field-row" style="display:none;margin:6px 0;font-size:13px;">
-                <span style="color:#555;">Match:</span>
+                <span style="color:var(--text-muted);">Match:</span>
                 <label style="margin-left:4px;"><input type="radio" name="train-field" value="all" checked> All</label>
                 <label style="margin-left:6px;"><input type="radio" name="train-field" value="unit"> Unit&nbsp;#</label>
                 <label style="margin-left:6px;"><input type="radio" name="train-field" value="tag"> Tag</label>
@@ -1008,6 +1120,9 @@ def generate_javascript() -> str:
             if (MapApp.overlayStates.tileBoundaries) layers.tileBoundaries.addTo(MapApp.map);
             if (MapApp.overlayStates.trains) layers.trains.addTo(MapApp.map);
             updateTrainLabelVisibility();
+            // Area labels are gated by the visible regions' tiles - re-evaluate now
+            // that this region's tiles are available.
+            if (typeof updateAreaLabelRegionVisibility === 'function') updateAreaLabelRegionVisibility();
 
         } catch (error) {
             console.error(`Failed to load region ${regionId}:`, error);
@@ -1240,8 +1355,10 @@ def generate_javascript() -> str:
         // Head arrow at the lead loco's outer tip, pointing the way it faces. Heading
         // is taken from the car centres head->tail (`centers`, in consist order), which
         // stay well-separated in pixels at any zoom - not from the loco's own tiny body.
+        // Only draw it when the head (cars[0]) is actually a locomotive: a loose cut of
+        // cars shown via "Show cuts of cars" has no lead loco and gets no arrow.
         const lb = lead.v.body;
-        if (lb && lb.length >= 2) {
+        if (lead.isLoco && lb && lb.length >= 2) {
             const nb = cars.length > 1 ? _midpoint(cars[1].v.body) : _midpoint(cen);
             const e0 = lb[0], eN = lb[lb.length - 1];
             const tip = _distLL(e0, nb) >= _distLL(eN, nb) ? e0 : eN;   // end away from the train
@@ -1544,6 +1661,8 @@ def generate_javascript() -> str:
         }
 
         region.visible = false;
+        // Hide any area labels that belonged only to this region's tiles.
+        if (typeof updateAreaLabelRegionVisibility === 'function') updateAreaLabelRegionVisibility();
     }
 
     function showRegion(regionId) {
@@ -1559,6 +1678,7 @@ def generate_javascript() -> str:
 
         region.visible = true;
         updateTrainLabelVisibility();
+        if (typeof updateAreaLabelRegionVisibility === 'function') updateAreaLabelRegionVisibility();
     }
 
     function toggleRegion(regionId, enabled) {
@@ -2117,13 +2237,15 @@ ALIGN_JS = r'''
     function createAreaLabelIcon(area){
         const color = resolveColor(area.color) || labelTypeColor(area.type);
         const fontSize = area.font_size || 22;
-        let style = `display:inline-block;color:${color};font-size:${fontSize}px;font-weight:bold;white-space:nowrap;`;
+        let style = `display:inline-block;color:${color};font-size:${fontSize}px;font-weight:bold;white-space:nowrap;text-align:center;`;
         if (area.box) style += `background:rgba(0,0,0,0.6);padding:2px 6px;border-radius:3px;text-shadow:0 1px 2px rgba(0,0,0,0.8);`;
         else style += `text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000;`;
         const rot = area.rotation ? ` rotate(${area.rotation}deg)` : '';
         style += `transform:translate(-50%,-50%)${rot};`;
+        // Escape the label, then honour embedded newlines as line breaks (multi-line labels).
+        const labelHtml = escapeHtml(area.label).replace(/\n/g, '<br>');
         return L.divIcon({ className:'area-label-marker',
-            html:`<div style="${style}">${area.label}</div>`, iconSize:null, iconAnchor:[0,0] });
+            html:`<div style="${style}">${labelHtml}</div>`, iconSize:null, iconAnchor:[0,0] });
     }
     function areaToWorld(area, tp){   // tile + Run8 local -> world metres (matches convert_run8_to_tile_coords)
         const homeX = tp.home_tile[0], homeZ = tp.home_tile[1];
@@ -2162,6 +2284,50 @@ ALIGN_JS = r'''
     function initAreaTypeVisible(){
         if (!MapApp.areaTypeVisible) MapApp.areaTypeVisible = {};
         for (const id of areaGroupIds()) if (!(id in MapApp.areaTypeVisible)) MapApp.areaTypeVisible[id] = true;
+    }
+    // ---- Region gating for area labels ----
+    // A label is shown only when its tile falls inside a currently-visible region.
+    // Each region's JSON carries the set of tiles its track passes through, so once
+    // a region is loaded+visible we know which labels belong to it (by tile). Labels
+    // whose tile is in no visible region (region off, or an off-track label) hide.
+    function _visibleRegionTiles(){
+        const set = new Set();
+        MapApp.loadedRegions.forEach(region => {
+            if (!region.visible || !region.data || !region.data.tiles) return;
+            for (const t of region.data.tiles) set.add(t.x + ',' + t.z);
+        });
+        return set;
+    }
+    // How many tiles away a visible region's track may be for a label whose OWN tile
+    // carries no track to still count as "in" that region (best-guess for labels
+    // placed just off the rails, e.g. a milepost / siding name on a track-less tile).
+    // Kept small so it can't reach an unrelated neighbouring region; 0 = exact tile only.
+    const AREA_LABEL_REGION_FALLBACK_TILES = 2;
+    function _areaInVisibleRegion(area, tileSet){
+        const tx = area.tile_x, tz = area.tile_z;
+        if (tileSet.has(tx + ',' + tz)) return true;              // exact tile has track
+        const R = AREA_LABEL_REGION_FALLBACK_TILES;
+        for (let dx = -R; dx <= R; dx++)
+            for (let dz = -R; dz <= R; dz++){
+                if (!dx && !dz) continue;
+                if (tileSet.has((tx + dx) + ',' + (tz + dz))) return true;  // near a visible region
+            }
+        return false;
+    }
+    // Add/remove each label marker from its (type) layer to match the current set of
+    // visible regions. Called whenever a region is shown/hidden (and after building).
+    function updateAreaLabelRegionVisibility(){
+        if (!MapApp.areaMarkers) return;
+        const tileSet = _visibleRegionTiles();
+        for (const rec of MapApp.areaMarkers){
+            const lg = (MapApp.areaTypeLayers && MapApp.areaTypeLayers[rec.type]) || MapApp.areaLabelsLayer;
+            if (!lg) continue;
+            const want = _areaInVisibleRegion(rec.area, tileSet);
+            const has = lg.hasLayer(rec.marker);
+            if (want && !has) lg.addLayer(rec.marker);
+            else if (!want && has) lg.removeLayer(rec.marker);
+        }
+        if (MapApp.overlayStates.areaLabels) updateAreaLabelSizes();
     }
     function buildAreaLabels(){
         MapApp.areaLabelsLayer = L.layerGroup();
@@ -2234,7 +2400,10 @@ ALIGN_JS = r'''
             });
         }
         rec.type = areaTypeOf(area);
-        (MapApp.areaTypeLayers && MapApp.areaTypeLayers[rec.type] || MapApp.areaLabelsLayer).addLayer(marker);
+        // Only place the marker if its tile is inside a currently-visible region;
+        // updateAreaLabelRegionVisibility() keeps this in sync as regions toggle.
+        const lg = (MapApp.areaTypeLayers && MapApp.areaTypeLayers[rec.type]) || MapApp.areaLabelsLayer;
+        if (_areaInVisibleRegion(area, _visibleRegionTiles())) lg.addLayer(marker);
         MapApp.areaMarkers.push(rec);
         return rec;
     }
@@ -2472,8 +2641,8 @@ ALIGN_JS = r'''
         const rows = labelTypes().map(t => [t.id, t.name, t.color]);
         if (hasUndefinedLabels()) rows.push([AREA_UNDEFINED, 'Other', '#ffffff']);
         const pop = document.createElement('div'); pop.id = 'area-filter-popover';
-        pop.style.cssText = 'position:fixed;z-index:3000;background:#fff;border:1px solid #888;border-radius:6px;'
-            + 'box-shadow:0 2px 12px rgba(0,0,0,.3);padding:8px 10px;font:12px Arial;min-width:150px;';
+        pop.style.cssText = 'position:fixed;z-index:3000;background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);border-radius:6px;'
+            + 'box-shadow:0 2px 12px var(--shadow);padding:8px 10px;font:12px Arial;min-width:150px;';
         pop.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;">Show label types</div>';
         for (const [id,label,color] of rows){
             const row = document.createElement('label');
@@ -2540,8 +2709,8 @@ ALIGN_JS = r'''
             ['highlightPlayers', 'Highlight player trains', 'Highlight trains that are moving and not AI-crewed (likely player-driven) with a bright spine (live only).']
         ];
         const pop = document.createElement('div'); pop.id = 'train-options-popover';
-        pop.style.cssText = 'position:fixed;z-index:3000;background:#fff;border:1px solid #888;border-radius:6px;'
-            + 'box-shadow:0 2px 12px rgba(0,0,0,.3);padding:8px 10px;font:12px Arial;min-width:170px;';
+        pop.style.cssText = 'position:fixed;z-index:3000;background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);border-radius:6px;'
+            + 'box-shadow:0 2px 12px var(--shadow);padding:8px 10px;font:12px Arial;min-width:170px;';
         pop.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;">Train display options</div>';
         for (const [key,label,tip] of rows){
             const row = document.createElement('label');
@@ -2637,8 +2806,8 @@ ALIGN_JS = r'''
             .join('');
         const html = `<div style="min-width:250px;font:12px Arial;">
             <b>${isNew ? 'New' : 'Edit'} Area Label</b>
-            <label style="display:block;margin:6px 0 2px;">Label text:</label>
-            <input id="al-text" type="text" placeholder="e.g. Barstow Yard" value="${escapeHtml(area.label)}" style="width:100%;box-sizing:border-box;padding:4px;">
+            <label style="display:block;margin:6px 0 2px;">Label text <span style="color:var(--text-muted);font-weight:normal;">(Enter = new line, Ctrl+Enter = save)</span>:</label>
+            <textarea id="al-text" rows="2" placeholder="e.g. Barstow Yard" style="width:100%;box-sizing:border-box;padding:4px;resize:vertical;font:inherit;">${escapeHtml(area.label)}</textarea>
             <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
                 <label>Rotation&deg; <input id="al-rot" type="number" value="${area.rotation || 0}" style="width:60px;"></label>
                 <label>Color <select id="al-color-sel" style="padding:2px;">${colorOpts}</select></label>
@@ -2650,8 +2819,8 @@ ALIGN_JS = r'''
                 <label><input id="al-box" type="checkbox" ${area.box ? 'checked' : ''}> box</label>
                 <label>Type <select id="al-type" style="padding:2px;">${areaTypeSelectOptions(area.type)}</select></label>
             </div>
-            <div style="margin-top:6px;color:#555;">tile ${area.tile_x},${area.tile_z} &nbsp; local ${(+area.local_x).toFixed(1)},${(+area.local_z).toFixed(1)}</div>
-            ${isNew ? '' : '<div style="margin-top:4px;color:#777;font-style:italic;">Tip: drag to move &middot; hold the mouse button on it and scroll to rotate.</div>'}
+            <div style="margin-top:6px;color:var(--text-muted);">tile ${area.tile_x},${area.tile_z} &nbsp; local ${(+area.local_x).toFixed(1)},${(+area.local_z).toFixed(1)}</div>
+            ${isNew ? '' : '<div style="margin-top:4px;color:var(--text-muted);font-style:italic;">Tip: drag to move &middot; hold the mouse button on it and scroll to rotate.</div>'}
             <div style="margin-top:8px;">
                 <button id="al-save" style="padding:4px 10px;cursor:pointer;">Save</button>
                 ${isNew ? '' : '<button id="al-del" style="margin-left:8px;padding:4px 10px;cursor:pointer;color:#b00;">Delete</button>'}
@@ -2716,7 +2885,8 @@ ALIGN_JS = r'''
                 }).catch(e => { saveBtn.disabled = false; showErr(e.message); });
             };
             saveBtn.addEventListener('click', save);
-            textEl.addEventListener('keydown', (ev)=>{ if (ev.key === 'Enter'){ ev.preventDefault(); save(); } });
+            // Enter inserts a newline (multi-line labels); Ctrl/Cmd+Enter saves.
+            textEl.addEventListener('keydown', (ev)=>{ if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)){ ev.preventDefault(); save(); } });
             if (delBtn){
                 delBtn.addEventListener('click', ()=>{
                     if (!confirm('Delete this label?')) return;
@@ -2732,12 +2902,12 @@ ALIGN_JS = r'''
         const tileX=area.tile_x, tileZ=area.tile_z, localX=area.local_x, localZ=area.local_z, rotation=area.rotation||0;
         const html = `<div style="min-width:230px;font:12px Arial;">
             <b>New Area Label</b><br>
-            <label style="display:block;margin:6px 0 2px;">Label text:</label>
-            <input id="al-text" type="text" placeholder="e.g. Barstow Yard" style="width:100%;box-sizing:border-box;padding:4px;">
+            <label style="display:block;margin:6px 0 2px;">Label text <span style="color:var(--text-muted);">(Enter = new line, Ctrl+Enter = generate)</span>:</label>
+            <textarea id="al-text" rows="2" placeholder="e.g. Barstow Yard" style="width:100%;box-sizing:border-box;padding:4px;resize:vertical;font:inherit;"></textarea>
             <label style="display:block;margin:6px 0 2px;">Type <select id="al-type" style="padding:2px;">${areaTypeSelectOptions(area.type)}</select></label>
-            <div style="margin-top:6px;color:#555;">tile ${tileX},${tileZ} &nbsp; local ${localX.toFixed(1)},${localZ.toFixed(1)} &nbsp; rot ${rotation}&deg;</div>
+            <div style="margin-top:6px;color:var(--text-muted);">tile ${tileX},${tileZ} &nbsp; local ${localX.toFixed(1)},${localZ.toFixed(1)} &nbsp; rot ${rotation}&deg;</div>
             <button id="al-gen" style="margin-top:8px;padding:4px 8px;cursor:pointer;">Generate INI</button>
-            <pre id="al-out" style="display:none;white-space:pre-wrap;background:#f4f4f4;padding:6px;margin-top:6px;border-radius:4px;font-size:11px;"></pre>
+            <pre id="al-out" style="display:none;white-space:pre-wrap;background:var(--hover-bg);padding:6px;margin-top:6px;border-radius:4px;font-size:11px;"></pre>
             <button id="al-copy" style="display:none;margin-top:4px;padding:4px 8px;cursor:pointer;">Copy to clipboard</button></div>`;
         L.popup({ maxWidth:340 }).setLatLng(latlng).setContent(html).openOn(MapApp.map);
         setTimeout(()=>{
@@ -2749,14 +2919,16 @@ ALIGN_JS = r'''
                 const label=(textEl.value||'').trim();
                 let slug=label.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
                 if (!slug) slug=`area_${tileX}_${tileZ}`;
-                let ini=`[area.${slug}]\nlabel = ${label||'New Label'}\ntile = ${tileX},${tileZ}\nlocal = ${localX.toFixed(1)},${localZ.toFixed(1)}`;
+                const iniLabel=(label||'New Label').replace(/\r?\n/g,'\\n');   // multi-line -> literal \n
+                let ini=`[area.${slug}]\nlabel = ${iniLabel}\ntile = ${tileX},${tileZ}\nlocal = ${localX.toFixed(1)},${localZ.toFixed(1)}`;
                 if (rotation) ini+=`\nrotation = ${rotation}`;
                 const atype=(document.getElementById('al-type')||{}).value;
                 if (atype && atype!=='other') ini+=`\ntype = ${atype}`;
                 outEl.textContent=ini; outEl.style.display='block'; copyBtn.style.display='inline-block';
             };
             genBtn.addEventListener('click', generate);
-            textEl.addEventListener('keydown', (ev)=>{ if (ev.key==='Enter'){ ev.preventDefault(); generate(); } });
+            // Enter inserts a newline (multi-line labels); Ctrl/Cmd+Enter generates.
+            textEl.addEventListener('keydown', (ev)=>{ if (ev.key==='Enter' && (ev.ctrlKey || ev.metaKey)){ ev.preventDefault(); generate(); } });
             copyBtn.addEventListener('click', ()=>{
                 const text=outEl.textContent;
                 if (navigator.clipboard && navigator.clipboard.writeText){
@@ -2798,7 +2970,7 @@ ALIGN_JS = r'''
     }
     function buildAlignUI(){
         const bs='position:absolute;top:10px;z-index:1500;padding:6px 10px;cursor:pointer;'+
-          'background:#fff;border:1px solid #888;border-radius:6px;box-shadow:0 1px 6px rgba(0,0,0,.3);font:13px Arial';
+          'background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);border-radius:6px;box-shadow:0 1px 6px var(--shadow);font:13px Arial';
         const authoring = (typeof window.__run8_authoring === 'undefined') ? true : !!window.__run8_authoring;
         const btn=document.createElement('button'); btn.textContent='Align mode: OFF'; btn.style.cssText=bs+';left:52px';
         document.body.appendChild(btn);
@@ -2815,22 +2987,22 @@ ALIGN_JS = r'''
         help.style.cssText=bs+';left:52px;top:46px';
         document.body.appendChild(help);
         let helpEl=null;
-        function kbd(s){ return '<kbd style="background:#eee;border:1px solid #ccc;border-radius:3px;padding:0 5px;font:12px monospace">'+s+'</kbd>'; }
+        function kbd(s){ return '<kbd style="background:var(--kbd-bg);border:1px solid var(--border);border-radius:3px;padding:0 5px;font:12px monospace">'+s+'</kbd>'; }
         function hrow(t,d){ return '<dt style="font-weight:600;margin-top:10px">'+t+'</dt>'
-            +'<dd style="margin:2px 0 0 0;color:#444">'+d+'</dd>'; }
+            +'<dd style="margin:2px 0 0 0;color:var(--text-muted)">'+d+'</dd>'; }
         function toggleHelp(show){
             if(!helpEl){
                 helpEl=document.createElement('div');
                 helpEl.style.cssText='position:absolute;inset:0;z-index:3000;display:none;background:rgba(0,0,0,.35)';
                 const card=document.createElement('div');
                 card.style.cssText='position:absolute;top:50px;left:52px;max-width:430px;max-height:80vh;'
-                    +'overflow:auto;background:#fff;border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,.35);'
+                    +'overflow:auto;background:var(--panel-bg);color:var(--panel-fg);border-radius:8px;box-shadow:0 4px 20px var(--shadow);'
                     +'padding:16px 20px;font:13px/1.5 Arial';
                 card.innerHTML=
                     '<div style="display:flex;justify-content:space-between;align-items:center;'
-                    +'border-bottom:1px solid #ddd;padding-bottom:8px;margin-bottom:6px">'
+                    +'border-bottom:1px solid var(--border);padding-bottom:8px;margin-bottom:6px">'
                     +'<h3 style="margin:0;font:600 15px Arial">Map controls &amp; tips</h3>'
-                    +'<button id="help-close" title="Close" style="border:none;background:#eee;border-radius:4px;'
+                    +'<button id="help-close" title="Close" style="border:none;background:var(--kbd-bg);color:var(--panel-fg);border-radius:4px;'
                     +'width:26px;height:26px;cursor:pointer;font-size:16px">&times;</button></div>'
                     +'<dl style="margin:0">'
                     +hrow('Pan / zoom','Drag to pan &middot; scroll wheel to zoom.')
@@ -2861,8 +3033,8 @@ ALIGN_JS = r'''
             if(panes.markerPane) panes.markerPane.style.transform=t;
             if(panes.shadowPane) panes.shadowPane.style.transform=t; }
         let aligning=false, drag=null; MapApp.labelMode=false;
-        function updA(){ btn.textContent='Align mode: '+(aligning?'ON':'OFF'); btn.style.background=aligning?'#1560d0':'#fff'; btn.style.color=aligning?'#fff':'#000'; }
-        function updL(){ if(!lbl) return; lbl.textContent='Add Label: '+(MapApp.labelMode?'ON':'OFF'); lbl.style.background=MapApp.labelMode?'#1a9a4a':'#fff'; lbl.style.color=MapApp.labelMode?'#fff':'#000'; }
+        function updA(){ btn.textContent='Align mode: '+(aligning?'ON':'OFF'); btn.style.background=aligning?'#1560d0':'var(--panel-bg)'; btn.style.color=aligning?'#fff':'var(--panel-fg)'; }
+        function updL(){ if(!lbl) return; lbl.textContent='Add Label: '+(MapApp.labelMode?'ON':'OFF'); lbl.style.background=MapApp.labelMode?'#1a9a4a':'var(--panel-bg)'; lbl.style.color=MapApp.labelMode?'#fff':'var(--panel-fg)'; }
         function setAlign(on){ aligning=on;
             if(on){ MapApp.labelMode=false; updL(); MapApp.map.dragging.disable(); }
             else { MapApp.map.dragging.enable(); drag=null; setT(''); }

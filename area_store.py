@@ -37,6 +37,14 @@ def slugify(text: str) -> str:
     return slug
 
 
+def _encode_label(label: str) -> str:
+    """Encode a (possibly multi-line) label for a single INI value line: real
+    newlines become the literal escape ``\\n`` so the value stays on one line and
+    round-trips through configparser and the block-splicer. Decoded on read by
+    config_parser._parse_area_sections."""
+    return (label or '').replace('\r\n', '\n').replace('\r', '\n').replace('\n', '\\n')
+
+
 def _fmt_num(value) -> str:
     """Format a coordinate for INI output: integers stay integer, floats keep
     up to 3 significant decimals (trailing zeros trimmed)."""
@@ -49,7 +57,7 @@ def _fmt_num(value) -> str:
 def format_area_block(area: Dict) -> str:
     """Render one area dict as an [area.<id>] INI block (trailing newline)."""
     lines = [f"[area.{area['id']}]",
-             f"label = {area['label']}",
+             f"label = {_encode_label(area['label'])}",
              f"tile = {_fmt_num(area['tile_x'])},{_fmt_num(area['tile_z'])}",
              f"local = {_fmt_num(area['local_x'])},{_fmt_num(area['local_z'])}"]
     if area.get('color'):
