@@ -44,7 +44,7 @@ def generate_javascript() -> str:
     const COLORS = window.COLORS;
     // Rail-vehicle line widths from [trains] config, with safe defaults.
     // car = min px floor; carM = real car width (m) the body widens to with zoom.
-    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14, lodScaleM: 300, lodMinCars: 3};
+    const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14, lodScaleM: 300, lodMinCars: 3, lodColor: '#5f6368'};
 
     // Track line width from [track] config: full `width` px at/above `fullZoom`,
     // halving per zoom level below that down to `minWidth` (fullZoom 0 = fixed width).
@@ -55,6 +55,10 @@ def generate_javascript() -> str:
         const min = TRACK_STYLE.minWidth || 0;
         const anchor = TRACK_STYLE.fullZoom || 0;
         if (!anchor || !MapApp.map) return max;   // scaling disabled / map not ready
+        // Snap the track to its thin min width once zoomed out far enough that trains
+        // collapse to a single line, so track + train LOD switch together
+        // ([trains] lod_scale_m sets the point; [track] min_width sets the thinness).
+        if (typeof _trainCollapsed === 'function' && _trainCollapsed()) return min;
         const w = max * Math.pow(2, MapApp.map.getZoom() - anchor);
         return Math.max(min, Math.min(max, w));
     }
@@ -1021,7 +1025,7 @@ def generate_javascript() -> str:
     // [car_type_colors] (keyed by INDUSTRY_CONFIG_CAR_TYPE), falling back to
     // [colors] train.
     const PLAYER_HL_COLOR = '#00e5ff';   // bright cyan spine for player-crewed trains
-    const COLLAPSED_BODY_COLOR = '#9aa0a6';  // neutral grey for a collapsed train's body line
+    const COLLAPSED_BODY_COLOR = (window.TRAIN_STYLE && TRAIN_STYLE.lodColor) || '#5f6368';  // collapsed train line colour ([trains] lod_color)
                                              // (the head arrow carries the railroad colour)
     function _isLocoType(unitType) {
         return /DieselEngine|Electric|Steam|Engine/i.test(unitType || '');
@@ -2805,7 +2809,10 @@ ALIGN_JS = r'''
         }
         // Help button + overlay: a quick reference of the map's mouse/key commands.
         const help=document.createElement('button'); help.textContent='Help';
-        help.style.cssText=bs+';left:'+(authoring?288:170)+'px';
+        // Sit Help directly under the Align-mode button (same left, second row) so it
+        // doesn't float far to the right when the Add Label button is absent
+        // (production build). bs sets top:10px; the trailing top:46px overrides it.
+        help.style.cssText=bs+';left:52px;top:46px';
         document.body.appendChild(help);
         let helpEl=null;
         function kbd(s){ return '<kbd style="background:#eee;border:1px solid #ccc;border-radius:3px;padding:0 5px;font:12px monospace">'+s+'</kbd>'; }
@@ -2989,7 +2996,7 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
 </head><body>
 <div id="map"></div>
 {color_config}
-<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}, lodScaleM: {config.train_lod_scale_m}, lodMinCars: {config.train_lod_min_cars}}};
+<script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}, lodScaleM: {config.train_lod_scale_m}, lodMinCars: {config.train_lod_min_cars}, lodColor: '{config.train_lod_color}'}};
 window.TRACK_STYLE = {{width: {config.track_width}, minWidth: {config.track_min_width}, fullZoom: {config.track_full_zoom}}};</script>
 <script>window.__run8_authoring = {authoring_js}; window.__run8map = L.map('map', {{preferCanvas:true, maxZoom:22, zoomControl:true}}).setView([35,-117.8],9);</script>
 {js}

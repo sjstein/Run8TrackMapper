@@ -417,3 +417,10 @@ arrows visually align with the track at 3 km. Length stays 14.1 px. No console e
 Verified in-browser: None base map selected; options read Show colored cars / Show cuts of cars /
 Show only moving / Highlight player trains (all off); toggling Show cuts adds the cuts (5479 -> 8345
 car bodies). No console errors.
+
+--- Droplet deploy handoff (2026-08-31) ---
+Wrote deploy_handoff.md - the pick-up-cold plan for the DigitalOcean deploy (consolidates the
+2026-08-28 design entry above). It covers: what's built (P1), the deploy model (geometry baked on
+Windows, only world saves cross the wire), the two blocking decisions (sequencing; domain/TLS), the
+P1-first step list (Caddy + systemd + ufw), artifacts to produce (Caddyfile / systemd unit / runbook
+/ agent .exe), the P2 multi-tenant plan, and watch-outs. START HERE next session.
