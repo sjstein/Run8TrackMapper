@@ -424,3 +424,90 @@ Wrote deploy_handoff.md - the pick-up-cold plan for the DigitalOcean deploy (con
 Windows, only world saves cross the wire), the two blocking decisions (sequencing; domain/TLS), the
 P1-first step list (Caddy + systemd + ufw), artifacts to produce (Caddyfile / systemd unit / runbook
 / agent .exe), the P2 multi-tenant plan, and watch-outs. START HERE next session.
+
+--- Dark mode (beta suggestion #1) - implemented 2026-09-02 ---
+Top beta request. Scope decided w/ user: theme the CHROME + map background only; leave real
+OSM/Satellite tiles their natural colours (no dark tile provider, no CSS-invert). Toggle lives
+in the control panel; default follows OS prefers-color-scheme, remembered in localStorage.
+Impl (html_generator.py, all client-side):
+  * New theme engine in the SHARED base JS (generate_javascript): injectThemeStyles() adds one
+    <style id="r8-theme-vars"> defining CSS custom properties on :root (light) + overriding them
+    under html[data-theme="dark"], plus color-scheme:light/dark (auto-darkens native form
+    controls + scrollbars). Existing light inline <style> blocks are LEFT UNTOUCHED; the dark
+    rules win by higher specificity (html[data-theme="dark"] #id ...). initTheme()/applyTheme()/
+    setTheme()/currentTheme(); OS-change listener follows the system only until the user picks
+    one explicitly. setupUI() calls initTheme() first.
+  * Vars: --panel-bg/--panel-fg/--text-muted/--border/--border-strong/--hover-bg/--kbd-bg/
+    --map-bg/--accent/--shadow. .leaflet-container background = var(--map-bg) so the None base
+    map (the default) goes dark too. Dark rules also cover Leaflet popups/controls/attribution/
+    scale/zoom-bar.
+  * "Dark mode" checkbox added at the top of #control-body; wired in createControlPanel.
+  * Runtime-built popovers/buttons converted from hardcoded #fff/#000/#eee to var() so they
+    follow the theme (inline styles beat the stylesheet, so var() is the only clean way): area
+    filter popover, train Options popover, Align/Add-Label/Help buttons (bs + updA/updL OFF
+    state), Help card + kbd + rows, area-editor tile/local hints, INI-fallback <pre>, search
+    "Match:" label.
+Left as-is (minor): a few secondary gray sub-labels inside RV/section Leaflet popups (e.g. the
+  rv_filename #888 hint) stay dim on dark - bump to var(--text-muted) later if wanted.
+Needs a REGEN to ship (pure viewer change; no serve.py/config change). Not yet verified
+  in-browser (user regenerates/previews on their side). VERIFIED good by user 2026-09-02.
+
+--- Collapsed head-arrow: cuts get no arrow (beta suggestion #2) - 2026-09-02 ---
+Bug: with "Show cuts of cars" on and zoomed out (LOD collapsed), loose cuts (no lead loco)
+still drew a head-end arrow. Fix (html_generator.py drawCollapsedTrain): gate the arrow block
+on `lead.isLoco` (lead = cars[0], the drawn head). Only a consist whose head vehicle is a
+locomotive gets the arrow; a cut of cars gets the plain collapsed line, no arrow. Zoom re-fit
+path (updateTrainWidths, l._rvArrow) has nothing orphaned since cuts never create an arrow.
+Needs a REGEN (viewer change).
+
+--- Multi-line area labels (beta suggestion #3) - 2026-09-02 ---
+Add/edit an area label can now embed newlines for multi-line text. Encoding: real newlines
+are stored as the literal escape "\n" in the single INI value line (round-trips through
+configparser + the block-splicer untouched; a hand-editor can also type label = A\nB).
+  * area_store.py: new _encode_label() (real newline / CRLF -> literal \n); format_area_block
+    writes label = {_encode_label(...)}.
+  * config_parser.py _parse_area_sections: decode label = ...strip().replace('\\n','\n') - the
+    single read point that feeds BOTH the live server and the baked manifest (no other Py change).
+  * html_generator.py createAreaLabelIcon: render escapeHtml(label).replace(/\n/g,'<br>') +
+    text-align:center (also fixes a latent unescaped-HTML injection of label text). white-space
+    stays nowrap so each line doesn't wrap; font auto-scaling unchanged (line-height follows font).
+  * Editors: both the backend edit popup and the no-backend INI popup use a <textarea> (was a
+    single-line <input>); Enter now inserts a newline and Ctrl/Cmd+Enter saves/generates
+    (Esc still cancels). INI-fallback generator encodes newline -> \n too.
+JSON/REST unchanged (newlines pass through JSON). Tested: 2- and 3-line labels round-trip
+  add->read->update; INI stays single physical line with literal \n; parse gives real newlines.
+Needs a REGEN (viewer) + serve.py restart picks up the Py changes for live authoring.
+
+--- Area labels gated by region visibility (beta suggestion #4) - 2026-09-02 ---
+An area label now shows only when its tile falls inside a currently-visible region (so a
+Mojave label is suppressed when Mojave isn't selected). CLIENT-ONLY - no output_generator /
+serve.py / manifest / INI change. Chosen over server-side region-tagging because it's simpler
+and each region JSON already ships its track `tiles`; we only ever need the tiles of the
+regions that ARE loaded. Rule (user's pick): a label is visible iff its "tile_x,tile_z" is in
+the union of tiles of the currently loaded+visible regions (then AND-ed with the existing type
+filter + master Area Labels toggle = a 3-level AND). An off-track label (tile in no region's
+track tiles) stays hidden - there were 2 such in socal (Guernsey, AL529); an optional
+`always_show` INI escape hatch was discussed but NOT built (add later if needed).
+Impl (html_generator.py, all in ALIGN_JS + 3 base-JS hooks):
+  * _visibleRegionTiles() builds a Set of "x,z" from every visible region's data.tiles;
+    _areaInVisibleRegion(area,set); updateAreaLabelRegionVisibility() adds/removes each label
+    marker from its type layer to match.
+  * addAreaMarker gates the initial add on _areaInVisibleRegion.
+  * Hooks (guarded typeof-check so a base-only build is safe): loadRegion (after visible=true),
+    showRegion, unloadRegion (after visible=false) call updateAreaLabelRegionVisibility.
+LIMITATION (inherent): "a region's tiles" = the tiles its TRACK passes through, so a label
+  placed on a no-track tile inside a region won't match it.
+VERIFIED in-browser (static socal, in-app browser, port 8001 http.server): all 11 on -> 115
+  labels (117 - 2 off-track hidden); all off -> 0; sanbernardino only -> 40; +modesto -> 75;
+  modesto only -> 35; master overlay off -> 0. Additive, re-evaluates on enable(async)/disable,
+  no console errors (only the expected /api/ping 404 with no backend). Needs a REGEN.
+
+  FOLLOW-UP (2026-09-02): adjacent-tile fallback for off-track labels. The 2 "off-track" labels
+  (Guernsey, AL529) are valid - each sits exactly 1 tile from ONE region's track (bakersfield /
+  cajon resp.), runner-up region 11 tiles away (unambiguous). _areaInVisibleRegion now, when a
+  label's OWN tile has no track, also shows it if a visible region's track passes within
+  AREA_LABEL_REGION_FALLBACK_TILES (=2, hardcoded const; 0 disables) tiles (Chebyshev box scan of
+  <=24 neighbour lookups, fallback only - exact tile still wins). Kept small so it can't reach an
+  unrelated neighbour region. Client-only, both call sites inherit it. Re-verified in-browser:
+  all-on total 115 -> 117 (both off-track labels now shown); all off -> 0; bakersfield only ->
+  Guernsey shown, AL529 hidden; +cajon -> AL529 shown. Each attaches only to its correct neighbour.

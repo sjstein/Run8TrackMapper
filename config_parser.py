@@ -219,7 +219,10 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
         area_id = section_name[5:]  # Remove "area." prefix
         area = parser[section_name]
 
-        label = area.get('label', '').strip()
+        # Decode the literal ``\n`` escape (see area_store._encode_label) back into
+        # real newlines so multi-line labels render on multiple lines. Strip first so
+        # outer whitespace is trimmed but internal line breaks are preserved.
+        label = area.get('label', '').strip().replace('\\n', '\n')
         if not label:
             errors.append(f"[{section_name}] label is required ({source})")
 
