@@ -561,3 +561,16 @@ HEADS-UP (not fixed, out of scope): the same sectionIndex-collision affects sele
      goToResult signal 0 for bakersfield vs barstow -> 2 distinct correct centres; no console errors.
   So sectionIndex + signalIndex + selectedSections are all region-qualified now. (industryMarkers
      and industrySectionIds were already region-qualified.) Needs a REGEN.
+
+--- Issue #52: tile_corrections.csv should be optional (branch 52_optional_tile_corrections) - 2026-09-04 ---
+Bug: output_generator.py refused to run unless a tile_corrections.csv existed - users had to
+create an empty one. Cause was purely config validation (region_extractor.load_tile_corrections
+already returns {} for a missing file). Fix (config_parser.py parse_config):
+  * [visualization] tile_corrections is now OPTIONAL - an absent key defaults to
+    'tile_corrections.csv' instead of appending a "tile_corrections is required" error.
+  * A missing tile_corrections FILE no longer adds a file_error; it prints a "no tile
+    corrections file; proceeding with none" note and continues (corrections = {}).
+No output/viewer change (pure server-side); NO regen needed for existing outputs. Verified:
+  a config with the tile_corrections line removed now parses (no tile_corrections error;
+  defaults to tile_corrections.csv); load_tile_corrections('missing.csv') -> {}; real
+  config-socal.ini still parses unchanged.
