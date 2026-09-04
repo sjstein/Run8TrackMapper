@@ -62,15 +62,19 @@ def generate_javascript() -> str:
         const w = max * Math.pow(2, MapApp.map.getZoom() - anchor);
         return Math.max(min, Math.min(max, w));
     }
+    // Section ids are per-region and COLLIDE across regions, so every section-keyed
+    // structure (sectionIndex, selectedSections) is keyed by this region-qualified key
+    // instead of the bare id. Section ids are integers, so the '_' join is unambiguous.
+    function secKey(regionId, sectionId){ return regionId + '_' + sectionId; }
     // Re-weight all (non-selected) track sections for the current zoom.
     function updateTrackWidths() {
         const w = trackWeightPx();
-        MapApp.loadedRegions.forEach(region => {
+        MapApp.loadedRegions.forEach((region, regionId) => {
             if (!region.layers || !region.layers.sections) return;
             region.layers.sections.eachLayer(group => {
                 if (!group.eachLayer) return;
                 group.eachLayer(pl => {
-                    if (pl._trackLine && pl.setStyle && !MapApp.selectedSections.has(pl._sectionId))
+                    if (pl._trackLine && pl.setStyle && !MapApp.selectedSections.has(secKey(regionId, pl._sectionId)))
                         pl.setStyle({ weight: w });
                 });
             });
@@ -84,8 +88,8 @@ def generate_javascript() -> str:
         map: null,
         manifest: null,
         loadedRegions: new Map(),  // region_id -> {data, layers, visible}
-        sectionIndex: new Map(),   // section_id -> {region_id, polyline, metadata}
-        signalIndex: new Map(),    // signal_id -> {region_id, marker, metadata}
+        sectionIndex: new Map(),   // secKey(region_id, section_id) -> {region_id, polyline, metadata, originalColor}  (section ids collide across regions)
+        signalIndex: new Map(),    // secKey(region_id, signal_id) -> {region_id, marker, metadata}  (signal ids collide across regions)
         industryIndex: [],         // [{region_id, data}]
         aiLocationIndex: [],       // [{region_id, data}]
         trainIndex: [],            // [{regionId, trainId, vehicle, layer}] for search
@@ -97,7 +101,7 @@ def generate_javascript() -> str:
         industryMarkers: new Map(),     // Map of "regionId_tag" -> {marker, data, regionId} for highlighting
 
         // Selection state
-        selectedSections: new Map(),  // section_id -> polyline
+        selectedSections: new Map(),  // secKey(region_id, section_id) -> {polyline, metadata, region_id}
         currentSelectionRegion: null,
 
         // Layer groups for overlays
@@ -876,6 +880,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     });
                     polyline._trackLine = true;
                     polyline._sectionId = section.id;
+                    polyline._origColor = trackColor;   // per-polyline normal colour (region/switch aware)
 
                     // Build detailed section popup
                     const sectionType = section.is_switch ? ' (Switch)' : '';
@@ -889,13 +894,13 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     // Hover highlight handlers
                     polyline.on('mouseover', function() {
                         // Don't change if section is selected
-                        if (!MapApp.selectedSections.has(section.id)) {
+                        if (!MapApp.selectedSections.has(secKey(regionId, section.id))) {
                             this.setStyle({ color: COLORS.trackHover });
                         }
                     });
                     polyline.on('mouseout', function() {
                         // Restore original color if not selected
-                        if (!MapApp.selectedSections.has(section.id)) {
+                        if (!MapApp.selectedSections.has(secKey(regionId, section.id))) {
                             // Determine correct color based on overlay state
                             let restoreColor = trackColor;
                             if (MapApp.overlayStates.industries && MapApp.industrySectionIds.has(`${regionId}_${section.id}`)) {
@@ -943,7 +948,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
 
                 layers.sections.addLayer(sectionGroup);
                 const originalColor = section.is_switch ? COLORS.switch : regionTrackColor;
-                MapApp.sectionIndex.set(section.id, {region_id: regionId, polyline: sectionGroup, metadata: section, originalColor: originalColor});
+                MapApp.sectionIndex.set(secKey(regionId, section.id), {region_id: regionId, polyline: sectionGroup, metadata: section, originalColor: originalColor});
             }
 
             // Render signals as directional triangles
@@ -998,7 +1003,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 marker.bindTooltip(tooltipText, {sticky: true});
 
                 layers.signals.addLayer(marker);
-                MapApp.signalIndex.set(signal.id, {region_id: regionId, marker, metadata: signal});
+                MapApp.signalIndex.set(secKey(regionId, signal.id), {region_id: regionId, marker, metadata: signal});
             }
 
             // Render industries and track industry section IDs
@@ -1115,6 +1120,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             if (MapApp.overlayStates.industries) {
                 layers.industries.addTo(MapApp.map);
                 updateIndustryTrackColors(true);  // Color industry tracks green
+                if (MapApp.currentLocalFilter) applyLocalSymbolHighlighting();  // red/grey labels
             }
             if (MapApp.overlayStates.aiLocations) layers.aiLocations.addTo(MapApp.map);
             if (MapApp.overlayStates.tileBoundaries) layers.tileBoundaries.addTo(MapApp.map);
@@ -1711,28 +1717,33 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         // Trains overlay also gates the zoom-based destination labels.
         if (overlayId === 'trains') updateTrainLabelVisibility();
 
-        // When toggling industries, recolor industry tracks and apply local filter highlighting
+        // When toggling industries: colour the industry tracks green (or restore on
+        // off), then, if a Local Filter is active, recolour the labels (red matched /
+        // grey others). Tracks stay green regardless of the filter.
         if (overlayId === 'industries') {
-            if (enabled && MapApp.currentLocalFilter) {
-                // Apply local filter highlighting if a filter is active
-                applyLocalSymbolHighlighting();
-            } else {
-                updateIndustryTrackColors(enabled);
-            }
+            updateIndustryTrackColors(enabled);
+            if (enabled && MapApp.currentLocalFilter) applyLocalSymbolHighlighting();
         }
     }
 
+    // Colour (or restore) industry tracks. Iterates each region's OWN section layers
+    // keyed by that region's id, because section ids collide across regions - the
+    // global sectionIndex only keeps the last-loaded region's polyline per id, so a
+    // shadowed industry section would be missed (the "green only on mouse-over" bug).
     function updateIndustryTrackColors(showIndustryColor) {
-        for (const [sectionId, data] of MapApp.sectionIndex) {
-            const compositeKey = `${data.region_id}_${sectionId}`;
-            if (!MapApp.industrySectionIds.has(compositeKey)) continue;
-            if (MapApp.selectedSections.has(sectionId)) continue;  // Don't change selected sections
-
-            const color = showIndustryColor ? COLORS.industryTrack : data.originalColor;
-            data.polyline.eachLayer(layer => {
-                if (layer.setStyle) layer.setStyle({color: color});
+        MapApp.loadedRegions.forEach((region, regionId) => {
+            if (!region.layers || !region.layers.sections) return;
+            region.layers.sections.eachLayer(group => {
+                if (!group.eachLayer) return;
+                group.eachLayer(pl => {
+                    if (!pl._trackLine || !pl.setStyle) return;
+                    if (!MapApp.industrySectionIds.has(`${regionId}_${pl._sectionId}`)) return;
+                    if (MapApp.selectedSections.has(secKey(regionId, pl._sectionId))) return;  // don't touch selected
+                    pl.setStyle({ color: showIndustryColor ? COLORS.industryTrack
+                                                           : (pl._origColor || COLORS.track) });
+                });
             });
-        }
+        });
     }
 
     function getIndustriesForSection(regionId, sectionId) {
@@ -1757,8 +1768,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             // No filter active - normal style
             style = `color:${COLORS.industryTrack};font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;`;
         } else if (isHighlighted) {
-            // Filter active AND this matches - highlighted style
-            style = `color:#FF4500;font-size:14px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;background:rgba(255,255,0,0.3);padding:2px 4px;border-radius:3px;`;
+            // Filter active AND this matches - red text (no background box), same size as normal.
+            style = `color:#ff0000;font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;`;
         } else {
             // Filter active but doesn't match - dimmed style
             style = `color:#888888;font-size:10px;font-weight:normal;white-space:nowrap;text-shadow:none;opacity:0.5;`;
@@ -1803,49 +1814,17 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         }
     }
 
+    // The Local Filter only recolours the industry LABELS: industries the selected
+    // local symbol services turn red, all others dim grey (normal green when no filter).
+    // Industry TRACKS are intentionally left in their normal (industry-green) colour -
+    // the filter does not recolour the track vectors.
     function applyLocalSymbolHighlighting() {
         const filterSymbol = MapApp.currentLocalFilter;
         const filterActive = filterSymbol !== null;
-
-        // Update industry markers
-        for (const [compositeKey, entry] of MapApp.industryMarkers) {
-            const { marker, data, regionId } = entry;
+        for (const [, entry] of MapApp.industryMarkers) {
+            const { marker, data } = entry;
             const isMatch = filterSymbol ? (data.local_name === filterSymbol) : true;
-
-            // Update marker icon based on match status
-            const icon = createIndustryIcon(data.tag, isMatch, filterActive);
-            marker.setIcon(icon);
-        }
-
-        // Update track section colors if industries overlay is enabled
-        if (MapApp.overlayStates.industries) {
-            for (const [sectionId, data] of MapApp.sectionIndex) {
-                const compositeKey = `${data.region_id}_${sectionId}`;
-                if (!MapApp.industrySectionIds.has(compositeKey)) continue;
-                if (MapApp.selectedSections.has(sectionId)) continue;
-
-                // Find if any industry using this section matches the filter
-                const industries = getIndustriesForSection(data.region_id, sectionId);
-                let sectionMatches = false;
-                if (filterSymbol) {
-                    sectionMatches = industries.some(ind => ind.local_name === filterSymbol);
-                } else {
-                    sectionMatches = true;  // No filter = all match
-                }
-
-                let color;
-                if (!filterActive) {
-                    color = COLORS.industryTrack;
-                } else if (sectionMatches) {
-                    color = '#FF4500';  // Orange-red for highlighted
-                } else {
-                    color = '#CCCCCC';  // Gray for non-matching
-                }
-
-                data.polyline.eachLayer(layer => {
-                    if (layer.setStyle) layer.setStyle({ color: color });
-                });
-            }
+            marker.setIcon(createIndustryIcon(data.tag, isMatch, filterActive));
         }
     }
 
@@ -1859,10 +1838,11 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             return;
         }
 
-        if (MapApp.selectedSections.has(sectionId)) {
+        const key = secKey(regionId, sectionId);
+        if (MapApp.selectedSections.has(key)) {
             // Deselect - restore the section's original colour + the zoom-scaled width.
-            MapApp.selectedSections.delete(sectionId);
-            const idx = MapApp.sectionIndex.get(sectionId);
+            MapApp.selectedSections.delete(key);
+            const idx = MapApp.sectionIndex.get(key);
             const restoreColor = (idx && idx.originalColor) || COLORS.track;
             featureGroup.eachLayer(layer => {
                 if (layer.setStyle) layer.setStyle({color: restoreColor, weight: trackWeightPx()});
@@ -1873,7 +1853,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             }
         } else {
             // Select - apply style to all layers in the feature group
-            MapApp.selectedSections.set(sectionId, {polyline: featureGroup, metadata});
+            MapApp.selectedSections.set(key, {polyline: featureGroup, metadata, region_id: regionId});
             MapApp.currentSelectionRegion = regionId;
             featureGroup.eachLayer(layer => {
                 if (layer.setStyle) layer.setStyle({color: COLORS.trackSelected, weight: 5});
@@ -1884,8 +1864,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     }
 
     function clearSelection() {
-        for (const [sectionId, data] of MapApp.selectedSections) {
-            const idx = MapApp.sectionIndex.get(sectionId);
+        for (const [key, data] of MapApp.selectedSections) {
+            const idx = MapApp.sectionIndex.get(key);
             const restoreColor = (idx && idx.originalColor) || COLORS.track;
             data.polyline.eachLayer(layer => {
                 if (layer.setStyle) layer.setStyle({color: restoreColor, weight: trackWeightPx()});
@@ -1975,12 +1955,14 @@ html[data-theme="dark"] .leaflet-control-scale-line{
 
         if (searchType === 'section') {
             const queryNum = parseInt(query);
-            for (const [sectionId, data] of MapApp.sectionIndex) {
-                if (sectionId.toString().includes(query) || sectionId === queryNum) {
+            // Match on the real (per-region) section id, not the region-qualified map key.
+            for (const [, data] of MapApp.sectionIndex) {
+                const sid = data.metadata.id;
+                if (sid.toString().includes(query) || sid === queryNum) {
                     results.push({
                         type: 'section',
-                        id: sectionId,
-                        label: `Section ${sectionId}`,
+                        id: sid,
+                        label: `Section ${sid}`,
                         region: data.region_id,
                         data: data
                     });
@@ -1988,12 +1970,14 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             }
         } else if (searchType === 'signal') {
             const queryNum = parseInt(query);
-            for (const [signalId, data] of MapApp.signalIndex) {
-                if (signalId.toString().includes(query) || signalId === queryNum) {
+            // Match on the real (per-region) signal id, not the region-qualified map key.
+            for (const [, data] of MapApp.signalIndex) {
+                const sig = data.metadata.id;
+                if (sig.toString().includes(query) || sig === queryNum) {
                     results.push({
                         type: 'signal',
-                        id: signalId,
-                        label: `Signal ${signalId}`,
+                        id: sig,
+                        label: `Signal ${sig}`,
                         region: data.region_id,
                         data: data
                     });
@@ -2073,7 +2057,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         closeSearch();
 
         if (type === 'section') {
-            const data = MapApp.sectionIndex.get(id);
+            const data = MapApp.sectionIndex.get(secKey(regionId, id));
             if (data) {
                 MapApp.map.fitBounds(data.polyline.getBounds(), {padding: [50, 50]});
                 // Open popup on first layer in the group
@@ -2085,7 +2069,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 });
             }
         } else if (type === 'signal') {
-            const data = MapApp.signalIndex.get(id);
+            const data = MapApp.signalIndex.get(secKey(regionId, id));
             if (data) {
                 MapApp.map.setView([data.metadata.lat, data.metadata.lon], 16);
                 data.marker.openPopup();

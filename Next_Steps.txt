@@ -511,3 +511,53 @@ VERIFIED in-browser (static socal, in-app browser, port 8001 http.server): all 1
   unrelated neighbour region. Client-only, both call sites inherit it. Re-verified in-browser:
   all-on total 115 -> 117 (both off-track labels now shown); all off -> 0; bakersfield only ->
   Guernsey shown, AL529 hidden; +cajon -> AL529 shown. Each attaches only to its correct neighbour.
+
+--- Issue #48: industry highlighting bug (branch 48_industry_highlighting_bug) - 2026-09-02 ---
+Symptoms: (1) with the Local Filter set, the matched industry TAG showed an odd yellow
+highlight box; (2) industry TRACK highlight (green) vanished until you moused over it - both
+with a filter AND when just showing all industries.
+ROOT CAUSE of (2): section ids are per-region and COLLIDE (socal: 9677/10348 ids appear in
+>1 region; 2191 industry track-sections share an id with another region). MapApp.sectionIndex
+is keyed by bare section.id, so cross-region collisions keep only the LAST-loaded region's
+polyline per id. updateIndustryTrackColors / applyLocalSymbolHighlighting iterated that index
+and built the key `${data.region_id}_${sectionId}` from the SURVIVING region, so shadowed
+industry sections never matched industrySectionIds and were left uncoloured - but each
+polyline's own mouseout handler uses its correct closure regionId, so hovering coloured it =
+"green only on mouse-over".
+Fix (html_generator.py, matches the user's requested behaviour):
+  * createIndustryIcon: matched label = red (#ff0000) text, NO yellow background box, same
+    size as normal; non-matched = dim grey (unchanged); no filter = normal green (unchanged).
+  * applyLocalSymbolHighlighting: dropped the track-recolour loop entirely - the Local Filter
+    now only recolours LABELS; industry TRACKS stay their normal green regardless of filter.
+  * updateIndustryTrackColors: rewritten to iterate each region's OWN section layers
+    (region.layers.sections) keyed by that region's id + pl._sectionId, instead of the
+    collision-prone global sectionIndex -> all industry tracks colour green on enable with no
+    hover. Added pl._origColor (per-polyline normal colour) for correct restore on disable.
+  * toggleOverlay/loadRegion: enable -> updateIndustryTrackColors(true) then, if a filter is
+    active, applyLocalSymbolHighlighting() for the red/grey labels.
+VERIFIED in-browser (fresh gen, all 11 regions): enabling industries -> 2375 tracks green
+  immediately (was 0 before hover); no filter -> 626 labels green, 0 backgrounds; filter
+  'BARMCC' -> 1 red + 625 grey, 0 backgrounds, tracks still 2375 green (filter left tracks
+  alone); no console errors. Needs a REGEN.
+HEADS-UP (not fixed, out of scope): the same sectionIndex-collision affects selection
+  DEselect restore colour (toggleSectionSelection uses idx.originalColor from the collided
+  index) - a shadowed section could restore to the wrong region's colour. Consider region-
+  qualifying sectionIndex keys in a follow-up.
+  >> DONE (same session): the real cure - sectionIndex + selectedSections are now keyed by a
+     region-qualified secKey(regionId, sectionId) instead of the bare (colliding) section id.
+     New helper secKey(); every call site updated: sectionIndex.set (load), mouseover/mouseout
+     selection guard, updateTrackWidths (forEach now (region, regionId)), updateIndustryTrackColors
+     selection guard, toggleSectionSelection (select/deselect + stores region_id in the value),
+     clearSelection (restores via sectionIndex.get(key)), search-by-section (matches on
+     data.metadata.id, not the key), goToResult (looks up secKey(regionId, id)). Decl comments
+     updated. VERIFIED in-browser: industry green tracks still 2375 (no regression); search '521'
+     now returns 7 exact "Section 521" across 7 regions (was collapsed to 1); goToResult 521 for
+     arvin/cajon/needles centres on 3 distinct correct locations; no console errors.
+  signalIndex FIX (same session): signalIndex was likewise keyed by bare signal.id and signal ids
+     DO collide (socal: 712/745 unique ids appear in >1 region). Now keyed by secKey(regionId,
+     signal.id): set at load; search-by-signal matches on data.metadata.id (not the key);
+     goToResult('signal') looks up secKey(regionId, id); decl comment updated. VERIFIED in-browser:
+     search signal '109' (in 8 regions) -> 8 exact "Signal 109" hits, one per region (was 1);
+     goToResult signal 0 for bakersfield vs barstow -> 2 distinct correct centres; no console errors.
+  So sectionIndex + signalIndex + selectedSections are all region-qualified now. (industryMarkers
+     and industrySectionIds were already region-qualified.) Needs a REGEN.
