@@ -334,9 +334,9 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         # relative to this config's directory.
         areas_file_str = viz.get('areas_file', '').strip()
 
-        tile_corrections_str = viz.get('tile_corrections', '').strip()
-        if not tile_corrections_str:
-            errors.append("[visualization] tile_corrections is required")
+        # tile_corrections is OPTIONAL: a refinement CSV of per-tile lat/lon offsets.
+        # An absent key (or a missing file, checked below) simply means "no corrections".
+        tile_corrections_str = viz.get('tile_corrections', '').strip() or 'tile_corrections.csv'
 
         region_dir_str = viz.get('region_dir', '').strip()
         if not region_dir_str:
@@ -654,8 +654,10 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
 
     file_errors = []
 
+    # tile_corrections is optional - a missing file just means no corrections are
+    # applied (load_tile_corrections returns an empty set). Don't fail the run for it.
     if not config.tile_corrections.exists():
-        file_errors.append(f"[visualization] tile_corrections file not found: {config.tile_corrections}")
+        print(f"  Note: no tile corrections file ({config.tile_corrections}); proceeding with none.")
 
     if not config.region_dir.exists():
         file_errors.append(f"[visualization] region_dir not found: {config.region_dir}")
