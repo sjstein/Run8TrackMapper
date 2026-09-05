@@ -574,3 +574,72 @@ No output/viewer change (pure server-side); NO regen needed for existing outputs
   a config with the tile_corrections line removed now parses (no tile_corrections error;
   defaults to tile_corrections.csv); load_tile_corrections('missing.csv') -> {}; real
   config-socal.ini still parses unchanged.
+
+--- Issue #50: show which way a loco faces (branch 50_loco_facing_arrow) - 2026-09-04 [FIRST CUT, PENDING CALIBRATION] ---
+Goal: use the world save's per-truck reverseDirection to show loco facing. (Issue said
+"IsReverse" but the save field is reverseDirection; IsThrownReverse is switches, not vehicles.)
+It was parsed in a docstring only - actually DROPPED - so step 1 was capturing it.
+Data: locos split ~50/50 true/false; 226 consists have locos facing DIFFERENT ways -> must be
+per-loco. ~15% of vehicles have truckA != truckB; we use truck A as the vehicle's facing.
+Impl (plumbed end to end):
+  * world_parser.py: Truck.reverse (bool); _parse_vehicle reads reverseDirection pair.
+  * region_extractor.py: RailVehicleData.reverse; extract_trains sets reverse=v.truck_a.reverse.
+  * output_generator.py train_to_dict -> emits "reverse" (so BOTH baked output AND serve.py
+    /api/trains carry it - serve.py uses train_to_dict).
+  * html_generator.py renderTrains (detailed pass): for each loco, drawLocoFacing() draws a small
+    filled arrow (canvas L.polygon, loco company colour, black outline) at its FRONT end via the
+    existing _arrowLatLngs; tagged _rvArrow/_headTip/_headRefs so updateTrainWidths refits it on
+    zoom. DETAILED view only (collapsed LOD keeps the existing per-train head arrow). transformData
+    mutates body in place so v.reverse survives align mode.
+FRONT-END CONVENTION (the open question): body[0] is a car's consist-front-facing end; reverse
+  flips which physical end is the loco's front. The polarity is behind ONE viewer-side constant
+  LOCO_FACING_FLIP (currently false) - flip it + regen index.html (no re-extract) if arrows read
+  backwards vs the sim. NEEDS USER CALIBRATION against Run8: confirm the arrows point the right way;
+  if not, set LOCO_FACING_FLIP = true.
+VERIFIED (serve.py --world Mateo_World.xml, port 8001): reverse present on all 1036 locos (507
+  true/529 false); detailed view renders exactly 1036 arrows (one per loco) + 7124 bodies; arrow
+  refits on zoom; screenshot shows a single arrow at one end of each loco along the track; no
+  console errors. User said may change the visual after seeing results. Needs a REGEN (viewer) +
+  serve.py restart (payload) to ship.
+
+  CALIBRATED 2026-09-04 (user report on Auto Save World.xml): first cut had arrows INCONSISTENT
+  WITHIN a consist (train 710: locos 9643/7745/8176 wrong, 5459/9689 right). Root cause: (1)
+  reverseDirection is RELATIVE TO THE TRACK SECTION, not absolute - train 710 had 3 rev=true /
+  2 rev=false locos that all actually face the SAME way; and (2) the de-overlap layout repositions
+  the drawn body AWAY from the raw truck points, so combining reverse with body[0]/body[-1] was
+  meaningless. Correct rule (calibrated against the user's right/wrong report, matches 9/9 flagged
+  locos across trains 710/7359/9999471): use the RAW placed truck positions - the FRONT truck is
+  B when reverse is true, else A; facing runs rear-truck -> front-truck; the front body endpoint
+  is whichever end lies on that facing side of the body midpoint. Implemented server-side as
+  region_extractor._loco_front_at_zero(ta, tb, body, reverse) -> bool; RailVehicleData.reverse
+  REPLACED by front0 (True=body[0] is front); emitted as "front0" (train_to_dict); viewer
+  drawLocoFacing now reads v.front0 (LOCO_FACING_FLIP kept as a global invert). world_parser still
+  captures reverseDirection (the computation needs it). RE-VERIFIED: /api/trains front0 matches
+  ground truth for all flagged locos (710 all True; 7359 both False; 9999471 both False); in-browser
+  a 6-unit lash-up now shows all arrows pointing the SAME way (consistent), no console errors.
+
+  RE-CALIBRATED again 2026-09-04 (that fix was still wrong): user gave direct ground truth -
+  train 710 should read L R L L R (locos face DIFFERENT ways), but it rendered all one way.
+  Real root cause = a DOUBLE FLIP: the RAW placed truck A->B vector ALREADY encodes the loco's
+  orientation (a reversed loco has trucks A/B swapped, so A->B flips 180 on its own). The prior
+  rule re-applied reverseDirection on top, cancelling that flip -> every loco in a consist came
+  out identical. Correct rule: facing = the RAW truck B->A direction, with NO reverseDirection
+  term at all. _loco_front_at_zero(ta, tb, body) now: front0 = dot(body[0]-midpoint, (A-B)) > 0.
+  reverseDirection is no longer used for facing (world_parser still captures it, harmless).
+  The doc's TrackNode "Is Reverse Path" (offset 49) / node Tangent turned out NOT to be needed -
+  the truck placement geometry already carries the heading. VERIFIED via the real pipeline:
+  train 710 front0 = [9643 F, 5459 T, 7745 F, 8176 F, 9689 T] -> L R L L R (matches user), where
+  front0=True renders R, False renders L. Needs REGEN + serve.py restart; user to re-verify 710
+  and others in-sim. NOTE: arrows are hard to see on dark company-coloured locos (e.g. navy) -
+  candidate visual tweak (outline/contrast/size) when the direction is confirmed correct.
+  >> DIRECTION CONFIRMED CORRECT by user 2026-09-04. Contrast fix applied: the facing arrow no
+     longer uses the loco's company colour (which never contrasted with the body); it is now a
+     WHITE fill + thin dark (#111, weight 1.5) outline, one consistent style for every loco.
+     White pops on dark locos / dark mode; the outline keeps it visible on light locos / light
+     bg; works in both themes. (Company colour is still shown by the loco body.) Verified
+     in-browser: white up/down arrows clearly visible on orange BNSF locos, and a consist shows
+     locos facing opposite ways (per-loco). No errors from the facing code (the ERR_CONNECTION_
+     REFUSED console noise was stale poll failures across serve.py restarts, server was 200 OK).
+     STILL PENDING: user to regen + re-verify broadly in-sim, then COMMIT (branch
+     50_loco_facing_arrow; files world_parser.py, region_extractor.py, output_generator.py,
+     html_generator.py + Next_Steps.txt).

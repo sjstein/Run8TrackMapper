@@ -127,6 +127,7 @@ def rail_vehicle_to_dict(v: RailVehicleData) -> dict:
         "resolved": v.resolved,
         "car_type": v.car_type,  # INDUSTRY_CONFIG_CAR_TYPE, for per-type body colour
         "company": v.company,    # loco reporting mark (INITIAL), for per-railroad loco colour
+        "front0": v.front0,      # loco facing: True if body[0] is the front end (for the facing arrow)
     }
 
 

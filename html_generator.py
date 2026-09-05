@@ -1292,6 +1292,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                         interactive: false, keyboard: false
                     }).addTo(layers.trainLabels);
                 }
+
+                // Locomotive facing: a small arrow at its front end (detailed view only).
+                if (isLoco) drawLocoFacing(v, layers.trains);
             }
         }
     }
@@ -1329,6 +1332,29 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             [tp.x - dx * BASE - nx * HALF, tp.y - dy * BASE - ny * HALF]
         ];
         return pts.map(p => map.layerPointToLatLng(L.point(p[0], p[1])));
+    }
+    // Which way a locomotive faces. The server resolves the world-save
+    // reverseDirection + raw truck geometry into `front0` (True => the loco's front
+    // is body[0]); see region_extractor._loco_front_at_zero. Drawn as a small arrow at
+    // that end in detailed view. LOCO_FACING_FLIP inverts every arrow at once if they
+    // ever read backwards against the sim (viewer-side calibration; no re-extract).
+    const LOCO_FACING_FLIP = false;
+    function drawLocoFacing(v, layerGroup) {
+        const body = v.body;
+        if (!body || body.length < 2) return;
+        const frontAt0 = (v.front0 !== false) !== LOCO_FACING_FLIP;   // default front0=true
+        const front = frontAt0 ? body[0] : body[body.length - 1];
+        const refs  = frontAt0 ? body : body.slice().reverse();   // front first, then into the body
+        // White fill + thin dark outline: reads on any loco colour and in both themes
+        // (the loco body already carries the company colour, so the arrow only needs to
+        // show direction). White pops on dark locos / dark mode; the outline keeps it
+        // visible on light locos and light backgrounds.
+        const arrow = L.polygon(_arrowLatLngs(front, refs), {
+            color: '#111', fillColor: '#fff', fillOpacity: 1,
+            weight: 1.5, opacity: 1, interactive: false
+        });
+        arrow._rvArrow = true; arrow._headTip = front; arrow._headRefs = refs;   // refit on zoom
+        arrow.addTo(layerGroup);
     }
     // Draw one train as a single line tracing its length. Zoomed out, the head end
     // matters most: the body is a neutral grey and the LEAD locomotive gets a small
