@@ -12,7 +12,7 @@ first child and truck B as the second child, in this order:
     currentTrackSectionIndex  -> Run8 track-section number occupied by the truck
     startNodeIndex            -> which end of that section the distance is from
     distanceTravelledInMeters -> distance along the section from that end
-    reverseDirection          -> truck facing (not used for placement)
+    reverseDirection          -> truck facing (captured to show loco direction)
 
 plus per-vehicle ``rvXMLfilename``, ``unitType``, ``destinationTag`` and
 ``unitNumber``.
@@ -82,6 +82,7 @@ class Truck:
     start_node_index: int
     distance_m: float
     route_prefix: int
+    reverse: bool = False   # reverseDirection: the vehicle's facing (used to show loco direction)
 
 
 @dataclass
@@ -114,18 +115,21 @@ def _parse_vehicle(rv: ET.Element) -> RailVehicle:
     sec_a, sec_b = _pair(rv, "currentTrackSectionIndex")
     sn_a, sn_b = _pair(rv, "startNodeIndex")
     d_a, d_b = _pair(rv, "distanceTravelledInMeters")
+    rev_a, rev_b = _pair(rv, "reverseDirection")
 
     truck_a = Truck(
         section_index=_to_int(sec_a),
         start_node_index=_to_int(sn_a),
         distance_m=_to_float(d_a),
         route_prefix=_to_int(rp_a),
+        reverse=_to_bool(rev_a),
     )
     truck_b = Truck(
         section_index=_to_int(sec_b),
         start_node_index=_to_int(sn_b),
         distance_m=_to_float(d_b),
         route_prefix=_to_int(rp_b),
+        reverse=_to_bool(rev_b),
     )
 
     def _text(tag: str) -> str:

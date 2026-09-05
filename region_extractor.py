@@ -1560,6 +1560,7 @@ class RailVehicleData:
     resolved: bool                       # at least one truck landed on a known section
     car_type: str = ""                   # INDUSTRY_CONFIG_CAR_TYPE from the DB (for colouring)
     company: str = ""                    # loco reporting mark (INITIAL) from the DB (for loco colouring)
+    front0: bool = True                  # loco facing: True if body[0] is the front end (see _loco_front_at_zero)
 
 
 @dataclass
@@ -2047,6 +2048,31 @@ def _fallback_body(placer, ta, tb, length_m):
     return body, key
 
 
+def _loco_front_at_zero(ta, tb, body) -> bool:
+    """Whether the locomotive's FRONT is the ``body[0]`` end (``True``) or ``body[-1]``.
+
+    The facing is taken purely from the RAW placed truck positions: the nose points
+    along ``truck B -> truck A`` (calibrated against known consists, e.g. train 710 =
+    L R L L R). Crucially this does NOT re-apply the world-save ``reverseDirection``:
+    a reversed loco already has its trucks A/B swapped, so the B->A vector flips 180
+    on its own. Applying reverseDirection on top double-flips it and makes every loco
+    in a consist face the same way (the bug this replaces).
+
+    The body is laid front->back along the consist chain, so ``body[0]`` is a fixed
+    side for the whole consist; the front is on that side when the B->A vector points
+    from the body midpoint toward ``body[0]``. Falls back to ``body[0]`` (True) when a
+    truck is missing, the two trucks coincide, or the body is degenerate.
+    """
+    if not body or len(body) < 2 or not ta or not tb:
+        return True
+    ap, bp = ta[0], tb[0]
+    fdx, fdy = ap[0] - bp[0], ap[1] - bp[1]     # B -> A (the loco's facing)
+    if abs(fdx) + abs(fdy) < 1e-9:
+        return True
+    mx, my = (body[0][0] + body[-1][0]) / 2.0, (body[0][1] + body[-1][1]) / 2.0
+    return ((body[0][0] - mx) * fdx + (body[0][1] - my) * fdy) > 0
+
+
 def extract_trains(trains, placer: "_SectionPlacer",
                    rv_lengths: Optional[Dict[str, str]] = None,
                    deoverlap: bool = True) -> Dict[int, List[TrainData]]:
@@ -2127,6 +2153,7 @@ def extract_trains(trains, placer: "_SectionPlacer",
                     resolved=resolved,
                     car_type=car_type,
                     company=company,
+                    front0=_loco_front_at_zero(ta, tb, body),
                 ))
 
         for prefix, vehicles in by_region.items():
