@@ -122,8 +122,14 @@ without the DB the body stays the truck-to-truck span.
 
 **Viewer:** a **Trains** overlay (each car a body polyline; length is the true car length when
 `railvehicle_db` is set, otherwise the truck-to-truck span) with per-vehicle popups (train id / unit / type / destination) and
-a 4-line monospace tooltip (`Train : <id>` / `RV num : <unit>` / `RV tag : <destination>` /
-`RV typ : <car_type>`), and the popup shows the DB car type. Body colours are config-driven. A
+a monospace tooltip (`Train : <id>` / `RV num : <unit>` / `RV tag : <destination>` /
+`RV typ : <car_type>`, then a divider and whole-consist totals: `Cars` / `Length` (ft) /
+`Trail` = trailing tons (cars only) / `Total` = total consist weight incl. locomotives),
+and the popup shows the DB car type plus the same consist totals. The totals describe the
+**entire** world-save train, so hovering any car (or a region-straddling train's far half)
+reports the full length/tonnage; they need `railvehicle_db` for length + tare weight and the
+save's per-vehicle `loadWeightUSTons` for lading (gross = tare + load). Body colours are
+config-driven. A
 **locomotive** is coloured by its **owning railroad** from `[loco_company_colors]` (keyed by the loco
 DB's `INITIAL` reporting mark, e.g. `BNSF`, `ATSF`, `SP`, `UP`, `CSXT`, `R8W`; keys case-insensitive),
 falling back to `[colors] train_loco` when a mark has no entry (or the loco isn't in the DB). Every
@@ -162,6 +168,12 @@ Vehicle** search type matches **trainID**, **destinationTag**, or **unitNumber**
 enables the overlay and pans to the vehicle). Wired in the shared base
 (`generate_javascript`: `renderTrains`, overlay entry, search) which the align viewer reuses,
 plus `transformData` in `ALIGN_JS`.
+
+An **Area Label** search type (`performSearch`/`goToResult` in the shared base) matches an
+area label's **text** or **id** against `MapApp.areaMarkers` (align-viewer only). A hit makes
+the Area Labels overlay + the label's category visible, pans to the marker, and briefly
+flashes it (`flashAreaMarker`, a CSS `filter` glow - never `transform`, which Leaflet owns for
+positioning/rotation). Guarded with `typeof` checks so the base build degrades gracefully.
 
 ##### Live world-save watching (`serve.py --world`)
 ```bash
@@ -343,7 +355,7 @@ block into the areas file → re-run `output_generator.py`.
 - **Base Map Selection**: OpenStreetMap, Satellite (Esri), or None, plus a toggleable **OpenRailwayMap** overlay
 - **Region Toggle**: Enable/disable regions dynamically (data loaded on demand); in the align viewer, enabling a region fits the map to it
 - **Overlay Controls**: Toggle Signals, Industries, AI Locations, Tile Boundaries, and Area Labels
-- **Search Function**: Search by track section, signal, industry tag, or AI location
+- **Search Function**: Search by track section, signal, industry tag, AI location, area label, or train/rail vehicle
 - **Ctrl+Click Selection**: Select multiple track sections to calculate total length
 - **Mouse Position**: Lat/lon display in lower right corner
 - **Right-click → Google Maps** *(align viewer)*: right-click any point to open Google Maps at that lat/lon (with the current zoom) in a new tab, for cross-checking against real-world imagery/streetview. The coordinate is the map position under the cursor, so in the align viewer it is only as accurate as the current manual alignment.

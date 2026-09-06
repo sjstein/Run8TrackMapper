@@ -14,8 +14,8 @@ first child and truck B as the second child, in this order:
     distanceTravelledInMeters -> distance along the section from that end
     reverseDirection          -> truck facing (captured to show loco direction)
 
-plus per-vehicle ``rvXMLfilename``, ``unitType``, ``destinationTag`` and
-``unitNumber``.
+plus per-vehicle ``rvXMLfilename``, ``unitType``, ``destinationTag``,
+``unitNumber`` and ``loadWeightUSTons`` (the lading carried, in US tons).
 
 This module only reads the data; converting a truck's ``(section, start node,
 distance)`` into a map coordinate lives in :mod:`region_extractor` so it can
@@ -94,6 +94,7 @@ class RailVehicle:
     destination_tag: str
     truck_a: Truck
     truck_b: Truck
+    load_tons: float = 0.0   # loadWeightUSTons: the lading carried (US tons), 0 if empty
 
     @property
     def route_prefix(self) -> int:
@@ -143,6 +144,8 @@ def _parse_vehicle(rv: ET.Element) -> RailVehicle:
         destination_tag=_text("destinationTag"),
         truck_a=truck_a,
         truck_b=truck_b,
+        # loadWeightUSTons is a direct scalar (not a paired <float>), 0.0 if absent.
+        load_tons=_to_float(rv.findtext("loadWeightUSTons")),
     )
 
 
