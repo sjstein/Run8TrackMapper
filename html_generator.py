@@ -669,6 +669,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             <h3>Search</h3>
             <select id="search-type">
                 <option value="aiLocation">AI Location</option>
+                <option value="area">Area Label</option>
                 <option value="industry">Industry</option>
                 <option value="signal">Signal</option>
                 <option value="section">Track Section</option>
@@ -1539,13 +1540,30 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         line.addTo(layerGroup);
     }
 
+    // Whole-consist totals block for the train hover (issue #51): total length and
+    // both tonnages. Trailing tons = the cars the locos pull; Total = everything on
+    // the rail incl. locomotives. Same 6-char labels as the RV lines so the colons
+    // stay aligned. Returns '' when the train carries no totals (e.g. no RV DB).
+    function trainTotalsLines(train) {
+        if (!train || train.total_tons == null) return '';
+        const n = x => Math.round(x || 0).toLocaleString();
+        let out = '<br>──────────<br>';
+        if (train.car_count != null) out += `Cars   : ${n(train.car_count)}<br>`;
+        if (train.total_length_m) out += `Length : ${n(train.total_length_m * 3.28084)} ft<br>`;
+        out += `Trail  : ${n(train.trailing_tons)} t<br>`;   // trailing tons (cars only)
+        out += `Total  : ${n(train.total_tons)} t`;          // whole consist incl. locos
+        return out;
+    }
+
     function trainVehicleTooltip(train, v) {
         // Fixed-label, monospace layout so the colons align.
         return `<div style="font-family:monospace;white-space:pre;margin:0">`
              + `Train  : ${train.train_id}<br>`
              + `RV num : ${v.unit_number || ''}<br>`
              + `RV tag : ${v.destination_tag || ''}<br>`
-             + `RV typ : ${v.car_type || ''}</div>`;
+             + `RV typ : ${v.car_type || ''}`
+             + trainTotalsLines(train)
+             + `</div>`;
     }
 
     function trainVehiclePopup(train, v) {
@@ -1554,6 +1572,15 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         html += `Type: ${v.unit_type || 'N/A'}<br>`;
         if (v.car_type) html += `Car type: ${v.car_type}<br>`;
         html += `Destination: ${v.destination_tag || 'N/A'}`;
+        // Whole-consist totals (issue #51): length, trailing tons (cars only) and
+        // total consist weight (incl. locomotives).
+        if (train.total_tons != null) {
+            const n = x => Math.round(x || 0).toLocaleString();
+            html += `<br><span style="color:#555;font-size:12px;">`
+                 + `Consist: ${n(train.car_count)} cars`
+                 + (train.total_length_m ? `, ${n(train.total_length_m * 3.28084)} ft` : '')
+                 + `<br>Trailing ${n(train.trailing_tons)} t · Total ${n(train.total_tons)} t</span>`;
+        }
         if (v.rv_filename) html += `<br><span style="color:#888;font-size:11px;">${v.rv_filename}</span>`;
         html += `<br><button type="button" style="margin-top:6px;cursor:pointer;"`
              + ` onclick="MapApp.followTrain(${train.train_id})">Follow this train</button>`;
@@ -2058,6 +2085,25 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     });
                 }
             }
+        } else if (searchType === 'area') {
+            // Area labels live only in the align viewer (MapApp.areaMarkers); match
+            // on the label text or its id (case-insensitive substring). The id is
+            // carried so goToResult can look the marker back up.
+            const markers = MapApp.areaMarkers || [];
+            for (const rec of markers) {
+                const a = rec.area || {};
+                const label = a.label || '';
+                if (label.toLowerCase().includes(query)
+                    || String(a.id || '').toLowerCase().includes(query)) {
+                    results.push({
+                        type: 'area',
+                        id: a.id,
+                        label: label || String(a.id || '(label)'),
+                        region: (a.type || 'label'),
+                        data: rec
+                    });
+                }
+            }
         }
 
         // Limit results
@@ -2122,7 +2168,39 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 MapApp.map.fitBounds(it.layer.getBounds(), {padding: [80, 80], maxZoom: 18});
                 it.layer.openPopup();
             }
+        } else if (type === 'area') {
+            // Area labels: find the marker by id, make its overlay/category visible,
+            // pan to it and give it a brief flash so it's easy to spot.
+            const rec = (MapApp.areaMarkers || []).find(r => r.area && r.area.id === id);
+            if (rec && rec.marker) {
+                if (typeof ensureAreaOverlayVisible === 'function') ensureAreaOverlayVisible();
+                if (typeof ensureAreaTypeVisible === 'function') ensureAreaTypeVisible(rec.type);
+                if (typeof updateAreaLabelSizes === 'function') updateAreaLabelSizes();
+                const ll = rec.marker.getLatLng();
+                MapApp.map.setView(ll, Math.max(MapApp.map.getZoom(), 14));
+                flashAreaMarker(rec.marker);
+            }
         }
+    }
+
+    // Briefly pulse an area-label marker so a search hit is easy to find. Only the
+    // CSS `filter` is animated (a glow) - never transform, which Leaflet owns for
+    // positioning and the label uses for rotation.
+    function flashAreaMarker(marker) {
+        const el = marker && marker.getElement && marker.getElement();
+        if (!el) return;
+        const prev = el.style.transition;
+        el.style.transition = 'filter 0.15s';
+        let on = 0;
+        const t = setInterval(() => {
+            on ^= 1;
+            el.style.filter = on ? 'drop-shadow(0 0 7px #ffcc00) brightness(1.35)' : 'none';
+        }, 180);
+        setTimeout(() => {
+            clearInterval(t);
+            el.style.filter = 'none';
+            el.style.transition = prev;
+        }, 1300);
     }
 
     // ========================================

@@ -137,6 +137,13 @@ def train_to_dict(train: TrainData) -> dict:
         "train_id": train.train_id,
         "was_ai": train.was_ai,
         "vehicles": [rail_vehicle_to_dict(v) for v in train.vehicles],
+        # Whole-consist totals for the hover readout (see TrainData). Tonnage is
+        # gross US tons; length is metres (the viewer converts to feet).
+        "total_length_m": train.total_length_m,
+        "trailing_tons": train.trailing_tons,
+        "total_tons": train.total_tons,
+        "car_count": train.car_count,
+        "veh_count": train.veh_count,
     }
 
 

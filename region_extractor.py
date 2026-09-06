@@ -1565,10 +1565,32 @@ class RailVehicleData:
 
 @dataclass
 class TrainData:
-    """A train (consist) with its placed rail vehicles."""
+    """A train (consist) with its placed rail vehicles.
+
+    The tonnage/length totals describe the WHOLE consist (every vehicle in the
+    world-save train), so a train split across regions carries the same totals on
+    each per-region slice - hovering any part reports the full train. ``car_count``
+    counts non-locomotive vehicles; tonnages are gross (tare + lading) US tons.
+    Totals are 0 when no rail-vehicle DB is loaded (no tare/length available).
+    """
     train_id: int
     was_ai: bool
     vehicles: List[RailVehicleData] = field(default_factory=list)
+    total_length_m: float = 0.0   # sum of coupled footprints (whole consist)
+    trailing_tons: float = 0.0    # gross tons of the cars only (excludes locos)
+    total_tons: float = 0.0       # gross tons of every vehicle (incl. locos)
+    car_count: int = 0            # number of non-locomotive vehicles
+    veh_count: int = 0            # total vehicles in the consist (locos + cars)
+
+
+def _is_loco_type(unit_type: str) -> bool:
+    """True if a vehicle's unitType names a locomotive.
+
+    Mirrors the viewer's ``_isLocoType`` (``/DieselEngine|Electric|Steam|Engine/i``)
+    so trailing-tonnage excludes exactly the vehicles the map draws as locomotives.
+    """
+    t = (unit_type or "").lower()
+    return "engine" in t or "electric" in t or "steam" in t
 
 
 def _concat_section_polyline(sd: SectionData) -> List[Tuple[float, float]]:
@@ -2106,14 +2128,34 @@ def extract_trains(trains, placer: "_SectionPlacer",
         # (front->back) order. Body length = coupled footprint minus a coupler at
         # each end, so adjacent coupled cars keep a visible gap instead of abutting.
         metas = []   # (v, ta, tb, body_len_m, full_len_m, coupler_m, car_type, company)
+        # Whole-consist totals (length + gross tonnage), computed over every vehicle
+        # before the per-region split, so each region slice reports the full train.
+        total_length_m = 0.0
+        trailing_tons = 0.0   # gross tons of cars only (excludes locomotives)
+        total_tons = 0.0      # gross tons of every vehicle
+        car_count = 0         # non-locomotive vehicles
         for v in train.vehicles:
             body_len_m, full_len_m, coupler_m, car_type, company = None, None, 0.0, "", ""
+            tare_tons = 0.0
             if rv_lengths:
                 entry = rv_lengths.get((v.rv_filename or '').strip().lower())
                 if entry:
-                    full_len_m, coupler_m, car_type, company = entry
+                    full_len_m = entry.length_m
+                    coupler_m = entry.coupler_m
+                    car_type = entry.car_type
+                    company = entry.company
+                    tare_tons = entry.weight_tons
                     b = full_len_m - 2.0 * coupler_m
                     body_len_m = b if b > 0 else full_len_m
+            # Accumulate whole-consist totals. Length is the coupled footprint;
+            # gross weight is DB tare + the save's lading. A loco is identified the
+            # same way the viewer does (unitType), so trailing tons match the map.
+            total_length_m += full_len_m or 0.0
+            gross = tare_tons + max(0.0, v.load_tons)
+            total_tons += gross
+            if not _is_loco_type(v.unit_type):
+                trailing_tons += gross
+                car_count += 1
             metas.append((v, placer.truck(v.truck_a), placer.truck(v.truck_b),
                           body_len_m, full_len_m, coupler_m, car_type, company))
 
@@ -2160,7 +2202,12 @@ def extract_trains(trains, placer: "_SectionPlacer",
             if vehicles:
                 out.setdefault(prefix, []).append(
                     TrainData(train_id=train.train_id, was_ai=train.was_ai,
-                              vehicles=vehicles))
+                              vehicles=vehicles,
+                              total_length_m=round(total_length_m, 1),
+                              trailing_tons=round(trailing_tons, 1),
+                              total_tons=round(total_tons, 1),
+                              car_count=car_count,
+                              veh_count=len(train.vehicles)))
 
     return out
 
