@@ -396,6 +396,11 @@ scale. Code: `renderSignals` / `signalGlyphGeom` in `ALIGN_JS`.
 - **Mouse Position**: Lat/lon display in lower right corner
 - **Right-click → Google Maps** *(align viewer)*: right-click any point to open Google Maps at that lat/lon (with the current zoom) in a new tab, for cross-checking against real-world imagery/streetview. The coordinate is the map position under the cursor, so in the align viewer it is only as accurate as the current manual alignment.
 - **Opacity Sliders**: Independent **Map Opacity** (base map + ORM) and **Track Opacity**
+- **Label Size slider** *(align viewer)*: a global multiplier (50–300%, default 100%) under
+  Track Opacity that scales every Area Label's font in the **live view only** — it does not
+  change the authored `font_size`, just how big the labels render (`MapApp.areaFontScale`,
+  applied in `updateAreaLabelSizes`; each label's scaled base still collapses toward the small
+  zoomed-out floor)
 - **Align mode** *(align viewer only)*: drag the track to slide it onto the real map; releasing commits the new alignment
 - **Add Label** *(align viewer only, hidden under `--production`)*: click to author a new area label and generate its `[area.*]` INI block
 
