@@ -1166,6 +1166,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     // Player-highlight spine stays a touch wider than the car so it
                     // reads as a coloured casing at every zoom.
                     else if (l._rvHighlight && l.setStyle) l.setStyle({ weight: _highlightWeight(w) });
+                    // Loco arrow polygons: rebuilt so their width tracks the car width.
+                    else if (l._locoArrow && l.setLatLngs) l.setLatLngs(locoArrowLatLngs(l._body, l._front0));
                     // Head-end arrows keep a constant on-screen size + stable heading across zoom.
                     else if (l._rvArrow && l.setLatLngs) l.setLatLngs(_arrowLatLngs(l._headTip, l._headRefs));
                 });
@@ -1230,22 +1232,32 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         // cars instead of a line painted across them). Player trains get a bright spine.
         for (const {cars, highlight} of drawn) drawTrainOutline(cars.map(c => c.v.body), layers.trains, highlight);
 
-        // Pass 2: RV bodies + destination tags, above the spines.
+        // Pass 2: RV bodies + destination tags, above the spines. A locomotive is one
+        // arrow polygon (nose = facing); a car is a plain blunt body line.
         for (const {train, cars} of drawn) {
             for (const {v, isLoco} of cars) {
-                const line = L.polyline(v.body, {
-                    color: rvBodyColor(v, isLoco),
-                    weight: rvBodyWeightPx(),
-                    opacity: 0.95,
-                    // Locos get rounded end-caps (a pill shape) so they read as
-                    // the powered unit without relying on colour; cars stay blunt.
-                    lineCap: isLoco ? 'round' : 'butt'
-                });
-                line._rvBody = true;   // marks it for zoom re-weighting
-                line.bindTooltip(trainVehicleTooltip(train, v), {sticky: true});
-                line.bindPopup(trainVehiclePopup(train, v), {maxWidth: 300});
-                line.addTo(layers.trains);
-                MapApp.trainIndex.push({regionId, trainId: train.train_id, vehicle: v, layer: line});
+                let layer;
+                if (isLoco) {
+                    const frontAt0 = (v.front0 !== false) !== LOCO_FACING_FLIP;   // default front0=true
+                    const color = rvBodyColor(v, true);
+                    layer = L.polygon(locoArrowLatLngs(v.body, frontAt0), {
+                        color: color, fillColor: color, fillOpacity: 0.95,
+                        weight: 1, opacity: 0.95
+                    });
+                    layer._locoArrow = true; layer._body = v.body; layer._front0 = frontAt0;  // rebuilt on zoom
+                } else {
+                    layer = L.polyline(v.body, {
+                        color: rvBodyColor(v, false),
+                        weight: rvBodyWeightPx(),
+                        opacity: 0.95,
+                        lineCap: 'butt'
+                    });
+                    layer._rvBody = true;   // marks it for zoom re-weighting
+                }
+                layer.bindTooltip(trainVehicleTooltip(train, v), {sticky: true});
+                layer.bindPopup(trainVehiclePopup(train, v), {maxWidth: 300});
+                layer.addTo(layers.trains);
+                MapApp.trainIndex.push({regionId, trainId: train.train_id, vehicle: v, layer});
 
                 // Destination tag centered on the car (zoom-gated visibility).
                 if (v.destination_tag) {
@@ -1254,9 +1266,6 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                         interactive: false, keyboard: false
                     }).addTo(layers.trainLabels);
                 }
-
-                // Locomotive facing: a small arrow at its front end (detailed view only).
-                if (isLoco) drawLocoFacing(v, layers.trains);
             }
         }
     }
@@ -1297,26 +1306,44 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     }
     // Which way a locomotive faces. The server resolves the world-save
     // reverseDirection + raw truck geometry into `front0` (True => the loco's front
-    // is body[0]); see region_extractor._loco_front_at_zero. Drawn as a small arrow at
-    // that end in detailed view. LOCO_FACING_FLIP inverts every arrow at once if they
-    // ever read backwards against the sim (viewer-side calibration; no re-extract).
+    // is body[0]); see region_extractor._loco_front_at_zero. LOCO_FACING_FLIP inverts
+    // every loco at once if they ever read backwards against the sim (viewer-side
+    // calibration; no re-extract).
     const LOCO_FACING_FLIP = false;
-    function drawLocoFacing(v, layerGroup) {
-        const body = v.body;
-        if (!body || body.length < 2) return;
-        const frontAt0 = (v.front0 !== false) !== LOCO_FACING_FLIP;   // default front0=true
+    // A locomotive is drawn as ONE arrow polygon (rectangle body + pointed nose at its
+    // front end) instead of a car's plain body line, so the powered unit and its facing
+    // read at a glance. Built in PIXEL space so its width matches the car bodies
+    // (rvBodyWeightPx) and it is rebuilt on zoom (updateTrainWidths), while its length
+    // stays geographic (the body endpoints). `body` = the loco's [lat,lon] body points;
+    // `frontAt0` = front is body[0].
+    function locoArrowLatLngs(body, frontAt0) {
+        const map = MapApp.map;
         const front = frontAt0 ? body[0] : body[body.length - 1];
-        const refs  = frontAt0 ? body : body.slice().reverse();   // front first, then into the body
-        // White fill + thin dark outline: reads on any loco colour and in both themes
-        // (the loco body already carries the company colour, so the arrow only needs to
-        // show direction). White pops on dark locos / dark mode; the outline keeps it
-        // visible on light locos and light backgrounds.
-        const arrow = L.polygon(_arrowLatLngs(front, refs), {
-            color: '#111', fillColor: '#fff', fillOpacity: 1,
-            weight: 1.5, opacity: 1, interactive: false
-        });
-        arrow._rvArrow = true; arrow._headTip = front; arrow._headRefs = refs;   // refit on zoom
-        arrow.addTo(layerGroup);
+        const back  = frontAt0 ? body[body.length - 1] : body[0];
+        const fp0 = map.latLngToLayerPoint(front), bp0 = map.latLngToLayerPoint(back);
+        let dx = fp0.x - bp0.x, dy = fp0.y - bp0.y;            // back -> front
+        const len0 = Math.hypot(dx, dy) || 1; dx /= len0; dy /= len0;
+        const nx = -dy, ny = dx;                              // perpendicular (px)
+        const half = rvBodyWeightPx() / 2;                    // match the car body width
+        // Extend each end by ~half the body width, matching the old round-cap pill's
+        // footprint so coupled locos abut (the body points are inset by one coupler
+        // offset per end; the pill's round caps used to fill that back, and this
+        // restores it). Nose is a fraction of the extended length, capped, so it stays
+        // a sensible arrowhead instead of ballooning on wide (zoomed-in) bodies.
+        const ext = half;
+        const fx = fp0.x + dx * ext, fy = fp0.y + dy * ext;   // extended nose tip
+        const bx = bp0.x - dx * ext, by = bp0.y - dy * ext;   // extended back edge
+        const span = Math.hypot(fx - bx, fy - by) || 1;
+        const nose = Math.min(1.8 * half, 0.33 * span);
+        const rx = fx - dx * nose, ry = fy - dy * nose;       // rectangle/nose junction
+        const pts = [
+            [bx + nx * half, by + ny * half],                // back, left
+            [rx + nx * half, ry + ny * half],                // nose base, left
+            [fx, fy],                                        // nose tip (front)
+            [rx - nx * half, ry - ny * half],                // nose base, right
+            [bx - nx * half, by - ny * half]                 // back, right
+        ];
+        return pts.map(p => map.layerPointToLatLng(L.point(p[0], p[1])));
     }
     // Draw one train as a single line tracing its length. Zoomed out, the head end
     // matters most: the body is a neutral grey and the LEAD locomotive gets a small
