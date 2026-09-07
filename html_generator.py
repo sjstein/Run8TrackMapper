@@ -741,6 +741,11 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     position: absolute;
                     bottom: 60px;
                     left: 10px;
+                    /* Size the panel to its widest row so the background always
+                       encloses the sliders (an absolutely-positioned shrink-to-fit
+                       box otherwise under-sizes flex rows in some browsers, letting
+                       the sliders overrun the right edge). */
+                    width: max-content;
                     background: white;
                     padding: 10px;
                     border-radius: 4px;
@@ -748,11 +753,29 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     z-index: 1000;
                     font-size: 12px;
                 }
-                #opacity-control input {
-                    width: 100px;
+                /* Each row: fixed-width text column + equal-length slider, vertically
+                   centered, so all sliders line up in one column. */
+                #opacity-control label {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    margin-top: 4px;
+                    /* Explicit row width (= label 84 + gap 8 + slider 110) so the
+                       panel's content width is deterministic. Firefox ignores a
+                       range input's flex-basis when measuring max-content, which
+                       otherwise sizes the panel to the text alone and lets the
+                       slider overrun the right edge. */
+                    width: 202px;
+                }
+                #opacity-control label:first-of-type { margin-top: 0; }
+                #opacity-control .oc-lbl { flex: 0 0 84px; white-space: nowrap; }
+                #opacity-control input[type=range] {
+                    width: 110px;
+                    flex: 0 0 110px;
+                    margin: 0;
                 }
             </style>
-            <label>Map Opacity: <input type="range" id="opacity-slider" min="0" max="100" value="${Math.round(mapOpacity * 100)}"></label>
+            <label><span class="oc-lbl">Map Opacity:</span><input type="range" id="opacity-slider" min="0" max="100" value="${Math.round(mapOpacity * 100)}"></label>
         `;
         document.body.appendChild(control);
 
@@ -2390,7 +2413,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
 
 ALIGN_JS = r'''
     // ================= Manual alignment (contiguous tile-based track over real map) =================
-    MapApp.align = null; MapApp._raw = {}; MapApp.trackOpacity = 0.8;
+    MapApp.align = null; MapApp._raw = {}; MapApp.trackOpacity = 0.8; MapApp.areaFontScale = 1.0;
     function applyTrackOpacity(){
         const op = MapApp.trackOpacity;
         for (const [id, reg] of MapApp.loadedRegions){
@@ -2408,15 +2431,31 @@ ALIGN_JS = r'''
         // Initial track opacity from the config ([visualization] initial_track_opacity).
         if (MapApp.manifest && MapApp.manifest.initial_track_opacity != null)
             MapApp.trackOpacity = MapApp.manifest.initial_track_opacity;
-        const div = document.createElement('div');
-        div.style.marginTop = '4px';
-        div.innerHTML = '<label>Track Opacity: <input type="range" id="track-opacity-slider" min="0" max="100" value="'
-            + Math.round(MapApp.trackOpacity * 100) + '"></label>';
-        ctl.appendChild(div);
+        const row = document.createElement('label');
+        row.innerHTML = '<span class="oc-lbl">Track Opacity:</span><input type="range" id="track-opacity-slider" min="0" max="100" value="'
+            + Math.round(MapApp.trackOpacity * 100) + '">';
+        ctl.appendChild(row);
         document.getElementById('track-opacity-slider').addEventListener('input', (e)=>{
             MapApp.trackOpacity = e.target.value/100; applyTrackOpacity();
         });
         applyTrackOpacity();
+    }
+    // Global "Label Size" slider (sits under Track Opacity): a relative multiplier on
+    // every area label's configured font_size, applied at render time by
+    // updateAreaLabelSizes(). It does NOT change the stored/authored sizes - it only
+    // scales how big the labels look in the live view, so a user can dial the whole
+    // label layer up or down for readability without editing each label.
+    function addAreaLabelFontSlider(){
+        const ctl = document.getElementById('opacity-control');
+        if (!ctl) return;
+        const row = document.createElement('label');
+        row.innerHTML = '<span class="oc-lbl">Label Size:</span><input type="range" id="area-font-slider" min="50" max="300" step="5" value="'
+            + Math.round(MapApp.areaFontScale * 100) + '">';
+        ctl.appendChild(row);
+        document.getElementById('area-font-slider').addEventListener('input', (e)=>{
+            MapApp.areaFontScale = e.target.value/100;
+            updateAreaLabelSizes();
+        });
     }
     function alignInit(){
         const a = MapApp.manifest.align;
@@ -2450,6 +2489,7 @@ ALIGN_JS = r'''
         MapApp.hasBackend = false;
         buildAlignUI();
         addTrackOpacitySlider();
+        addAreaLabelFontSlider();
         MapApp.overlayStates.areaLabels = false;
         addAreaLabelToggle();
         addTrainOptionsButton();
@@ -2828,9 +2868,11 @@ ALIGN_JS = r'''
         const scaleM = 100 * mpp;
         const lo = Math.log(AREA_LABEL_SCALE_MAX_M), hi = Math.log(AREA_LABEL_SCALE_MIN_M);
         let t = (Math.log(scaleM) - lo) / (hi - lo); t = Math.max(0, Math.min(1, t));
+        const scale = MapApp.areaFontScale || 1;   // global "Label Size" multiplier
         for (const rec of MapApp.areaMarkers){
             const el = rec.marker.getElement(); if (!el || !el.firstChild) continue;
-            el.firstChild.style.fontSize = (rec.baseFont + t*(AREA_LABEL_MIN_PX - rec.baseFont)).toFixed(1) + 'px';
+            const effBase = rec.baseFont * scale;   // scaled authored size; still collapses toward the floor when zoomed out
+            el.firstChild.style.fontSize = (effBase + t*(AREA_LABEL_MIN_PX - effBase)).toFixed(1) + 'px';
         }
     }
     function addAreaLabelToggle(){
