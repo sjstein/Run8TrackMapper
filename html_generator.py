@@ -45,6 +45,10 @@ def generate_javascript() -> str:
     // Rail-vehicle line widths from [trains] config, with safe defaults.
     // car = min px floor; carM = real car width (m) the body widens to with zoom.
     const TRAIN_STYLE = window.TRAIN_STYLE || {car: 7, spine: 1.5, carM: 3.5, labelScaleM: 30, labelSize: 14, lodScaleM: 300, lodMinCars: 3, lodColor: '#5f6368'};
+    // Signal glyph ([signals] config). sizeM is the glyph footprint (m); showIntermediate
+    // is the initial state of the Absolute/Intermediate filter. Signals draw at their true
+    // .r8 positions (no offset).
+    const SIGNAL_STYLE = window.SIGNAL_STYLE || {sizeM: 7.5, showIntermediate: true};
 
     // Track line width from [track] config: full `width` px at/above `fullZoom`,
     // halving per zoom level below that down to `minWidth` (fullZoom 0 = fixed width).
@@ -244,6 +248,10 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         document.documentElement.setAttribute('data-theme', mode);
         const cb = document.getElementById('theme-toggle');
         if (cb) cb.checked = (mode === 'dark');
+        // Signal glyphs are canvas-drawn, so their outline colour must be re-baked when
+        // the theme flips (light black <-> dark light-grey). Guarded for early calls.
+        if (typeof rerenderSignals === 'function' && MapApp.loadedRegions && MapApp.loadedRegions.size)
+            rerenderSignals();
     }
     function setTheme(mode) {
         applyTheme(mode);
@@ -568,6 +576,11 @@ html[data-theme="dark"] .leaflet-control-scale-line{
 
             const checkbox = item.querySelector('input');
             checkbox.addEventListener('change', () => toggleOverlay(overlay.id, checkbox.checked));
+
+            // Signals: a "Filter" button (Absolute / Intermediate) beside the row,
+            // mirroring the Area Labels filter. Absolutes are the dispatcher-relevant
+            // signals; hiding intermediates de-clutters.
+            if (overlay.id === 'signals') addSignalFilterButton(item);
         }
 
         // Setup local symbol filter dropdown
@@ -952,60 +965,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 MapApp.sectionIndex.set(secKey(regionId, section.id), {region_id: regionId, polyline: sectionGroup, metadata: section, originalColor: originalColor});
             }
 
-            // Render signals as directional triangles
-            for (const signal of data.signals) {
-                const fillColor = signal.type === 'absolute' ? COLORS.signalAbsolute : COLORS.signalIntermediate;
-                // Border color based on head count (single vs stacked)
-                const isStacked = signal.stacked_ids && signal.stacked_ids.length > 1;
-                const borderColor = isStacked ? COLORS.signalBorderStacked : COLORS.signalBorderSingle;
-
-                // Create triangle pointing in signal direction
-                // rotation is in degrees, convert to radians and flip 180 degrees
-                const rotRad = (signal.rotation * Math.PI / 180) + Math.PI;
-                const size = 0.00023;  // Triangle size in degrees (approx 15m)
-
-                // Triangle vertices: tip points in rotation direction
-                const tip = [
-                    signal.lat + size * Math.cos(rotRad),
-                    signal.lon + size * Math.sin(rotRad) / Math.cos(signal.lat * Math.PI / 180)
-                ];
-                const baseAngle1 = rotRad + 2.5;  // ~143 degrees back
-                const baseAngle2 = rotRad - 2.5;  // ~143 degrees back
-                const baseSize = size * 0.6;
-                const base1 = [
-                    signal.lat + baseSize * Math.cos(baseAngle1),
-                    signal.lon + baseSize * Math.sin(baseAngle1) / Math.cos(signal.lat * Math.PI / 180)
-                ];
-                const base2 = [
-                    signal.lat + baseSize * Math.cos(baseAngle2),
-                    signal.lon + baseSize * Math.sin(baseAngle2) / Math.cos(signal.lat * Math.PI / 180)
-                ];
-
-                const marker = L.polygon([tip, base1, base2], {
-                    fillColor: fillColor,
-                    color: borderColor,
-                    weight: 2,
-                    fillOpacity: 0.9
-                });
-
-                // Build detailed signal popup
-                let signalPopup = `<b>${signal.name}</b><br>`;
-                signalPopup += `Model: ${signal.model_name}<br>`;
-                signalPopup += `Type: ${signal.type === 'absolute' ? 'Absolute' : 'Intermediate'}<br>`;
-                signalPopup += `Dwarf: ${signal.is_dwarf ? 'Yes' : 'No'}<br>`;
-                signalPopup += `Switch Indicator: ${signal.is_switch_indicator ? 'Yes' : 'No'}<br>`;
-                signalPopup += `Advance Diverging: ${signal.is_advance_diverging ? 'Yes' : 'No'}`;
-
-                marker.bindPopup(signalPopup, {maxWidth: 300});
-                // Show all stacked signal IDs in tooltip for multi-head signals
-                const tooltipText = isStacked
-                    ? `Signals ${signal.stacked_ids.join(', ')}`
-                    : signal.name;
-                marker.bindTooltip(tooltipText, {sticky: true});
-
-                layers.signals.addLayer(marker);
-                MapApp.signalIndex.set(secKey(regionId, signal.id), {region_id: regionId, marker, metadata: signal});
-            }
+            // Signals: dispatcher-style glyphs drawn at their true .r8 positions (see renderSignals).
+            renderSignals(regionId, data, layers);
 
             // Render industries and track industry section IDs
             for (let i = 0; i < data.industries.length; i++) {
@@ -1446,6 +1407,160 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             else MapApp.map.removeLayer(region.layers.trainLabels);
         });
         updateTrainCount();
+    }
+    // ---- Signal glyph rendering ----
+    // Signals are drawn at their TRUE .r8 mast position (Run8 is ground truth): the raw
+    // position is already offset to the correct side of the governed track, so there is no
+    // artificial offset, side-guessing, or manual placement.
+    // Mast/head outline colour. Black (config signal_border_single) reads well on the
+    // light map but disappears in night mode, so use a light stroke when the theme is
+    // dark. Canvas colours are baked at draw time -> applyTheme re-renders on a change.
+    function signalOutlineColor() {
+        return (typeof currentTheme === 'function' && currentTheme() === 'dark')
+            ? '#e8e8e8' : COLORS.signalBorderSingle;
+    }
+    // Glyph geometry (metres) at the signal's true position: head centre [lat,lon], the
+    // mast+crossbar multi-segment latlngs, and the head radius. The crossbar(s) point the
+    // facing direction (rotation + 180, same as the old triangle tip); stacked heads add
+    // extra shorter crossbars.
+    function signalGlyphGeom(signal) {
+        const s = SIGNAL_STYLE.sizeM || 7.5, headR = 0.34 * s;
+        const rot = (signal.rotation * Math.PI / 180) + Math.PI;
+        const cosLat = Math.cos(signal.lat * Math.PI / 180) || 1e-6;
+        const M2LAT = 1 / 111320, M2LON = 1 / (111320 * cosLat);
+        const fE = Math.sin(rot), fN = Math.cos(rot);
+        const pt = (F) => [signal.lat + F * fN * M2LAT, signal.lon + F * fE * M2LON];
+        const perp = (F, half) => {   // crossbar endpoints: F forward, +/-half lateral
+            const rE = Math.cos(rot), rN = -Math.sin(rot);
+            return [[signal.lat + (F * fN - half * rN) * M2LAT, signal.lon + (F * fE - half * rE) * M2LON],
+                    [signal.lat + (F * fN + half * rN) * M2LAT, signal.lon + (F * fE + half * rE) * M2LON]];
+        };
+        const heads = (signal.stacked_ids && signal.stacked_ids.length > 1) ? signal.stacked_ids.length : 1;
+        const headC = pt(0);
+        const segs = [[pt(headR), pt(s)]];        // stem (circle edge -> tip)
+        for (let i = 0; i < heads; i++) {         // head 1 full at tip; extras shorter, set back
+            const half = 0.55 * s * (1 - 0.30 * i);
+            segs.push(perp(s - 0.28 * s * i, half));
+        }
+        return { headC, segs, headR };
+    }
+    function signalInfoHtml(signal) {
+        let h = `<b>${signal.name}</b><br>`;
+        h += `Model: ${signal.model_name}<br>`;
+        h += `Type: ${signal.type === 'absolute' ? 'Absolute' : 'Intermediate'}<br>`;
+        h += `Dwarf: ${signal.is_dwarf ? 'Yes' : 'No'}<br>`;
+        h += `Switch Indicator: ${signal.is_switch_indicator ? 'Yes' : 'No'}<br>`;
+        h += `Advance Diverging: ${signal.is_advance_diverging ? 'Yes' : 'No'}`;
+        return h;
+    }
+    // (Re)draw one region's signals from its data + current type filter.
+    // Safe to call repeatedly (clears the region's signal layers/index first).
+    function renderSignals(regionId, data, layers) {
+        for (const [k, d] of MapApp.signalIndex) if (d.region_id === regionId) MapApp.signalIndex.delete(k);
+        layers.signals.clearLayers();
+        if (!MapApp.signalTypeVisible)
+            MapApp.signalTypeVisible = { absolute: true, intermediate: SIGNAL_STYLE.showIntermediate !== false };
+        const tv = MapApp.signalTypeVisible;
+        const border = signalOutlineColor();
+        // Dedupe physical stacks: the extractor emits one record carrying all member ids
+        // PLUS a solo record per member, so draw one representative per stack and drop the
+        // solo members (their ids still map to the rep's marker below for search).
+        const stackMemberIds = new Set();
+        for (const sg of (data.signals || []))
+            if (sg.stacked_ids && sg.stacked_ids.length > 1)
+                for (const m of sg.stacked_ids) stackMemberIds.add(m);
+        const seen = new Set(), reps = [];
+        for (const sg of (data.signals || [])) {
+            const st = (sg.stacked_ids && sg.stacked_ids.length) ? sg.stacked_ids : [sg.id];
+            if (st.length > 1) {
+                const key = st.slice().sort((a, b) => a - b).join(',');
+                if (seen.has(key)) continue;
+                seen.add(key); reps.push(sg);
+            } else if (!stackMemberIds.has(sg.id)) {
+                reps.push(sg);
+            }
+        }
+        // Type filter (absolute always on; intermediate toggled by the Signals filter).
+        const drawSignals = reps.filter(sg => tv[sg.type] !== false);
+        for (const signal of drawSignals) {
+            const fillColor = signal.type === 'absolute' ? COLORS.signalAbsolute : COLORS.signalIntermediate;
+            const g = signalGlyphGeom(signal);
+            const mast = L.polyline(g.segs, { color: border, weight: 3, lineCap: 'round' });
+            const head = L.circle(g.headC, { radius: g.headR, color: border, weight: 2,
+                fillColor: fillColor, fillOpacity: 0.9 });
+            const marker = L.featureGroup([mast, head]);
+            const tooltipText = (signal.stacked_ids && signal.stacked_ids.length > 1)
+                ? `Signals ${signal.stacked_ids.join(', ')}` : signal.name;
+            marker.bindTooltip(tooltipText, { sticky: true });
+            marker.bindPopup(signalInfoHtml(signal), { maxWidth: 300 });
+            layers.signals.addLayer(marker);
+            const idxIds = (signal.stacked_ids && signal.stacked_ids.length) ? signal.stacked_ids : [signal.id];
+            for (const mid of idxIds)
+                MapApp.signalIndex.set(secKey(regionId, mid), { region_id: regionId, marker, metadata: signal });
+        }
+    }
+    function rerenderRegionSignals(regionId) {
+        const region = MapApp.loadedRegions.get(regionId);
+        if (!region || !region.layers || !region.layers.signals) return;
+        renderSignals(regionId, region.data, region.layers);
+        if (MapApp.overlayStates.signals) region.layers.signals.addTo(MapApp.map);
+    }
+    function rerenderSignals() {
+        for (const [id] of MapApp.loadedRegions) rerenderRegionSignals(id);
+    }
+    // A "Filter" button beside the Signals row that opens the Absolute/Intermediate
+    // popover (mirrors the Area Labels filter button; keeps the overlay panel tidy).
+    function addSignalFilterButton(item) {
+        if (!MapApp.signalTypeVisible)
+            MapApp.signalTypeVisible = { absolute: true, intermediate: SIGNAL_STYLE.showIntermediate !== false };
+        const btn = document.createElement('button');
+        btn.id = 'signal-filter-btn'; btn.type = 'button';
+        btn.title = 'Choose which signal types to show';
+        btn.textContent = 'Filter';
+        btn.style.cssText = 'margin-left:auto;font-size:11px;padding:1px 7px;cursor:pointer;';
+        item.appendChild(btn);
+        btn.addEventListener('click', (e) => { e.stopPropagation(); toggleSignalFilterPopover(e.currentTarget); });
+    }
+    function closeSignalFilterPopover() {
+        const pop = document.getElementById('signal-filter-popover');
+        if (pop) pop.remove();
+        document.removeEventListener('mousedown', signalFilterAway, true);
+    }
+    function signalFilterAway(e) {
+        const pop = document.getElementById('signal-filter-popover');
+        if (pop && !pop.contains(e.target) && e.target.id !== 'signal-filter-btn') closeSignalFilterPopover();
+    }
+    function toggleSignalFilterPopover(anchorBtn) {
+        if (document.getElementById('signal-filter-popover')) { closeSignalFilterPopover(); return; }
+        const tv = MapApp.signalTypeVisible || (MapApp.signalTypeVisible =
+            { absolute: true, intermediate: SIGNAL_STYLE.showIntermediate !== false });
+        const rows = [['absolute', 'Absolute', COLORS.signalAbsolute],
+                      ['intermediate', 'Intermediate', COLORS.signalIntermediate]];
+        const pop = document.createElement('div'); pop.id = 'signal-filter-popover';
+        pop.style.cssText = 'position:fixed;z-index:3000;background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);border-radius:6px;'
+            + 'box-shadow:0 2px 12px var(--shadow);padding:8px 10px;font:12px Arial;min-width:150px;';
+        pop.innerHTML = '<div style="font-weight:bold;margin-bottom:6px;">Show signal types</div>';
+        for (const [id, label, color] of rows) {
+            const row = document.createElement('label');
+            row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;';
+            row.innerHTML = '<input type="checkbox" id="sigflt-' + id + '"' + (tv[id] ? ' checked' : '') + '>'
+                + '<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:' + color + ';border:1px solid rgba(0,0,0,.4);"></span>'
+                + label;
+            pop.appendChild(row);
+            row.querySelector('input').addEventListener('change', (e) => setSignalTypeVisible(id, e.target.checked));
+        }
+        document.body.appendChild(pop);
+        const r = anchorBtn.getBoundingClientRect();
+        const pw = pop.offsetWidth;
+        let left = r.left; if (left + pw > window.innerWidth - 6) left = window.innerWidth - 6 - pw;
+        pop.style.top = (r.bottom + 4) + 'px';
+        pop.style.left = Math.max(6, left) + 'px';
+        setTimeout(() => document.addEventListener('mousedown', signalFilterAway, true), 0);
+    }
+    function setSignalTypeVisible(type, on) {
+        if (!MapApp.signalTypeVisible) MapApp.signalTypeVisible = { absolute: true, intermediate: true };
+        MapApp.signalTypeVisible[type] = on;
+        rerenderSignals();
     }
 
     // Lower-right status (above the coordinates): whole-world-save totals, which
@@ -2773,7 +2888,7 @@ ALIGN_JS = r'''
         const btn = document.createElement('button');
         btn.id = 'train-options-btn'; btn.type = 'button';
         btn.title = 'Train display options';
-        btn.textContent = 'Options';
+        btn.textContent = 'Filter';
         btn.style.cssText = 'margin-left:auto;font-size:11px;padding:1px 7px;cursor:pointer;';
         item.appendChild(btn);
         btn.addEventListener('click', (e)=>{ e.stopPropagation(); toggleTrainOptionsPopover(e.currentTarget); });
@@ -3257,7 +3372,8 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
 <div id="map"></div>
 {color_config}
 <script>window.TRAIN_STYLE = {{car: {config.train_car_width}, spine: {config.train_spine_width}, carM: {config.train_car_width_m}, labelScaleM: {config.train_label_scale_m}, labelSize: {config.train_label_size}, lodScaleM: {config.train_lod_scale_m}, lodMinCars: {config.train_lod_min_cars}, lodColor: '{config.train_lod_color}'}};
-window.TRACK_STYLE = {{width: {config.track_width}, minWidth: {config.track_min_width}, fullZoom: {config.track_full_zoom}}};</script>
+window.TRACK_STYLE = {{width: {config.track_width}, minWidth: {config.track_min_width}, fullZoom: {config.track_full_zoom}}};
+window.SIGNAL_STYLE = {{sizeM: {config.signal_size_m}, showIntermediate: {str(config.signal_show_intermediate).lower()}}};</script>
 <script>window.__run8_authoring = {authoring_js}; window.__run8map = L.map('map', {{preferCanvas:true, maxZoom:22, zoomControl:true}}).setView([35,-117.8],9);</script>
 {js}
 </body></html>'''

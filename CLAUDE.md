@@ -351,6 +351,36 @@ run reproduces everything.
 Without the server, the flow is still: popup **Generate INI** → paste the `[area.*]`
 block into the areas file → re-run `output_generator.py`.
 
+#### Signals (dispatcher-style glyphs)
+Signals render as a **circle + T** glyph (a head with a mast and one crossbar per head,
+the crossbar pointing the way the signal faces — same direction the old triangle tip
+pointed, `rotation + 180°`). Fill colour = type (`absolute`/`intermediate`); **stacked
+heads add extra, shorter crossbars** (no ring-colour change). Everything is a canvas
+vector (`preferCanvas`) built in metres, so there is no DOM per signal and no perf hit at
+scale. Code: `renderSignals` / `signalGlyphGeom` in `ALIGN_JS`.
+
+- **Drawn at the true position (Run8 is ground truth).** The `.r8` `SignalHead.position` is
+  the real mast location, already offset ~3.5 m to the **correct side** of the governed
+  track (97% of signals sit >2 m off centreline; the side — including same-facing pairs on
+  *opposite* sides — is in the data). The glyph is drawn at that true point, so there is no
+  artificial offset, side-guessing, overlap-flip, or manual placement. Zoomed out, signals
+  merge onto the line, which is expected. Config: `[signals] size_m` (glyph length, 7.5 m).
+- **Outline colour is theme-aware.** The mast/head outline is `[colors] signal_border_single`
+  (black) on the light map but a light grey (`#e8e8e8`) in night mode, since black
+  disappears there (`signalOutlineColor`). Canvas colours are baked at draw time, so
+  `applyTheme` calls `rerenderSignals` when the theme flips.
+- **Stacked dedupe.** `extract_signals` emits a stacked signal as ONE record listing every
+  member id in `stacked_ids` PLUS a solo record per member; the viewer draws **one
+  representative per stack** and drops the members' solo records (each member id still maps
+  to the rep's marker so search by any member id works). Without this a stacked signal is
+  also drawn as a phantom lone signal.
+- **Type filter.** A **Filter** button beside the Signals overlay row opens an
+  **Absolute / Intermediate** popover (`addSignalFilterButton` / `toggleSignalFilterPopover`
+  / `setSignalTypeVisible`, re-renders via `rerenderSignals`), mirroring the Area Labels
+  filter (and the Trains "Filter" button). Intermediates are the usual clutter; hiding them
+  gives a dispatcher-style view. Initial state: `[signals] show_intermediate` (default true),
+  emitted as `manifest.signal_show_intermediate`.
+
 #### Interactive Map Features
 - **Base Map Selection**: OpenStreetMap, Satellite (Esri), or None, plus a toggleable **OpenRailwayMap** overlay
 - **Region Toggle**: Enable/disable regions dynamically (data loaded on demand); in the align viewer, enabling a region fits the map to it
