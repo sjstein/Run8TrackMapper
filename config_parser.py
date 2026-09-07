@@ -162,6 +162,10 @@ class VisualizationConfig:
     track_full_zoom: float = 14.0   # [track] full_zoom: zoom at/above which the line shows full
                                     # width; below it the width halves per zoom level down to
                                     # min_width. 0 disables scaling (fixed `width` at every zoom).
+    # ---- signal glyph (dispatcher-style circle + T; drawn at true .r8 position) ----
+    signal_size_m: float = 7.5           # [signals] size_m: glyph footprint length (m).
+    signal_show_intermediate: bool = True  # [signals] show_intermediate: initial state of the
+                                           # intermediate-signal filter (absolutes always start on).
     train_car_width: float = 7.0    # [trains] car_width: RV body min line width (px floor)
     train_spine_width: float = 1.5  # [trains] spine_width: train connecting-line width (px)
     train_car_width_m: float = 3.5  # [trains] car_width_m: real RV width (m); RVs widen with
@@ -544,6 +548,16 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         track_min_width = _cfg_float(tk, 'min_width', track_min_width)
         track_full_zoom = _cfg_float(tk, 'full_zoom', track_full_zoom)
 
+    # Parse [signals] section (optional): dispatcher-style glyph placement.
+    signal_size_m = 7.5
+    signal_show_intermediate = True
+    if 'signals' in parser:
+        sg = parser['signals']
+        signal_size_m = _cfg_float(sg, 'size_m', signal_size_m)
+        _si = sg.get('show_intermediate', '').split(';', 1)[0].split('#', 1)[0].strip().lower()
+        if _si:
+            signal_show_intermediate = _si in ('1', 'true', 'yes', 'on')
+
     # Parse [car_type_colors] (optional): INDUSTRY_CONFIG_CAR_TYPE -> hex colour for
     # the RV body. configparser lower-cases keys, so match car types case-insensitively.
     car_type_colors = {}
@@ -639,6 +653,8 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         track_width=track_width,
         track_min_width=track_min_width,
         track_full_zoom=track_full_zoom,
+        signal_size_m=signal_size_m,
+        signal_show_intermediate=signal_show_intermediate,
         car_type_colors=car_type_colors,
         loco_company_colors=loco_company_colors,
         areas=areas,
