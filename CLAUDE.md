@@ -141,8 +141,14 @@ back to `[colors] train` when a type has no entry. Both maps are parsed to
 (`isLoco ? locoCompanyColor(v.company) || trainLoco : carTypeColor(v.car_type) || train`). `car_type`
 and `company` per vehicle come from `rv_length_db` (`RvInfo.car_type` — locos are `Locomotive`;
 `RvInfo.company` — loco `INITIAL`, cars `""`) via `extract_trains`, emitted on each RV in the region JSON.
-Locomotives also render with **rounded end-caps** (a pill shape; `lineCap: isLoco ? 'round' : 'butt'`)
-so they read as the powered unit without relying on colour. All vehicles share one line weight.
+A **locomotive is drawn as one arrow polygon** (a body rectangle with a pointed nose at its
+front end; `locoArrowLatLngs` / `_locoArrow` in `generate_javascript`) instead of a car's plain
+body line, so the powered unit and its facing read at a glance. The nose points at the loco's
+front (`v.front0`, viewer-flippable via `LOCO_FACING_FLIP`). The polygon is built in pixel space
+so its width matches the car bodies (`rvBodyWeightPx`) and is rebuilt on zoom by
+`updateTrainWidths`, while its length stays geographic. This replaced the earlier pill body +
+white facing triangle. (The zoomed-out collapsed-train view keeps its own lead-loco arrow.)
+Cars stay blunt body lines; all vehicles share one line weight.
 Each **train** (cars sharing a `train_id`) also gets a **thin connecting spine** through its cars, so a
 consist reads as one unit (`drawTrainOutline` in `generate_javascript`: cars are chained by
 nearest-neighbour so the spine follows the train even across sections / mis-ordered XML; the spine runs
