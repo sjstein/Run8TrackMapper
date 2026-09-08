@@ -109,16 +109,18 @@ no longer places trains. Emitted to the region JSON as `trains` (`train_to_dict`
 `rail_vehicle_to_dict`).
 
 **True vehicle length** (optional): with `[visualization] railvehicle_db = db_railvehicles.db`
-(a SQLite DB — `loco_data` / `car_data` tables keyed by `R8_FILENAME`, columns `RV_LENGTH` and
-`COUPLER_OFFSET`, both feet), the body is grown from the truck-to-truck span toward the real
-vehicle length. `RV_LENGTH` is the *coupled footprint* (over pulling faces) — drawing it whole
-makes coupled cars **abut with no visible gap**, so we draw the car **body between the couplers**:
-`body = RV_LENGTH - 2 * COUPLER_OFFSET`, extended past each truck by
-`overhang = (body_m - truck_span) / 2` (kept centred on the trucks). The dropped couplers become
-the gap between adjacent cars. Loaded by **`rv_length_db.load_rv_lengths()`** (→
-`{rvXMLfilename.lower(): (length_m, coupler_offset_m)}`) and passed to
-`extract_trains(..., rv_lengths=...)`. Only meaningful in the metre-based (tile/align) coord mode;
-without the DB the body stays the truck-to-truck span.
+(a SQLite DB — `loco_data` / `car_data` tables keyed by `R8_FILENAME`, column `RV_LENGTH` in feet),
+the body is grown from the truck-to-truck span toward the real vehicle length. `RV_LENGTH` is the
+*coupled footprint* (over pulling faces) — drawing it whole makes coupled cars **abut with no
+visible gap**, so we draw the car body slightly shorter: `body = RV_LENGTH - coupler_gap_m`, i.e.
+inset by half of a **fixed** `[trains] coupler_gap_m` (default **1 m**) at each end, so adjacent
+coupled cars keep a small realistic gap. (The DB's `COUPLER_OFFSET` column is **not** used — per
+the DB's designer it is the truck-to-truck distance between coupled RVs, not a coupler length;
+using it made bodies ~23% short. See the `coupler-offset-too-large` memory.) `RV_LENGTH` still
+drives the placement slots and the reported length total, so `coupler_gap_m` only changes the
+visible gap. Loaded by **`rv_length_db.load_rv_lengths()`** and passed to
+`extract_trains(..., rv_lengths=..., coupler_gap_m=...)`. Only meaningful in the metre-based
+(tile/align) coord mode; without the DB the body stays the truck-to-truck span.
 
 **Viewer:** a **Trains** overlay (each car a body polyline; length is the true car length when
 `railvehicle_db` is set, otherwise the truck-to-truck span) with per-vehicle popups (train id / unit / type / destination) and

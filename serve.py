@@ -132,6 +132,7 @@ class AuthoringState:
         self.move_hysteresis = int(getattr(config, 'train_moving_hysteresis', 0)) if config else 0
 
         self.train_deoverlap = getattr(config, 'train_deoverlap', True) if config else True
+        self.train_coupler_gap_m = getattr(config, 'train_coupler_gap_m', 1.0) if config else 1.0
 
         # Optional rail-vehicle length DB (true car length drawn over the trucks).
         self.rv_lengths = None
@@ -200,7 +201,8 @@ class AuthoringState:
                 prefix_to_region[prefix] = region_id
         placer = build_section_placer(region_sections)
         by_prefix = extract_trains(parsed, placer, rv_lengths=self.rv_lengths,
-                                   deoverlap=self.train_deoverlap)
+                                   deoverlap=self.train_deoverlap,
+                                   coupler_gap_m=self.train_coupler_gap_m)
 
         trains_by_region = {}
         cur_pos = {}
