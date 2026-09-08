@@ -156,6 +156,8 @@ class VisualizationConfig:
     initial_track_opacity: float = 0.8  # [visualization] initial_track_opacity: track slider (fraction)
     world_save: Optional[Path] = None  # optional Run8 world save (.xml) to plot trains from
     railvehicle_db: Optional[Path] = None  # optional SQLite DB of rail-vehicle lengths
+    industry_file: Optional[Path] = None  # optional explicit Config.ind path ([visualization]
+                                          # industry_file); overrides the region_dir/Config.ind default
     # ---- track line width (zoom-scaled) ----
     track_width: float = 5.0        # [track] width: full track line width (px) at/above full_zoom
     track_min_width: float = 1.5    # [track] min_width: floor width (px) when zoomed far out
@@ -200,8 +202,9 @@ class VisualizationConfig:
 
     @property
     def industry_db(self) -> Path:
-        """Path to industry database file (derived from region_dir)"""
-        return self.region_dir / INDUSTRY_DB_FILENAME
+        """Path to the industry database (Config.ind). Uses an explicit
+        [visualization] industry_file when given, else region_dir/Config.ind."""
+        return self.industry_file if self.industry_file else (self.region_dir / INDUSTRY_DB_FILENAME)
 
     @property
     def terrain_tile_dir(self) -> Path:
@@ -348,6 +351,11 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         region_dir_str = viz.get('region_dir', '').strip()
         if not region_dir_str:
             errors.append("[visualization] region_dir is required")
+
+        # Optional industry_file: an explicit path to the industry database (Config.ind).
+        # When given it overrides the default region_dir/Config.ind; resolved relative to
+        # the config dir. (Terrain tiles are still taken from region_dir.)
+        industry_file_str = viz.get('industry_file', '').strip()
 
         # Optional world_save: a Run8 world save (.xml) to plot trains from.
         # A --world CLI switch overrides this; resolved relative to the config dir.
@@ -645,6 +653,7 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         initial_track_opacity=initial_track_opacity,
         world_save=(config_file.parent / world_save_str) if world_save_str else None,
         railvehicle_db=(config_file.parent / railvehicle_db_str) if railvehicle_db_str else None,
+        industry_file=(config_file.parent / industry_file_str) if industry_file_str else None,
         train_car_width=train_car_width,
         train_spine_width=train_spine_width,
         train_car_width_m=train_car_width_m,
@@ -684,11 +693,17 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
     if not config.region_dir.exists():
         file_errors.append(f"[visualization] region_dir not found: {config.region_dir}")
     else:
-        # Validate derived paths
-        if not config.industry_db.exists():
-            file_errors.append(f"[visualization] industry_db not found: {config.industry_db} (derived from region_dir)")
+        # Terrain tiles are always taken from region_dir.
         if not config.terrain_tile_dir.exists():
             file_errors.append(f"[visualization] terrain tile directory not found: {config.terrain_tile_dir} (derived from region_dir)")
+        # The default (derived) industry DB is under region_dir; only check it here when
+        # no explicit industry_file overrides it (that case is validated below).
+        if not config.industry_file and not config.industry_db.exists():
+            file_errors.append(f"[visualization] industry_db not found: {config.industry_db} "
+                               f"(derived from region_dir; set [visualization] industry_file to override)")
+    # An explicit industry_file is validated regardless of region_dir (it may live elsewhere).
+    if config.industry_file and not config.industry_db.exists():
+        file_errors.append(f"[visualization] industry_file not found: {config.industry_db}")
 
     for region in config.regions:
         if not region.directory.exists():
@@ -795,6 +810,11 @@ tile_corrections = tile_corrections_socal.csv
 # are automatically derived from this path
 region_dir = C:\\Run8Studios\\Run8 Train Simulator V3\\Content\\V3Routes\\Regions\\SouthernCA
 
+# (Optional) Explicit path to the industry database (Config.ind), resolved relative to
+# this config's directory. If set, it overrides the default region_dir/Config.ind.
+# Terrain tiles are still taken from region_dir.
+# industry_file = Config_socal.ind
+
 # (Optional) Initial map center as lat,lon (e.g., 34.9,-118.0)
 # If not specified, uses a default center
 # initial_center = 34.9,-118.0
@@ -895,7 +915,7 @@ if __name__ == '__main__':
             print(f"  Name: {config.name}")
             print(f"  Tile corrections: {config.tile_corrections}")
             print(f"  Region dir: {config.region_dir}")
-            print(f"  Industry DB (derived): {config.industry_db}")
+            print(f"  Industry DB ({'explicit' if config.industry_file else 'derived'}): {config.industry_db}")
             print(f"  Terrain tiles (derived): {config.terrain_tile_dir}")
             print(f"  Output directory: {config.output_dir}")
             print(f"  Regions: {len(config.regions)}")

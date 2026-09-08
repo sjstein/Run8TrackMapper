@@ -213,7 +213,11 @@ output/<name>/
 [visualization]
 name = Southern California
 tile_corrections = tile_corrections.csv
-industry_db = C:\Run8Studios\...\Regions\SouthernCA\Config.ind
+# Region directory: the industry database (Config.ind) and TerrainTiles are derived from it.
+region_dir = C:\Run8Studios\...\Regions\SouthernCA
+# Optional: explicit path to the industry database (Config.ind), resolved relative to this
+# config's dir. Overrides the derived region_dir/Config.ind (terrain tiles still use region_dir).
+# industry_file = Config_socal.ind
 # Optional: initial map center as lat,lon
 initial_center = 34.9,-118.0
 # Optional: initial opacity slider values (percent 0-100 or 0-1 fraction; defaults map 20, track 80)
