@@ -186,6 +186,9 @@ class VisualizationConfig:
     train_deoverlap: bool = True    # [trains] deoverlap: lay each consist's cars end-to-end
                                     # (front->back XML order, DB length, midpoint anchor) so
                                     # coupled cars don't overlap. False = raw per-truck placement.
+    train_coupler_gap_m: float = 1.0  # [trains] coupler_gap_m: fixed gap (m) drawn between two
+                                      # coupled car bodies (each end inset by half). Replaces the
+                                      # DB COUPLER_OFFSET, which is not a coupler length.
     areas: List[AreaLabel] = field(default_factory=list)  # user-defined area/place labels
     color_presets: Dict[str, str] = field(
         default_factory=lambda: dict(DEFAULT_COLOR_PRESETS))  # name -> hex label-color palette
@@ -525,8 +528,10 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
     train_lod_color = "#5f6368"
     train_moving_hysteresis = 2
     train_deoverlap = True
+    train_coupler_gap_m = 1.0
     if 'trains' in parser:
         ts = parser['trains']
+        train_coupler_gap_m = _cfg_float(ts, 'coupler_gap_m', train_coupler_gap_m)
         train_car_width = _cfg_float(ts, 'car_width', train_car_width)
         train_spine_width = _cfg_float(ts, 'spine_width', train_spine_width)
         train_car_width_m = _cfg_float(ts, 'car_width_m', train_car_width_m)
@@ -650,6 +655,7 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         train_lod_color=train_lod_color,
         train_moving_hysteresis=train_moving_hysteresis,
         train_deoverlap=train_deoverlap,
+        train_coupler_gap_m=train_coupler_gap_m,
         track_width=track_width,
         track_min_width=track_min_width,
         track_full_zoom=track_full_zoom,

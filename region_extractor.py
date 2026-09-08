@@ -2097,7 +2097,8 @@ def _loco_front_at_zero(ta, tb, body) -> bool:
 
 def extract_trains(trains, placer: "_SectionPlacer",
                    rv_lengths: Optional[Dict[str, str]] = None,
-                   deoverlap: bool = True) -> Dict[int, List[TrainData]]:
+                   deoverlap: bool = True,
+                   coupler_gap_m: float = 1.0) -> Dict[int, List[TrainData]]:
     """Place a parsed world save's trains against a multi-region section placer.
 
     Each truck is located by its own ``(route_prefix, section_index)`` (see
@@ -2109,10 +2110,14 @@ def extract_trains(trains, placer: "_SectionPlacer",
         trains: list of world_parser.Train records.
         placer: a :class:`_SectionPlacer` spanning all regions (see
             :func:`build_section_placer`).
-        rv_lengths: optional {rvXMLfilename.lower(): (length_m, coupler_offset_m,
-            car_type)} from rv_length_db.load_rv_lengths(). When given, each car
-            body is drawn at its real *body* length - the coupled footprint minus
-            one coupler per end - so adjacent coupled cars keep a visible gap.
+        rv_lengths: optional {rvXMLfilename.lower(): RvInfo(...)} from
+            rv_length_db.load_rv_lengths(). When given, each car body is drawn at its
+            real body length (the RV_LENGTH coupled footprint minus a fixed
+            ``coupler_gap_m`` split across its two ends) so adjacent coupled cars keep
+            a small realistic gap.
+        coupler_gap_m: fixed gap (metres) drawn between two coupled car bodies
+            (default 1.0). Each car end is inset by half of it. RV_LENGTH still drives
+            placement slots + the length total, so this only changes the visible gap.
         deoverlap: when True (default), each consist's cars are laid end to end
             along its section chain (front->back order, DB length, midpoint anchor)
             so coupled cars can't overlap. When False, each car is drawn between
@@ -2127,6 +2132,12 @@ def extract_trains(trains, placer: "_SectionPlacer",
         # Resolve every car's trucks + DB length/type/company once, in world-save
         # (front->back) order. Body length = coupled footprint minus a coupler at
         # each end, so adjacent coupled cars keep a visible gap instead of abutting.
+        # Gap between two coupled car bodies is a fixed constant (coupler_gap_m),
+        # split as half an inset per car end. The DB's COUPLER_OFFSET is NOT a coupler
+        # length (it's the truck-to-truck distance between coupled RVs, per the DB's
+        # designer), so it is not used for the body gap. RV_LENGTH (the coupled
+        # footprint) still drives placement slots and the length total, unchanged.
+        half_gap_m = max(0.0, coupler_gap_m) / 2.0
         metas = []   # (v, ta, tb, body_len_m, full_len_m, coupler_m, car_type, company)
         # Whole-consist totals (length + gross tonnage), computed over every vehicle
         # before the per-region split, so each region slice reports the full train.
@@ -2141,7 +2152,7 @@ def extract_trains(trains, placer: "_SectionPlacer",
                 entry = rv_lengths.get((v.rv_filename or '').strip().lower())
                 if entry:
                     full_len_m = entry.length_m
-                    coupler_m = entry.coupler_m
+                    coupler_m = half_gap_m   # fixed half-gap per end (see above), not entry.coupler_m
                     car_type = entry.car_type
                     company = entry.company
                     tare_tons = entry.weight_tons

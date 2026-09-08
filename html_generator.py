@@ -1348,23 +1348,19 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const len0 = Math.hypot(dx, dy) || 1; dx /= len0; dy /= len0;
         const nx = -dy, ny = dx;                              // perpendicular (px)
         const half = rvBodyWeightPx() / 2;                    // match the car body width
-        // Extend each end by ~half the body width, matching the old round-cap pill's
-        // footprint so coupled locos abut (the body points are inset by one coupler
-        // offset per end; the pill's round caps used to fill that back, and this
-        // restores it). Nose is a fraction of the extended length, capped, so it stays
-        // a sensible arrowhead instead of ballooning on wide (zoomed-in) bodies.
-        const ext = half;
-        const fx = fp0.x + dx * ext, fy = fp0.y + dy * ext;   // extended nose tip
-        const bx = bp0.x - dx * ext, by = bp0.y - dy * ext;   // extended back edge
-        const span = Math.hypot(fx - bx, fy - by) || 1;
+        // Draw exactly to the body endpoints (no end extension): the body is now the
+        // real length (RV_LENGTH minus a small fixed coupler gap), so coupled locos
+        // already sit the correct gap apart like cars. Nose is a capped fraction of the
+        // body length so it stays a sensible arrowhead on wide (zoomed-in) bodies.
+        const span = Math.hypot(fp0.x - bp0.x, fp0.y - bp0.y) || 1;
         const nose = Math.min(1.8 * half, 0.33 * span);
-        const rx = fx - dx * nose, ry = fy - dy * nose;       // rectangle/nose junction
+        const rx = fp0.x - dx * nose, ry = fp0.y - dy * nose;  // rectangle/nose junction
         const pts = [
-            [bx + nx * half, by + ny * half],                // back, left
-            [rx + nx * half, ry + ny * half],                // nose base, left
-            [fx, fy],                                        // nose tip (front)
-            [rx - nx * half, ry - ny * half],                // nose base, right
-            [bx - nx * half, by - ny * half]                 // back, right
+            [bp0.x + nx * half, bp0.y + ny * half],           // back, left
+            [rx + nx * half, ry + ny * half],                 // nose base, left
+            [fp0.x, fp0.y],                                   // nose tip (front)
+            [rx - nx * half, ry - ny * half],                 // nose base, right
+            [bp0.x - nx * half, bp0.y - ny * half]            // back, right
         ];
         return pts.map(p => map.layerPointToLatLng(L.point(p[0], p[1])));
     }
