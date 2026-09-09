@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import shutil
+import sys
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -316,7 +317,14 @@ def copy_leaflet_assets(output_dir: Path) -> None:
     external dependency from first load (a source of cold-start flakiness) and
     yields real JS stack traces. The generated HTML references leaflet/leaflet.{js,css}
     and falls back to the CDN at runtime if these files are ever missing."""
-    src = Path(__file__).resolve().parent / 'vendor' / 'leaflet'
+    # Normally the vendored assets sit next to this module. Under a PyInstaller
+    # bundle the code lives in the extracted _MEIPASS root, where the spec places
+    # vendor/leaflet too, so resolve from there when frozen.
+    if getattr(sys, 'frozen', False):
+        base = Path(getattr(sys, '_MEIPASS', Path(sys.executable).resolve().parent))
+    else:
+        base = Path(__file__).resolve().parent
+    src = base / 'vendor' / 'leaflet'
     if not src.exists():
         print(f"  WARNING: vendored Leaflet not found at {src}; "
               f"the viewer will fall back to the unpkg CDN at runtime")
