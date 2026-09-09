@@ -595,6 +595,16 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         document.getElementById('local-symbol-select').addEventListener('change', (e) => {
             MapApp.currentLocalFilter = e.target.value || null;
             applyLocalSymbolHighlighting();
+            // Picking a specific Local: make industries visible and frame the ones it
+            // works, so a user learning territory sees that Local's whole footprint.
+            if (MapApp.currentLocalFilter) {
+                if (!MapApp.overlayStates.industries) {
+                    const cb = document.getElementById('overlay-industries');
+                    if (cb) cb.checked = true;
+                    toggleOverlay('industries', true);
+                }
+                zoomToLocal(MapApp.currentLocalFilter);
+            }
         });
 
         // Zoom-scale the track line width (thinner when zoomed out).
@@ -2065,6 +2075,24 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             const { marker, data } = entry;
             const isMatch = filterSymbol ? (data.local_name === filterSymbol) : true;
             marker.setIcon(createIndustryIcon(data.tag, isMatch, filterActive));
+        }
+    }
+
+    // Pan/zoom the map to frame every (loaded) industry worked by `symbol` - the
+    // Local's footprint. Uses the industry markers' positions; a single industry just
+    // centres, several fit their bounds. No-op if none are loaded/visible.
+    function zoomToLocal(symbol) {
+        if (!symbol || !MapApp.industryMarkers) return;
+        const pts = [];
+        for (const [, entry] of MapApp.industryMarkers) {
+            if (entry.data && entry.data.local_name === symbol && entry.marker.getLatLng) {
+                pts.push(entry.marker.getLatLng());
+            }
+        }
+        if (pts.length === 1) {
+            MapApp.map.setView(pts[0], Math.max(MapApp.map.getZoom(), 15));
+        } else if (pts.length > 1) {
+            MapApp.map.fitBounds(L.latLngBounds(pts), { padding: [60, 60], maxZoom: 16 });
         }
     }
 
