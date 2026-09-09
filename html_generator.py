@@ -613,6 +613,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         MapApp.map.on('zoomend', updateTrainWidths);
         // Show/hide per-RV destination labels by zoom (visible at ~20 m scale or tighter).
         MapApp.map.on('zoomend', updateTrainLabelVisibility);
+        // Panning changes which tags fall in the viewport, so re-cull on move end too (#76).
+        MapApp.map.on('moveend', updateTrainLabelVisibility);
         // Switch train detail level (full cars <-> single collapsed line) by zoom.
         MapApp.map.on('zoomend', updateTrainLOD);
     }
@@ -931,7 +933,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 aiLocations: L.layerGroup(),
                 tileBoundaries: L.layerGroup(),
                 trains: L.layerGroup(),
-                trainLabels: L.layerGroup()   // per-RV destination tags (shown only when zoomed in)
+                trainLabels: L.layerGroup(),     // master: ALL per-RV tags; never added to the map directly
+                trainLabelsView: L.layerGroup()  // on-map subset, culled to the viewport (#76)
             };
 
             // Get region-specific track color (from manifest) or fall back to global default
@@ -1483,10 +1486,24 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     function updateTrainLabelVisibility() {
         const show = MapApp.overlayStates.trains
             && _scaleBarMeters() <= (TRAIN_STYLE.labelScaleM || 30);
+        // Cull to the viewport (#76): with tens of thousands of destination tags,
+        // putting them all on the map at once is slow. The master `trainLabels` group
+        // holds every tag off-map; here we rebuild an on-map `trainLabelsView` group
+        // containing only the tags whose position is within a slightly padded view.
+        // Rebuilding view-first also drops any stale tags left by a train re-render.
+        const bounds = show ? MapApp.map.getBounds().pad(0.2) : null;
         MapApp.loadedRegions.forEach(region => {
-            if (!region.visible || !region.layers || !region.layers.trainLabels) return;
-            if (show) region.layers.trainLabels.addTo(MapApp.map);
-            else MapApp.map.removeLayer(region.layers.trainLabels);
+            const lyr = region.layers;
+            if (!lyr || !lyr.trainLabels || !lyr.trainLabelsView) return;
+            lyr.trainLabelsView.clearLayers();
+            if (show && region.visible) {
+                lyr.trainLabels.eachLayer(m => {
+                    if (bounds.contains(m.getLatLng())) lyr.trainLabelsView.addLayer(m);
+                });
+                if (!MapApp.map.hasLayer(lyr.trainLabelsView)) lyr.trainLabelsView.addTo(MapApp.map);
+            } else if (MapApp.map.hasLayer(lyr.trainLabelsView)) {
+                MapApp.map.removeLayer(lyr.trainLabelsView);
+            }
         });
         updateTrainCount();
     }
