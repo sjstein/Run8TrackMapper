@@ -685,6 +685,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 <option value="area">Area Label</option>
                 <option value="industry">Industry</option>
                 <option value="signal">Signal</option>
+                <option value="tile">Tile coord</option>
                 <option value="section">Track Section</option>
                 <option value="train">Train / Rail Vehicle</option>
             </select>
@@ -711,7 +712,14 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const input = document.getElementById('search-input');
         input.addEventListener('input', debounce(performSearch, 300));
         input.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeSearch();
+            if (e.key === 'Escape') { closeSearch(); return; }
+            // Tile-coord search yields a single result, so Enter jumps straight to it
+            // (render synchronously to beat the input debounce, then activate the row).
+            if (e.key === 'Enter' && document.getElementById('search-type').value === 'tile') {
+                performSearch();
+                const first = document.querySelector('#search-results .search-result');
+                if (first) first.click();
+            }
         });
 
         // The Train / Rail Vehicle search can be narrowed to one field via radios
@@ -721,10 +729,19 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const syncTrainFieldRow = () => {
             trainFieldRow.style.display = (typeSel.value === 'train') ? 'block' : 'none';
         };
-        typeSel.addEventListener('change', () => { syncTrainFieldRow(); performSearch(); });
+        // The tile-coord search takes a numeric coord, so hint the format in the box.
+        const syncSearchPlaceholder = () => {
+            input.placeholder = (typeSel.value === 'tile')
+                ? 'tile_x, tile_z   (e.g. 209, -10)'
+                : 'Enter search term...';
+        };
+        typeSel.addEventListener('change', () => {
+            syncTrainFieldRow(); syncSearchPlaceholder(); performSearch();
+        });
         trainFieldRow.querySelectorAll('input[name="train-field"]')
             .forEach(r => r.addEventListener('change', performSearch));
         syncTrainFieldRow();
+        syncSearchPlaceholder();
 
         MapApp.searchDialog = dialog;
     }
@@ -2265,6 +2282,29 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     });
                 }
             }
+        } else if (searchType === 'tile') {
+            // Free-text tile coord: 2 numbers = a tile (jump to its centre), 4 =
+            // tile + Run8 local x,z. Accepts commas and/or spaces, and negatives.
+            const nums = (query.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+            if (nums.length >= 2) {
+                const tx = Math.trunc(nums[0]), tz = Math.trunc(nums[1]);
+                const hasLocal = nums.length >= 4;
+                const idStr = hasLocal ? `${tx},${tz},${nums[2]},${nums[3]}` : `${tx},${tz}`;
+                // Best-effort: name the loaded region whose track passes through this tile.
+                let hint = 'jump';
+                for (const [rid, region] of (MapApp.loadedRegions || new Map())) {
+                    const rd = region && region.data;
+                    if (rd && rd.tiles && rd.tiles.some(t => t.x === tx && t.z === tz)) {
+                        hint = rd.display_name || rid; break;
+                    }
+                }
+                results.push({
+                    type: 'tile', id: idStr, region: hint, data: null,
+                    label: hasLocal
+                        ? `Tile ${tx}, ${tz}  (local ${nums[2]}, ${nums[3]})`
+                        : `Tile ${tx}, ${tz}`
+                });
+            }
         }
 
         // Limit results
@@ -2341,6 +2381,29 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 MapApp.map.setView(ll, Math.max(MapApp.map.getZoom(), 14));
                 flashAreaMarker(rec.marker);
             }
+        } else if (type === 'tile') {
+            // Jump to a tile coord (id = "tx,tz" or "tx,tz,localX,localZ"). Same
+            // tile->world->latlng path area labels use (inlined - areaToWorld lives
+            // in the align layer); worldToLatLon applies the current manual
+            // alignment, so it lands where that tile sits on the map right now.
+            const tp = MapApp.manifest && MapApp.manifest.tile_params;
+            if (tp && typeof MapApp.worldToLatLon === 'function') {
+                const p = String(id).split(',').map(Number);
+                const tx = Math.trunc(p[0]), tz = Math.trunc(p[1]);
+                const lx = (p.length >= 4 && isFinite(p[2])) ? p[2] : tp.tile_width / 2;
+                const lz = (p.length >= 4 && isFinite(p[3])) ? p[3] : tp.tile_height / 2;
+                const worldX = (tx - tp.home_tile[0]) * tp.tile_width + lx;
+                const worldY = (tz - tp.home_tile[1]) * tp.tile_height - lz;
+                MapApp.map.setView(MapApp.worldToLatLon(worldX, worldY),
+                                   Math.max(MapApp.map.getZoom(), 15));
+                // Turn Tile Boundaries on if they're off, so the jumped-to tile is visible.
+                if (!MapApp.overlayStates.tileBoundaries) {
+                    const cb = document.getElementById('overlay-tileBoundaries');
+                    if (cb) cb.checked = true;
+                    toggleOverlay('tileBoundaries', true);
+                }
+                flashTile(tx, tz);
+            }
         }
     }
 
@@ -2362,6 +2425,46 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             el.style.filter = 'none';
             el.style.transition = prev;
         }, 1300);
+    }
+
+    // Briefly pulse an outline over a whole tile so a Tile-coord search hit is easy to
+    // spot. Uses the tile's own drawn bounds when its region is loaded (an exact match
+    // to the boundary rectangle); otherwise derives the box from world coords so an
+    // off-track / unloaded tile still highlights. Auto-removes after ~1.6 s.
+    function flashTile(tx, tz) {
+        let latlngs = null;
+        for (const [, region] of (MapApp.loadedRegions || new Map())) {
+            const rd = region && region.data;
+            if (!rd || !rd.tiles) continue;
+            const t = rd.tiles.find(tt => tt.x === tx && tt.z === tz);
+            if (t) {   // post-transformData these are aligned lat/lon (SW + NE corners)
+                latlngs = [[t.lat_south, t.lon_west], [t.lat_north, t.lon_west],
+                           [t.lat_north, t.lon_east], [t.lat_south, t.lon_east]];
+                break;
+            }
+        }
+        if (!latlngs) {
+            const tp = MapApp.manifest && MapApp.manifest.tile_params;
+            if (!tp || typeof MapApp.worldToLatLon !== 'function') return;
+            const bx = (tx - tp.home_tile[0]) * tp.tile_width;
+            const by = (tz - tp.home_tile[1]) * tp.tile_height;
+            const corners = [[bx, by], [bx + tp.tile_width, by],
+                             [bx + tp.tile_width, by - tp.tile_height], [bx, by - tp.tile_height]];
+            latlngs = corners.map(c => MapApp.worldToLatLon(c[0], c[1]));
+        }
+        const poly = L.polygon(latlngs, {
+            color: '#ffcc00', weight: 3, opacity: 1,
+            fill: true, fillColor: '#ffcc00', fillOpacity: 0.25, interactive: false
+        }).addTo(MapApp.map);
+        let on = 1;
+        const timer = setInterval(() => {
+            on ^= 1;
+            poly.setStyle({ opacity: on ? 1 : 0.3, fillOpacity: on ? 0.25 : 0.05 });
+        }, 220);
+        setTimeout(() => {
+            clearInterval(timer);
+            if (MapApp.map.hasLayer(poly)) MapApp.map.removeLayer(poly);
+        }, 1600);
     }
 
     // ========================================
