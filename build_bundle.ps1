@@ -85,6 +85,6 @@ Write-Host "  sha256: $sha"
 
 Write-Host "`nDone." -ForegroundColor Green
 Write-Host "  Bundle folder : $distApp"
-Write-Host "  Release zip   : $zip  (+ .sha256)  <- upload this to the droplet"
+Write-Host "  Release zip   : $zip  (+ .sha256)  <- attach to the GitHub Release (see packaging/RELEASING.md)"
 Write-Host "Smoke-test the exe:"
 Write-Host "  cd `"$distApp`"; .\Run8MapHost.exe config-socal.ini --host 127.0.0.1 --port 8001 --world `"<autosave path>`""
