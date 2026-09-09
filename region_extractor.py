@@ -63,6 +63,7 @@ class SectionData:
     length_ft: float
     length_m: float
     is_switch: bool = False
+    is_ctc_switch: bool = False   # switch is dispatcher-controlled (CTC) vs hand-throw
     track_type: int = 0
     retarder_mph: float = -1.0
     elevation_start_m: float = 0.0
@@ -1138,6 +1139,7 @@ def extract_sections(db: TrackDatabase,
                 length_ft=round(length_ft, 1),
                 length_m=round(total_length_m, 1),
                 is_switch=is_switch(section),
+                is_ctc_switch=bool(getattr(section, 'is_ctc_switch', False)),
                 track_type=section.track_type,
                 retarder_mph=section.retarder_mph,
                 elevation_start_m=round(elevation_start_m, 2),

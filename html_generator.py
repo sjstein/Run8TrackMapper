@@ -20,6 +20,7 @@ window.COLORS = {{
     trackSelected: '{colors.track_selected}',
     trackHover: '{colors.track_hover}',
     switch: '{colors.switch}',
+    switchCtc: '{colors.switch_ctc}',
     industryTrack: '{colors.industry_track}',
     signalAbsolute: '{colors.signal_absolute}',
     signalIntermediate: '{colors.signal_intermediate}',
@@ -70,6 +71,13 @@ def generate_javascript() -> str:
     // structure (sectionIndex, selectedSections) is keyed by this region-qualified key
     // instead of the bare id. Section ids are integers, so the '_' join is unambiguous.
     function secKey(regionId, sectionId){ return regionId + '_' + sectionId; }
+
+    // Track colour for a section: CTC (dispatcher-controlled) switches and hand-throw
+    // switches get their own colours; non-switch track uses the region's track colour.
+    function switchColor(section, regionTrackColor){
+        if (!section.is_switch) return regionTrackColor;
+        return section.is_ctc_switch ? COLORS.switchCtc : COLORS.switch;
+    }
     // Re-weight all (non-selected) track sections for the current zoom.
     function updateTrackWidths() {
         const w = trackWeightPx();
@@ -926,7 +934,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 const sectionGroup = L.featureGroup();
 
                 for (const path of section.paths) {
-                    const trackColor = section.is_switch ? COLORS.switch : regionTrackColor;
+                    const trackColor = switchColor(section, regionTrackColor);
                     const polyline = L.polyline(path, {
                         color: trackColor,
                         weight: trackWeightPx(),   // zoom-scaled (updateTrackWidths on zoomend)
@@ -937,7 +945,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     polyline._origColor = trackColor;   // per-polyline normal colour (region/switch aware)
 
                     // Build detailed section popup
-                    const sectionType = section.is_switch ? ' (Switch)' : '';
+                    const sectionType = section.is_switch
+                        ? (section.is_ctc_switch ? ' (CTC Switch)' : ' (Hand-throw Switch)') : '';
                     let sectionPopup = `<b>Section ${section.id}${sectionType}</b><br>`;
                     sectionPopup += `Length: ${section.length_ft.toFixed(1)} ft (${section.length_m.toFixed(1)} m)<br>`;
                     sectionPopup += `Paths: ${section.paths.length}`;
@@ -1001,7 +1010,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 }
 
                 layers.sections.addLayer(sectionGroup);
-                const originalColor = section.is_switch ? COLORS.switch : regionTrackColor;
+                const originalColor = switchColor(section, regionTrackColor);
                 MapApp.sectionIndex.set(secKey(regionId, section.id), {region_id: regionId, polyline: sectionGroup, metadata: section, originalColor: originalColor});
             }
 
