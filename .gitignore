@@ -13,6 +13,10 @@ env/
 # --- Generated map output (produced by output_generator.py) ---
 output/
 
+# --- PyInstaller self-host bundle build artifacts (build_bundle.ps1/.sh) ---
+build/
+dist/
+
 # --- Backups & temp (serve.py writes *.bak on label edits; atomic *.tmp) ---
 *.bak
 *.tmp
