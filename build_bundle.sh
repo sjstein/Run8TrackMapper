@@ -50,6 +50,6 @@ echo "Zipping release artifact..."
 echo
 echo "Done."
 echo "  Bundle folder : $DIST"
-echo "  Release zip   : $ZIP  (+ .sha256)  <- upload this to the droplet"
+echo "  Release zip   : $ZIP  (+ .sha256)  <- attach to the GitHub Release (see packaging/RELEASING.md)"
 echo "Smoke-test the exe:"
 echo "  cd \"$DIST\" && ./Run8MapHost.exe config-socal.ini --host 127.0.0.1 --port 8001 --world \"<autosave path>\""
