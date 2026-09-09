@@ -18,42 +18,31 @@ into the dist.)
    - `Run8MapHost-<version>.zip.sha256` — its checksum
 3. Smoke-test the exe once (see the command the build prints) before publishing.
 
-## Publish (download + update-check hosting)
+## Publish (GitHub Releases)
 
-Everything is hosted on the existing droplet (`www.b2fengineering.com`) — the repo
-is private, so GitHub Release assets aren't publicly downloadable.
+The repo is public, so **GitHub Releases** host the bundle and drive the update check -
+no droplet / static host needed.
 
-1. Upload the zip (and `.sha256`) to the droplet under a `run8map/` web directory,
-   e.g. `…/run8map/Run8MapHost-<version>.zip`.
-2. Write/replace `…/run8map/latest.json` so the in-app update check works. Its shape
-   (see `host_map.check_for_update` / `DEFAULT_UPDATE_URL`):
-   ```json
-   {
-     "version": "0.2.0",
-     "url": "https://www.b2fengineering.com/run8map/Run8MapHost-0.2.0.zip"
-   }
+1. Create a release for this version. Either the web UI (Releases -> "Draft a new
+   release") or the CLI:
+   ```bash
+   gh release create v<version> \
+       "dist/Run8MapHost-<version>.zip" \
+       "dist/Run8MapHost-<version>.zip.sha256" \
+       --title "Run8MapHost <version>" --notes "..."
    ```
-   Operators running an older bundle then see a one-line "newer version available"
-   notice at startup (best-effort; offline boxes just skip it).
-3. Announce the download link wherever operators gather (Discord/forum).
+   - **Tag** it `v<version>` (or `<version>` - the launcher strips a leading `v`).
+     Keep it in step with `version.py`.
+   - Attach the **.zip** (and the `.sha256`) as release assets - the .zip is what
+     `host_map.check_for_update` hands operators as the download link.
+   - Leave "Set as the latest release" checked (the update check reads
+     `/releases/latest`, which ignores drafts and pre-releases).
+2. That's it. Operators running an older bundle see a one-line "newer version
+   available" notice at startup, pointing at the new release's .zip (best-effort;
+   offline boxes just skip it). No `latest.json`, no server to update.
 
-### Caddy: serve the download directory
-
-Add a static-file route on the droplet so `run8map/*` is downloadable (adjust the
-site block / root to match the existing Caddyfile):
-
-```
-www.b2fengineering.com {
-    # ... existing map/reverse-proxy config ...
-
-    handle_path /run8map/* {
-        root * /var/www/run8map
-        file_server browse
-    }
-}
-```
-
-Then place the zip + `latest.json` in `/var/www/run8map/`.
+Operators download from the repo's **Releases** page:
+`https://github.com/sjstein/Run8TrackMapper/releases`.
 
 ## Notes / not-yet-done
 

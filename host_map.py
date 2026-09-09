@@ -41,12 +41,12 @@ from serve import AuthoringState, make_handler, _QuietThreadingHTTPServer
 from version import __version__
 
 
-# Where the launcher asks "is there a newer bundle?" Returns JSON like
-#   {"version": "0.2.0", "url": "https://.../download"}
-# Overridable via the RUN8MAP_UPDATE_URL env var; a missing/unreachable endpoint is
-# a no-op (the check never blocks startup or raises). NOTE: placeholder until the
-# directory site publishes this file.
-DEFAULT_UPDATE_URL = "https://www.b2fengineering.com/run8map/latest.json"
+# Where the launcher asks "is there a newer bundle?" - the GitHub Releases API for
+# this repo, which returns the latest (non-draft, non-prerelease) release as JSON
+# (tag_name + assets[]). Releases are the distribution channel, so no separate host
+# is needed. Overridable via the RUN8MAP_UPDATE_URL env var; a missing/unreachable
+# endpoint (offline box, no releases yet -> 404) is a silent no-op.
+DEFAULT_UPDATE_URL = "https://api.github.com/repos/sjstein/Run8TrackMapper/releases/latest"
 
 
 def _bundle_root() -> Path:
@@ -91,17 +91,31 @@ def _version_tuple(v: str):
 
 
 def check_for_update(current: str, url: str, timeout: float = 3.0):
-    """Fetch the latest published version and return (latest, download_url) when it
-    is newer than `current`, else None. Fully failure-tolerant: any network / parse
-    error returns None (self-host boxes may have no outbound path, and an update
-    notice must never get in the way of serving the map)."""
+    """Fetch the latest GitHub release and return (latest, download_url) when its
+    version is newer than `current`, else None. Reads the GitHub Releases API shape
+    (`tag_name` + `assets[]`); the tag may be like `v0.2.0` or `0.2.0` (the leading
+    v is stripped). download_url is the .zip asset's direct link when present, else
+    the release page. Fully failure-tolerant: any network / parse error (incl. a 404
+    when no release exists yet) returns None, so the check never blocks or breaks
+    startup on an offline box."""
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': f'run8map/{current}'})
+        req = urllib.request.Request(url, headers={
+            'User-Agent': f'run8map/{current}',
+            'Accept': 'application/vnd.github+json',
+        })
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode('utf-8'))
-        latest = str(data.get('version', '')).strip()
+        latest = str(data.get('tag_name', '')).strip().lstrip('vV')
         if latest and _version_tuple(latest) > _version_tuple(current):
-            return latest, str(data.get('url', '') or '')
+            # Prefer the .zip asset's direct download; fall back to the release page.
+            download_url = ''
+            for asset in (data.get('assets') or []):
+                if str(asset.get('name', '')).lower().endswith('.zip'):
+                    download_url = str(asset.get('browser_download_url', '') or '')
+                    break
+            if not download_url:
+                download_url = str(data.get('html_url', '') or '')
+            return latest, download_url
     except Exception:  # noqa: BLE001 - any failure is a silent no-op by design
         return None
     return None

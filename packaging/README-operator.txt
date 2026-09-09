@@ -89,8 +89,10 @@ this with you, or don't run it. But none of the warnings mean the tool is unsafe
   then:   .\Run8MapHost.exe config-socal.ini --regenerate
 
 - Updating: if a newer version is published you'll see a one-line notice in the
-  window when the map starts. Download the new folder and copy your edited
-  "Start Map.bat" (and config, if you changed it) into it.
+  window when the map starts. Download the new zip from the Releases page:
+    https://github.com/sjstein/Run8TrackMapper/releases
+  unzip it, and copy your edited "Start Map.bat" (and config, if you changed it)
+  into the new folder.
 
 
 ----------------------------------------------------------------------------
