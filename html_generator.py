@@ -20,6 +20,7 @@ window.COLORS = {{
     trackSelected: '{colors.track_selected}',
     trackHover: '{colors.track_hover}',
     switch: '{colors.switch}',
+    switchCtc: '{colors.switch_ctc}',
     industryTrack: '{colors.industry_track}',
     signalAbsolute: '{colors.signal_absolute}',
     signalIntermediate: '{colors.signal_intermediate}',
@@ -70,6 +71,13 @@ def generate_javascript() -> str:
     // structure (sectionIndex, selectedSections) is keyed by this region-qualified key
     // instead of the bare id. Section ids are integers, so the '_' join is unambiguous.
     function secKey(regionId, sectionId){ return regionId + '_' + sectionId; }
+
+    // Track colour for a section: CTC (dispatcher-controlled) switches and hand-throw
+    // switches get their own colours; non-switch track uses the region's track colour.
+    function switchColor(section, regionTrackColor){
+        if (!section.is_switch) return regionTrackColor;
+        return section.is_ctc_switch ? COLORS.switchCtc : COLORS.switch;
+    }
     // Re-weight all (non-selected) track sections for the current zoom.
     function updateTrackWidths() {
         const w = trackWeightPx();
@@ -587,6 +595,16 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         document.getElementById('local-symbol-select').addEventListener('change', (e) => {
             MapApp.currentLocalFilter = e.target.value || null;
             applyLocalSymbolHighlighting();
+            // Picking a specific Local: make industries visible and frame the ones it
+            // works, so a user learning territory sees that Local's whole footprint.
+            if (MapApp.currentLocalFilter) {
+                if (!MapApp.overlayStates.industries) {
+                    const cb = document.getElementById('overlay-industries');
+                    if (cb) cb.checked = true;
+                    toggleOverlay('industries', true);
+                }
+                zoomToLocal(MapApp.currentLocalFilter);
+            }
         });
 
         // Zoom-scale the track line width (thinner when zoomed out).
@@ -595,6 +613,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         MapApp.map.on('zoomend', updateTrainWidths);
         // Show/hide per-RV destination labels by zoom (visible at ~20 m scale or tighter).
         MapApp.map.on('zoomend', updateTrainLabelVisibility);
+        // Panning changes which tags fall in the viewport, so re-cull on move end too (#76).
+        MapApp.map.on('moveend', updateTrainLabelVisibility);
         // Switch train detail level (full cars <-> single collapsed line) by zoom.
         MapApp.map.on('zoomend', updateTrainLOD);
     }
@@ -913,7 +933,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 aiLocations: L.layerGroup(),
                 tileBoundaries: L.layerGroup(),
                 trains: L.layerGroup(),
-                trainLabels: L.layerGroup()   // per-RV destination tags (shown only when zoomed in)
+                trainLabels: L.layerGroup(),     // master: ALL per-RV tags; never added to the map directly
+                trainLabelsView: L.layerGroup()  // on-map subset, culled to the viewport (#76)
             };
 
             // Get region-specific track color (from manifest) or fall back to global default
@@ -926,7 +947,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 const sectionGroup = L.featureGroup();
 
                 for (const path of section.paths) {
-                    const trackColor = section.is_switch ? COLORS.switch : regionTrackColor;
+                    const trackColor = switchColor(section, regionTrackColor);
                     const polyline = L.polyline(path, {
                         color: trackColor,
                         weight: trackWeightPx(),   // zoom-scaled (updateTrackWidths on zoomend)
@@ -937,7 +958,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     polyline._origColor = trackColor;   // per-polyline normal colour (region/switch aware)
 
                     // Build detailed section popup
-                    const sectionType = section.is_switch ? ' (Switch)' : '';
+                    const sectionType = section.is_switch
+                        ? (section.is_ctc_switch ? ' (CTC Switch)' : ' (Hand-throw Switch)') : '';
                     let sectionPopup = `<b>Section ${section.id}${sectionType}</b><br>`;
                     sectionPopup += `Length: ${section.length_ft.toFixed(1)} ft (${section.length_m.toFixed(1)} m)<br>`;
                     sectionPopup += `Paths: ${section.paths.length}`;
@@ -1001,7 +1023,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 }
 
                 layers.sections.addLayer(sectionGroup);
-                const originalColor = section.is_switch ? COLORS.switch : regionTrackColor;
+                const originalColor = switchColor(section, regionTrackColor);
                 MapApp.sectionIndex.set(secKey(regionId, section.id), {region_id: regionId, polyline: sectionGroup, metadata: section, originalColor: originalColor});
             }
 
@@ -1464,10 +1486,24 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     function updateTrainLabelVisibility() {
         const show = MapApp.overlayStates.trains
             && _scaleBarMeters() <= (TRAIN_STYLE.labelScaleM || 30);
+        // Cull to the viewport (#76): with tens of thousands of destination tags,
+        // putting them all on the map at once is slow. The master `trainLabels` group
+        // holds every tag off-map; here we rebuild an on-map `trainLabelsView` group
+        // containing only the tags whose position is within a slightly padded view.
+        // Rebuilding view-first also drops any stale tags left by a train re-render.
+        const bounds = show ? MapApp.map.getBounds().pad(0.2) : null;
         MapApp.loadedRegions.forEach(region => {
-            if (!region.visible || !region.layers || !region.layers.trainLabels) return;
-            if (show) region.layers.trainLabels.addTo(MapApp.map);
-            else MapApp.map.removeLayer(region.layers.trainLabels);
+            const lyr = region.layers;
+            if (!lyr || !lyr.trainLabels || !lyr.trainLabelsView) return;
+            lyr.trainLabelsView.clearLayers();
+            if (show && region.visible) {
+                lyr.trainLabels.eachLayer(m => {
+                    if (bounds.contains(m.getLatLng())) lyr.trainLabelsView.addLayer(m);
+                });
+                if (!MapApp.map.hasLayer(lyr.trainLabelsView)) lyr.trainLabelsView.addTo(MapApp.map);
+            } else if (MapApp.map.hasLayer(lyr.trainLabelsView)) {
+                MapApp.map.removeLayer(lyr.trainLabelsView);
+            }
         });
         updateTrainCount();
     }
@@ -2056,6 +2092,24 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             const { marker, data } = entry;
             const isMatch = filterSymbol ? (data.local_name === filterSymbol) : true;
             marker.setIcon(createIndustryIcon(data.tag, isMatch, filterActive));
+        }
+    }
+
+    // Pan/zoom the map to frame every (loaded) industry worked by `symbol` - the
+    // Local's footprint. Uses the industry markers' positions; a single industry just
+    // centres, several fit their bounds. No-op if none are loaded/visible.
+    function zoomToLocal(symbol) {
+        if (!symbol || !MapApp.industryMarkers) return;
+        const pts = [];
+        for (const [, entry] of MapApp.industryMarkers) {
+            if (entry.data && entry.data.local_name === symbol && entry.marker.getLatLng) {
+                pts.push(entry.marker.getLatLng());
+            }
+        }
+        if (pts.length === 1) {
+            MapApp.map.setView(pts[0], Math.max(MapApp.map.getZoom(), 15));
+        } else if (pts.length > 1) {
+            MapApp.map.fitBounds(L.latLngBounds(pts), { padding: [60, 60], maxZoom: 16 });
         }
     }
 

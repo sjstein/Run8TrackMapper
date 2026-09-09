@@ -73,7 +73,8 @@ class ColorConfig:
     track: str = "#0066cc"              # Regular track sections
     track_selected: str = "#ff0000"     # Selected track sections
     track_hover: str = "#ffff00"        # Hover highlight color (yellow)
-    switch: str = "#800080"             # Switch/turnout sections (purple)
+    switch: str = "#800080"             # Hand-throw switch/turnout sections (purple)
+    switch_ctc: str = "#c000c0"         # CTC (dispatcher-controlled) switches (magenta)
     industry_track: str = "#00aa00"     # Industry track sections (green)
     signal_absolute: str = "#FF6B35"    # Absolute signals (orange)
     signal_intermediate: str = "#FFD700"  # Intermediate signals (gold)
@@ -500,6 +501,7 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
             track_selected=_c('track_selected', colors.track_selected),
             track_hover=_c('track_hover', colors.track_hover),
             switch=_c('switch', colors.switch),
+            switch_ctc=_c('switch_ctc', colors.switch_ctc),
             industry_track=_c('industry_track', colors.industry_track),
             signal_absolute=_c('signal_absolute', colors.signal_absolute),
             signal_intermediate=_c('signal_intermediate', colors.signal_intermediate),

@@ -31,6 +31,7 @@ def section_to_dict(section: SectionData) -> dict:
         "length_ft": section.length_ft,
         "length_m": section.length_m,
         "is_switch": section.is_switch,
+        "is_ctc_switch": section.is_ctc_switch,
         "track_type": section.track_type,
         "retarder_mph": section.retarder_mph,
         "elevation_start_m": section.elevation_start_m,
