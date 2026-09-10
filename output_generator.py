@@ -35,7 +35,8 @@ def section_to_dict(section: SectionData) -> dict:
         "track_type": section.track_type,
         "retarder_mph": section.retarder_mph,
         "elevation_start_m": section.elevation_start_m,
-        "elevation_end_m": section.elevation_end_m
+        "elevation_end_m": section.elevation_end_m,
+        "grade_pct": section.grade_pct
     }
 
 
@@ -218,6 +219,11 @@ def generate_manifest(config: VisualizationConfig,
         "car_type_colors": dict(getattr(config, "car_type_colors", {}) or {}),
         "loco_company_colors": dict(getattr(config, "loco_company_colors", {}) or {}),
         "signal_show_intermediate": getattr(config, "signal_show_intermediate", True),
+        "grade": ({
+            "max_pct": config.grade.max_pct,
+            "ramp": list(config.grade.ramp),
+            "show_by_default": config.grade.show_by_default,
+        } if getattr(config, "grade", None) else None),
         "initial_map_opacity": getattr(config, "initial_map_opacity", 0.2),
         "initial_track_opacity": getattr(config, "initial_track_opacity", 0.8),
         # Whole-world-save counts (region-independent), for the Trains status line.
@@ -415,6 +421,18 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
             tile_based_config=tile_based_config
         )
         regions_data.append(region_data)
+
+    # Precompute per-section track grade (%) for the grade heat-map viewer (#57). Done here,
+    # once, at output-generation time (never live). Per region: exact grade for normal-length
+    # sections, windowed smoothing for very short (switch/yard) ones. See grade.py.
+    from grade import compute_section_grades
+    gcfg = getattr(config, 'grade', None)
+    for region_data in regions_data:
+        compute_section_grades(
+            region_data.sections,
+            smooth_below_m=getattr(gcfg, 'smooth_below_m', 20.0),
+            window_m=getattr(gcfg, 'window_m', 80.0),
+        )
 
     # Place trains once against all regions' sections (a car can straddle a region
     # boundary, so each truck must resolve against its own region's geometry).

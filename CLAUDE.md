@@ -417,10 +417,44 @@ scale. Code: `renderSignals` / `signalGlyphGeom` in `ALIGN_JS`.
   gives a dispatcher-style view. Initial state: `[signals] show_intermediate` (default true),
   emitted as `manifest.signal_show_intermediate`.
 
+#### Grade heat map (track coloring by grade, #57)
+An optional **Grade** display mode recolors every track section by its grade magnitude
+(a heat map: flat = grey, steep = red), with a legend. It is a track-*colouring* mode
+(not a data overlay), so it takes precedence over the industry-green colouring while on and
+restores normal/industry colours when off; a future railroad-owner colouring would be the
+same kind of mutually-exclusive mode.
+
+- **Data is precomputed, never live.** `grade.compute_section_grades(sections, ...)` runs once
+  in `output_generator` (per region, after extraction) and sets `SectionData.grade_pct`,
+  emitted on each section in the region JSON. Grade = `(elevation_end_m - elevation_start_m) /
+  length_m * 100`; the elevations come from the track-DB node `position.y` (real altitude in
+  metres, already extracted per section). Validated against ground truth: BNSF Cajon reproduces
+  the known 2.2% ruling grade (p90) and the old-South-track ~3.0%.
+- **Hybrid smoothing.** For all but the shortest sections the exact per-section grade is used
+  (windowing changes the median section by ~0.01%). Only sections shorter than
+  `[grade] smooth_below_m` (default 20 m) — yard/switch stubs where the 1 cm elevation rounding
+  turns into a spurious 4–5% reading — are replaced with a **windowed** grade measured over
+  ~`window_m` (default 80 m) of connected track, following the straightest continuation through
+  switches (so it stays on the through route, not a diverging leg). This cleans the switch-area
+  speckle without over-smoothing real grades. Code: `grade.py` (`_Chain` endpoint-adjacency graph
+  + `compute_section_grades`).
+- **Magnitude only (no up/down).** The stored A→B node ordering is arbitrary (~50/50 asc/desc)
+  and only weakly correlated with any compass axis, so a signed up/down ramp can't be made
+  consistently meaningful on a static, bidirectional map without milepost-direction data. If
+  directionality is ever wanted, the clean encoding is small **downhill chevrons** (local negative
+  gradient — always unambiguous), layered on top — deliberately deferred, not in v1.
+- **Config** (`[grade]`, all optional): `max_pct` (ramp saturates at this |grade|, default 3.0),
+  `smooth_below_m` (default 20), `window_m` (default 80), `ramp` (comma-separated low→high hex,
+  default grey→yellow→red), `show_by_default` (start with the mode on). Parsed to
+  `VisualizationConfig.grade` (`GradeConfig`); the display bits (`max_pct`, `ramp`,
+  `show_by_default`) are emitted as `manifest.grade`. Viewer: `gradeColor` / `sectionRestColor`
+  / `refreshAllTrackColors` / `updateGradeLegend` in `ALIGN_JS`, toggled via the `grade` overlay
+  id in `toggleOverlay`.
+
 #### Interactive Map Features
 - **Base Map Selection**: OpenStreetMap, Satellite (Esri), or None, plus a toggleable **OpenRailwayMap** overlay
 - **Region Toggle**: Enable/disable regions dynamically (data loaded on demand); in the align viewer, enabling a region fits the map to it
-- **Overlay Controls**: Toggle Signals, Industries, AI Locations, Tile Boundaries, and Area Labels
+- **Overlay Controls**: Toggle Signals, Industries, AI Locations, Tile Boundaries, Area Labels, and the Grade colour mode
 - **Search Function**: Search by track section, signal, industry tag, AI location, area label, or train/rail vehicle
 - **Ctrl+Click Selection**: Select multiple track sections to calculate total length
 - **Mouse Position**: Lat/lon display in lower right corner

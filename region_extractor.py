@@ -68,6 +68,7 @@ class SectionData:
     retarder_mph: float = -1.0
     elevation_start_m: float = 0.0
     elevation_end_m: float = 0.0
+    grade_pct: float = 0.0        # track grade %, precomputed by grade.compute_section_grades (#57)
 
 
 @dataclass
