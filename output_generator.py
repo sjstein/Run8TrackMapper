@@ -212,7 +212,8 @@ def generate_manifest(config: VisualizationConfig,
         "coordinate_system": "tile_local" if tile_based else "geographic",
         "areas": [area_to_dict(a) for a in config.areas],
         "color_presets": dict(getattr(config, "color_presets", {}) or {}),
-        "label_types": [{"id": t.id, "name": t.name, "color": t.color}
+        "label_types": [{"id": t.id, "name": t.name, "color": t.color,
+                         "max_scale_m": getattr(t, "max_scale_m", 0.0)}
                         for t in getattr(config, "label_types", []) or []],
         "car_type_colors": dict(getattr(config, "car_type_colors", {}) or {}),
         "loco_company_colors": dict(getattr(config, "loco_company_colors", {}) or {}),

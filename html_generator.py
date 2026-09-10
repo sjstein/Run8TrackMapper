@@ -2454,8 +2454,15 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 if (typeof ensureAreaTypeVisible === 'function') ensureAreaTypeVisible(rec.type);
                 if (typeof updateAreaLabelSizes === 'function') updateAreaLabelSizes();
                 const ll = rec.marker.getLatLng();
-                MapApp.map.setView(ll, Math.max(MapApp.map.getZoom(), 14));
-                flashAreaMarker(rec.marker);
+                // Zoom in enough to clear this type's zoom gate (#58), else the found
+                // label would stay hidden. Reveal + flash after the move settles, since a
+                // gated group is only (re)added on zoomend.
+                const gz = (typeof zoomToRevealAreaType === 'function') ? zoomToRevealAreaType(rec.type, ll.lat) : 0;
+                const need = Math.max(MapApp.map.getZoom(), 14, gz);
+                const willZoom = need > MapApp.map.getZoom();
+                MapApp.map.setView(ll, need);
+                if (willZoom) MapApp.map.once('moveend', () => { updateAreaLabelSizes(); flashAreaMarker(rec.marker); });
+                else flashAreaMarker(rec.marker);
             }
         } else if (type === 'tile') {
             // Jump to a tile coord (id = "tx,tz" or "tx,tz,localX,localZ"). Same
@@ -2788,7 +2795,7 @@ ALIGN_JS = r'''
         for (const id of areaGroupIds()){
             const lg = L.layerGroup();
             MapApp.areaTypeLayers[id] = lg;
-            if (MapApp.areaTypeVisible[id]) lg.addTo(MapApp.areaLabelsLayer);
+            applyAreaTypeLayer(id);   // add if filter ON and (zoom gate #58) OK
         }
         const areas = (MapApp.manifest && MapApp.manifest.areas) || [];
         const tp = MapApp.manifest && MapApp.manifest.tile_params;
@@ -2887,13 +2894,45 @@ ALIGN_JS = r'''
         setAreaTypeVisible(t, true);
         const cb = document.getElementById('overlay-areaType-'+t); if (cb) cb.checked = true;
     }
+    // Per-type zoom gate (#58): a [label_types] entry may set max_scale_m so a dense
+    // category (e.g. yard-track labels) shows only when zoomed in to that scale bar or
+    // tighter. 0/absent = always. Undefined-type labels (AREA_UNDEFINED) have no entry
+    // and are never gated. Compared against the same _scaleBarMeters() the train tags use.
+    function areaTypeMaxScaleM(type){
+        const t = labelTypes().find(x => x.id === String(type||'').toLowerCase());
+        const m = t && t.max_scale_m;
+        return (typeof m === 'number' && m > 0) ? m : 0;
+    }
+    function zoomOkForAreaType(type){
+        const maxM = areaTypeMaxScaleM(type);
+        return maxM <= 0 || _scaleBarMeters() <= maxM;
+    }
+    // Smallest map zoom at which a gated type's gate passes at latitude `lat` (0 = not
+    // gated). Leaflet's scale bar is <= 100*mpp, so 100*mpp <= maxM guarantees the gate;
+    // used so a search hit on a gated label zooms in enough to actually show it (#58).
+    function zoomToRevealAreaType(type, lat){
+        const maxM = areaTypeMaxScaleM(type);
+        if (maxM <= 0) return 0;
+        return Math.ceil(Math.log2(156543.03392 * Math.cos(lat*Math.PI/180) * 100 / maxM));
+    }
+    // Add/remove a type's layer group from the master to match (filter ON) AND (zoom OK).
+    function applyAreaTypeLayer(type){
+        const lg = MapApp.areaTypeLayers && MapApp.areaTypeLayers[type];
+        if (!lg || !MapApp.areaLabelsLayer) return;
+        const want = !!(MapApp.areaTypeVisible && MapApp.areaTypeVisible[type]) && zoomOkForAreaType(type);
+        const has = MapApp.areaLabelsLayer.hasLayer(lg);
+        if (want && !has) MapApp.areaLabelsLayer.addLayer(lg);
+        else if (!want && has) MapApp.areaLabelsLayer.removeLayer(lg);
+    }
+    // Re-evaluate every type's zoom gate (called on zoomend via updateAreaLabelSizes).
+    function updateAreaTypeZoomVisibility(){
+        if (!MapApp.areaTypeLayers) return;
+        for (const id of areaGroupIds()) applyAreaTypeLayer(id);
+    }
     function setAreaTypeVisible(type, on){
         if (!MapApp.areaTypeVisible) return;
-        MapApp.areaTypeVisible[type] = on;
-        const lg = MapApp.areaTypeLayers && MapApp.areaTypeLayers[type];
-        if (lg && MapApp.areaLabelsLayer){
-            if (on) MapApp.areaLabelsLayer.addLayer(lg); else MapApp.areaLabelsLayer.removeLayer(lg);
-        }
+        MapApp.areaTypeVisible[type] = on;   // filter checkbox state
+        applyAreaTypeLayer(type);            // combines with the zoom gate
         updateAreaLabelSizes();
     }
     // Hold-button + wheel rotation. mousedown on a label starts a rotate gesture:
@@ -3045,6 +3084,7 @@ ALIGN_JS = r'''
     const AREA_LABEL_SCALE_MAX_M = 50, AREA_LABEL_SCALE_MIN_M = 15000, AREA_LABEL_MIN_PX = 6;
     function updateAreaLabelSizes(){
         if (!MapApp.areaMarkers) return;
+        updateAreaTypeZoomVisibility();   // add/remove zoom-gated type groups for the current zoom (#58)
         const mpp = 156543.03392 * Math.cos(MapApp.map.getCenter().lat*Math.PI/180) / Math.pow(2, MapApp.map.getZoom());
         const scaleM = 100 * mpp;
         const lo = Math.log(AREA_LABEL_SCALE_MAX_M), hi = Math.log(AREA_LABEL_SCALE_MIN_M);
@@ -3100,9 +3140,12 @@ ALIGN_JS = r'''
         for (const [id,label,color] of rows){
             const row = document.createElement('label');
             row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;';
+            // Hint that a zoom-gated type (#58) only appears when zoomed in far enough.
+            const gated = areaTypeMaxScaleM(id) > 0
+                ? ' <span style="color:var(--muted,#888);font-size:10px;">(zoom-in)</span>' : '';
             row.innerHTML = '<input type="checkbox" id="overlay-areaType-'+id+'"'+(MapApp.areaTypeVisible[id]?' checked':'')+'>'
                 + '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+(color||'#ffffff')+';border:1px solid rgba(0,0,0,.4);"></span>'
-                + label;
+                + label + gated;
             pop.appendChild(row);
             row.querySelector('input').addEventListener('change', (e)=> setAreaTypeVisible(id, e.target.checked));
         }
