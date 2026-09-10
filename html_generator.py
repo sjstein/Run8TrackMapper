@@ -1239,13 +1239,27 @@ html[data-theme="dark"] .leaflet-control-scale-line{
 
     // Centered destination-tag label for one RV (shown only when zoomed in).
     function trainDestLabelIcon(text) {
+        // Honour the global "Text Size" slider (#82): base tag size times the multiplier.
+        const px = ((TRAIN_STYLE.labelSize || 14) * (MapApp.areaFontScale || 1)).toFixed(1);
         return L.divIcon({
             className: 'rv-dest-label',
             html: `<div style="transform:translate(-50%,-50%);color:#fff;`
-                + `font:bold ${TRAIN_STYLE.labelSize||14}px/1 system-ui,sans-serif;white-space:nowrap;`
+                + `font:bold ${px}px/1 system-ui,sans-serif;white-space:nowrap;`
                 + `text-shadow:-1px -1px 0 #000,1px -1px 0 #000,-1px 1px 0 #000,1px 1px 0 #000;">`
                 + `${text}</div>`,
             iconSize: null, iconAnchor: [0, 0]
+        });
+    }
+    // Re-set every rail-vehicle destination tag's icon so it picks up the current
+    // "Text Size" multiplier (#82). The marker keeps its own text in _destText.
+    function updateTrainLabelSizes() {
+        if (!MapApp.loadedRegions) return;
+        MapApp.loadedRegions.forEach(region => {
+            const lyr = region.layers;
+            if (!lyr || !lyr.trainLabels) return;
+            lyr.trainLabels.eachLayer(m => {
+                if (m._destText != null) m.setIcon(trainDestLabelIcon(m._destText));
+            });
         });
     }
 
@@ -1323,10 +1337,12 @@ html[data-theme="dark"] .leaflet-control-scale-line{
 
                 // Destination tag centered on the car (zoom-gated visibility).
                 if (v.destination_tag) {
-                    L.marker(_midpoint(v.body), {
+                    const lbl = L.marker(_midpoint(v.body), {
                         icon: trainDestLabelIcon(v.destination_tag),
                         interactive: false, keyboard: false
-                    }).addTo(layers.trainLabels);
+                    });
+                    lbl._destText = v.destination_tag;   // kept so updateTrainLabelSizes() can re-scale it (#82)
+                    lbl.addTo(layers.trainLabels);
                 }
             }
         }
@@ -2030,16 +2046,22 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     // ========================================
     function createIndustryIcon(tag, isHighlighted, filterActive) {
         let style;
+        // Honour the global "Text Size" slider (#82): the industry tag font is the
+        // authored base (11px normal / 10px dimmed) times MapApp.areaFontScale. Unlike
+        // area labels these tags are not zoom-collapsed, so the multiplier is the whole
+        // scaling. Re-applied by applyLocalSymbolHighlighting() when the slider moves.
+        const fScale = MapApp.areaFontScale || 1;
+        const fs = (11 * fScale).toFixed(1), fsDim = (10 * fScale).toFixed(1);
 
         if (!filterActive) {
             // No filter active - normal style
-            style = `color:${COLORS.industryTrack};font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;`;
+            style = `color:${COLORS.industryTrack};font-size:${fs}px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;`;
         } else if (isHighlighted) {
             // Filter active AND this matches - red text (no background box), same size as normal.
-            style = `color:#ff0000;font-size:11px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;`;
+            style = `color:#ff0000;font-size:${fs}px;font-weight:bold;white-space:nowrap;text-shadow:-1px -1px 0 #fff,1px -1px 0 #fff,-1px 1px 0 #fff,1px 1px 0 #fff;`;
         } else {
             // Filter active but doesn't match - dimmed style
-            style = `color:#888888;font-size:10px;font-weight:normal;white-space:nowrap;text-shadow:none;opacity:0.5;`;
+            style = `color:#888888;font-size:${fsDim}px;font-weight:normal;white-space:nowrap;text-shadow:none;opacity:0.5;`;
         }
 
         return L.divIcon({
@@ -2593,21 +2615,27 @@ ALIGN_JS = r'''
         });
         applyTrackOpacity();
     }
-    // Global "Label Size" slider (sits under Track Opacity): a relative multiplier on
-    // every area label's configured font_size, applied at render time by
-    // updateAreaLabelSizes(). It does NOT change the stored/authored sizes - it only
-    // scales how big the labels look in the live view, so a user can dial the whole
-    // label layer up or down for readability without editing each label.
+    // Global "Text Size" slider (sits under Track Opacity): a relative multiplier on
+    // every on-map text label, applied at render time. It scales area labels
+    // (updateAreaLabelSizes), industry tags (applyLocalSymbolHighlighting re-renders
+    // their divIcons) and rail-vehicle destination tags (updateTrainLabelSizes) - #82.
+    // It does NOT change stored/authored sizes, and deliberately does NOT touch tooltip
+    // pop-ups; it only scales how big the map text looks in the live view.
+    function updateAllTextSizes(){
+        updateAreaLabelSizes();
+        if (typeof applyLocalSymbolHighlighting === 'function') applyLocalSymbolHighlighting();
+        if (typeof updateTrainLabelSizes === 'function') updateTrainLabelSizes();
+    }
     function addAreaLabelFontSlider(){
         const ctl = document.getElementById('opacity-control');
         if (!ctl) return;
         const row = document.createElement('label');
-        row.innerHTML = '<span class="oc-lbl">Label Size:</span><input type="range" id="area-font-slider" min="50" max="300" step="5" value="'
+        row.innerHTML = '<span class="oc-lbl">Text Size:</span><input type="range" id="area-font-slider" min="50" max="300" step="5" value="'
             + Math.round(MapApp.areaFontScale * 100) + '">';
         ctl.appendChild(row);
         document.getElementById('area-font-slider').addEventListener('input', (e)=>{
             MapApp.areaFontScale = e.target.value/100;
-            updateAreaLabelSizes();
+            updateAllTextSizes();
         });
     }
     function alignInit(){
