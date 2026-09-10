@@ -3166,6 +3166,9 @@ ALIGN_JS = r'''
                             : (j.error || 'Incorrect password.'); return; }
                     MapApp.editToken = j.token; close();
                     if (MapApp.enableAuthoringUI) MapApp.enableAuthoringUI();
+                    // Editing labels is easier with them shown - turn on the Area Labels
+                    // overlay if it isn't already (#56).
+                    if (typeof ensureAreaOverlayVisible === 'function') ensureAreaOverlayVisible();
                     if (MapApp.hasBackend) rebuildAreaLabels();   // markers become editable
                 })
                 .catch(err => { msg.style.color = '#c0392b'; msg.textContent = 'Unlock failed: ' + err.message; });
