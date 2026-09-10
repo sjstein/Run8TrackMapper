@@ -4,7 +4,9 @@
 
 This lets people watch the trains on YOUR Run8 server, live, on a map in their
 web browser. It runs on the same Windows machine as your r8server. Nothing about
-your server is exposed except the public track picture - it is read-only.
+your server is exposed except the public track picture, which is read-only by
+default. (You can optionally let trusted staff edit the map's text labels behind
+a password - see "ENABLE LABEL EDITING" below.)
 
 You need:
   - Run8 installed on this machine (this tool reads your local route files to
@@ -67,12 +69,84 @@ this with you, or don't run it. But none of the warnings mean the tool is unsafe
 
 
 ----------------------------------------------------------------------------
+ ENABLE LABEL EDITING (OPTIONAL, ADVANCED)
+----------------------------------------------------------------------------
+
+By default the map is READ-ONLY: anyone can view it, nobody can change it. You
+can optionally let your trusted staff add and edit the text labels (yard names,
+control points, track labels...) live on the map, protected by a shared password.
+
+  *** READ THIS FIRST - SECURITY ***
+  Editing is protected by a password, and that password travels over the network.
+  If your map is exposed as a plain "http://" address (a normal router port
+  forward), that password can be read by anyone watching the traffic. So:
+
+    - Read-only map  -> a plain port forward (http) is fine. Nothing to protect.
+    - Editing enabled -> you MUST serve it over https, using a free tunnel (below).
+                         Do NOT enable editing on a raw port-forwarded http map.
+
+Turn editing on:
+
+  1. Open "Start Map.bat" in Notepad and set a password on the RUN8_EDIT_PASSWORD
+     line, e.g.:
+         set "RUN8_EDIT_PASSWORD=some-long-shared-passphrase"
+     Pick something long; share it only with staff who should edit. Leaving it
+     blank keeps the map read-only.
+
+  2. Expose the map over https with a tunnel (see the next section), NOT a raw
+     port forward. Start the map, then start the tunnel.
+
+  3. Staff editing: on the map, TYPE the word  edit  (just type it, there is no
+     button), enter the password, and the "Add Label" tools appear. Click
+     "Leave editing" (or reload) to lock again. There is nothing on screen that
+     tells a normal viewer editing exists.
+
+  Change the password later by editing Start Map.bat and restarting the map.
+
+
+----------------------------------------------------------------------------
+ EXPOSING THE MAP SECURELY (https) - REQUIRED IF EDITING IS ON
+----------------------------------------------------------------------------
+
+These give your map a proper "https://" address so the edit password is
+encrypted. A tunnel also means you do NOT port-forward anything (nothing on this
+PC is opened to the internet directly).
+
+RECOMMENDED - Tailscale Funnel (free, https, no port forwarding, stable address):
+
+  1. Install Tailscale (https://tailscale.com/download), sign in, and in the
+     admin console enable HTTPS certificates and Funnel for this machine
+     (Settings -> Features; the Funnel node attribute).
+  2. Start your map as usual (Start Map.bat). Leave PORT as 8000.
+  3. In a terminal on this PC, publish that port:
+         tailscale funnel 8000
+     It prints a public https address like
+         https://your-pc.your-tailnet.ts.net/
+     Share THAT address with viewers. (Add  --bg  to run it in the background:
+     tailscale funnel --bg 8000 .)
+  4. You do NOT need a router port forward for the map when using Funnel. If you
+     previously forwarded the map's port, you can remove that rule.
+
+ALTERNATIVE - Caddy (if you already own a domain name):
+
+  1. Point your domain (e.g. map.yourrailroad.com) at your connection and forward
+     TCP ports 80 and 443 to this PC.
+  2. Install Caddy (https://caddyserver.com) and create a "Caddyfile" containing:
+         map.yourrailroad.com {
+             reverse_proxy localhost:8000
+         }
+  3. Run  caddy run  . Caddy fetches a free HTTPS certificate automatically and
+     serves your map at https://map.yourrailroad.com/ .
+
+
+----------------------------------------------------------------------------
  GOOD TO KNOW
 ----------------------------------------------------------------------------
 
-- No padlock (http, not https) is expected and fine. This is a public, read-only
-  map with no logins and no sensitive data. (Advanced users with a real domain
-  can put a reverse proxy like Caddy in front for https - optional.)
+- No padlock (http, not https) is expected and fine FOR A READ-ONLY MAP - it has
+  no logins and no sensitive data. (If you enable label editing, that no longer
+  applies: you must serve it over https via a tunnel - see the editing section
+  above.)
 
 - Keep the window open while you want the map available. To have it start with
   Windows, put a shortcut to "Start Map.bat" in your Startup folder
