@@ -264,6 +264,44 @@ train_outline = #000000   # thin spine joining a train's cars
 output_dir = ./output/socal/
 ```
 
+#### Other optional config sections
+Beyond the sections above (and the `[trains]` line widths / `[signals]` / `[grade]` /
+`[label_types]` / `[color_presets]` / `[car_type_colors]` / `[loco_company_colors]` sections
+documented in their own feature sections), a few smaller ones exist. All keys are optional;
+defaults shown.
+
+**`[track]`** — track line width, scaled with zoom (`VisualizationConfig.track_*`, injected as
+`window.TRACK_STYLE`):
+- `width` (5) — full line width in **px** at/above `full_zoom`.
+- `min_width` (1.5) — floor width in px when zoomed far out.
+- `full_zoom` (14) — zoom at/above which the line is full width; below it the width halves per
+  zoom level down to `min_width`. `0` = fixed `width` (no zoom scaling).
+
+**`[tile_grid]`** (formerly `[tile_based_plot]`, still accepted as an alias) — the tile →
+world-metre coordinate frame the align viewer draws and aligns on. It is **not** leftover from
+the removed tile-based *viewer*; it's the coordinate system the align viewer is built on
+(`TileBasedConfig`, emitted as `manifest.tile_params`):
+- `home_tile` (`tile_x,tile_z`, default `0,0`) — the reference tile taken as the world origin;
+  every track/label/tile position is measured as an offset from it.
+- `tile_width` / `tile_height` (842.3 / 1023.2) — tile size in **metres**, used to convert Run8
+  tile-local coordinates into the contiguous world grid.
+
+**`[trains]`** — in addition to the line-width keys above, the zoomed-out level-of-detail knobs
+(all read into `window.TRAIN_STYLE`; `moving_hysteresis` is used by `serve.py` live watching only):
+- `label_size` (14) — destination-tag text size in px.
+- `coupler_gap_m` (1) — fixed gap (m) drawn between coupled cars.
+- `deoverlap` (true) — lay each consist's cars end-to-end so coupled cars don't overlap
+  (`false` = raw per-truck placement).
+- `lod_scale_m` (300) — at/above this scale-bar reading (m), long trains collapse to a single line.
+- `lod_min_cars` (3) — while collapsed, only trains with **more than** this many cars are drawn
+  (shorter ones hidden to de-clutter).
+- `lod_color` (`#5f6368`) — colour of a collapsed (zoomed-out) train line.
+- `moving_hysteresis` (2) — keep a train flagged "moving" this many stationary save-cycles after
+  its last real movement, so brief holds don't flicker the highlight. `0` = strict per-cycle.
+
+**Per-region `[region.*] terrain_tile_dir`** — optional override of that region's terrain-tile
+(`.tr4`) directory; when omitted the tiles come from `[visualization] region_dir`'s `TerrainTiles`.
+
 #### Area/Place Labels
 Optional `[area.*]` sections add always-on text labels (yards, towns, junctions,
 control points) at a tile + Run8 local coordinate. They may live inline in the config

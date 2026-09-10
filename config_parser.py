@@ -721,10 +721,14 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
             if hexval:
                 color_presets[preset_name.strip().lower()] = hexval
 
-    # Parse [tile_based_plot] section (optional)
+    # Parse the tile-grid coordinate frame (optional). Preferred section name is [tile_grid];
+    # [tile_based_plot] is accepted as a backward-compatible alias (the former name, kept so
+    # existing configs keep working — it predates the removal of the tile-based viewer).
     tile_based = None
-    if 'tile_based_plot' in parser:
-        tb_section = parser['tile_based_plot']
+    tile_grid_name = 'tile_grid' if 'tile_grid' in parser else (
+        'tile_based_plot' if 'tile_based_plot' in parser else None)
+    if tile_grid_name:
+        tb_section = parser[tile_grid_name]
 
         # Parse home_tile (format: "x,z" e.g., "209,-10")
         home_tile_str = tb_section.get('home_tile', '0,0').strip()
@@ -732,7 +736,7 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
             parts = home_tile_str.split(',')
             home_tile = (int(parts[0].strip()), int(parts[1].strip()))
         except (ValueError, IndexError):
-            errors.append(f"[tile_based_plot] home_tile must be in format 'x,z' (e.g., '209,-10')")
+            errors.append(f"[{tile_grid_name}] home_tile must be in format 'x,z' (e.g., '209,-10')")
             home_tile = (0, 0)
 
         tile_width = float(tb_section.get('tile_width', '842.3').strip())
