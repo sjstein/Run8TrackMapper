@@ -3506,7 +3506,9 @@ ALIGN_JS = r'''
         }
         const area = { label:'', tile_x: cap.tileX, tile_z: cap.tileZ,
                        local_x: +cap.localX.toFixed(1), local_z: +cap.localZ.toFixed(1),
-                       rotation, type: newLabelType() };
+                       // Default to the type the last new label used, so a run of same-type
+                       // labels doesn't require re-picking each time (#56 feedback).
+                       rotation, type: MapApp.lastLabelType || newLabelType() };
         openAreaEditor(area, { isNew:true, latlng: cap.latlng });
     }
     function showAreaHint(html){
@@ -3610,7 +3612,8 @@ ALIGN_JS = r'''
                 }
                 saveBtn.disabled = true;
                 req.then(saved => {
-                    if (isNew) addAreaMarker(saved); else replaceAreaMarker(saved);
+                    if (isNew){ addAreaMarker(saved); MapApp.lastLabelType = body.type; }  // remember for the next new label
+                    else replaceAreaMarker(saved);
                     updateAreaLabelSizes(); ensureAreaOverlayVisible(); ensureAreaTypeVisible(saved.type);
                     MapApp.map.closePopup();
                 }).catch(e => { saveBtn.disabled = false; showErr(e.message); });
