@@ -215,6 +215,11 @@ name = Southern California
 tile_corrections = tile_corrections.csv
 # Region directory: the industry database (Config.ind) and TerrainTiles are derived from it.
 region_dir = C:\Run8Studios\...\Regions\SouthernCA
+# Optional: base directory that holds the per-region route (DLC) folders. When set, a
+# [region.*] directory given as a bare folder name is resolved against it. If omitted it
+# is derived from region_dir (its V3Routes ancestor; standard layout is
+# .../V3Routes/Regions/<Region>), so bare route-folder names work with no extra config.
+# routes_dir = C:\Run8Studios\...\V3Routes
 # Optional: explicit path to the industry database (Config.ind), resolved relative to this
 # config's dir. Overrides the derived region_dir/Config.ind (terrain tiles still use region_dir).
 # industry_file = Config_socal.ind
@@ -227,7 +232,9 @@ initial_track_opacity = 80
 [region.mojave]
 display_name = Mojave Subdivision
 route_prefix = 100
-directory = C:\Run8Studios\...\BNSF_MojaveSub
+# directory may be a bare route-folder name (resolved under routes_dir / the derived
+# V3Routes base) or a full path (back-compat). Both forms are accepted.
+directory = BNSF_MojaveSub
 enabled_by_default = true
 # Optional: per-region track color (overrides global default)
 track_color = #0066cc
@@ -235,7 +242,7 @@ track_color = #0066cc
 [region.barstow]
 display_name = Barstow Subdivision
 route_prefix = 200
-directory = C:\Run8Studios\...\BNSF_BarstowSub
+directory = BNSF_BarstowSub
 enabled_by_default = false
 track_color = #2266ff
 
