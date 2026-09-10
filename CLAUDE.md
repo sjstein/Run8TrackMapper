@@ -300,7 +300,7 @@ everything from `manifest.label_types` (`labelTypes`/`labelTypeColor`/`areaTypeO
 `[label_types]` entry is a **zoom gate in scale-bar metres**: labels of that type render
 only when the scale bar is **≤ `max_scale_m`** (i.e. zoomed in that far); `0`/absent =
 always show. This lets a dense category — e.g. individual yard-track labels (`track =
-Track, #6fbf4a, 50`) authored like any other area label — appear only when zoomed in,
+Track, #6fbf4a, 20`) authored like any other area label — appear only when zoomed in,
 without cluttering the map when zoomed out. The parse peels the trailing field only when
 it parses as a number, so a `Display Name, #color` with no gate (and even a display name
 containing commas) is unchanged. In the viewer each type's per-category layer group is
