@@ -37,7 +37,8 @@ from pathlib import Path
 
 from config_parser import parse_config
 from output_generator import generate_output
-from serve import AuthoringState, make_handler, _QuietThreadingHTTPServer
+from serve import (AuthoringState, make_handler, _QuietThreadingHTTPServer,
+                   _resolve_writable_areas_file)
 from version import __version__
 
 
@@ -186,7 +187,17 @@ def main():
                         help='Skip generation entirely; just serve the existing output')
     parser.add_argument('--no-update-check', action='store_true',
                         help='Do not check whether a newer bundle has been published')
+    parser.add_argument('--edit-password', dest='edit_password', metavar='PASSWORD',
+                        help='Shared password that lets staff edit area labels on the live '
+                             'map. WITHOUT it (the default) the map is read-only. Prefer the '
+                             'RUN8_EDIT_PASSWORD environment variable so the secret is not in '
+                             'the command line. On a public host, serve behind a TLS tunnel '
+                             '(see the hosting docs).')
     args = parser.parse_args()
+
+    # Edit password (#56): presence enables password-gated label editing; absence keeps
+    # the map read-only. Env var preferred (keeps the secret out of argv / the console).
+    edit_password = args.edit_password or os.environ.get('RUN8_EDIT_PASSWORD') or None
 
     # Print progress promptly. A frozen console app's stdout is block-buffered when
     # it isn't attached to a real console (e.g. Git Bash / a pipe), which makes the
@@ -235,7 +246,9 @@ def main():
         # Bake the current save only if it's actually there; otherwise build an
         # empty-of-trains map and let the live poll fill it in within seconds.
         bake = str(world_save) if (world_save and world_save.exists()) else None
-        generate_output(config, authoring=False, world_save=bake)   # production: no "Add Label" button
+        # Always include the authoring UI; it stays inert until an edit password is set
+        # and a staffer unlocks (#56). Editing itself is gated at serve time, below.
+        generate_output(config, world_save=bake)
         print("Map generated.")
     else:
         print(f"\nUsing existing map at {output_dir} (pass --regenerate to rebuild).")
@@ -244,13 +257,31 @@ def main():
         print(f"ERROR: {index_html} still not found after generation.", file=sys.stderr)
         sys.exit(1)
 
-    # ---- 2) serve it read-only, network-facing, watching the world save ------
+    # ---- 2) serve it, network-facing, watching the world save ----------------
+    # Editing is password-gated (#56): with no edit password the map is read-only; with
+    # one, staff type "edit" in the viewer and unlock with the password.
+    authoring = bool(edit_password)
+    areas_file = output_dir / '_noauthoring.ini'   # dummy; only written when authoring
+    if authoring:
+        resolved = _resolve_writable_areas_file(config, Path(config_path), None)
+        if resolved is None:
+            print("  Note: an edit password was set but the config has no "
+                  "[visualization] areas_file, so there is nowhere to save labels - "
+                  "serving READ-ONLY. Add an areas_file and restart to enable editing.")
+            authoring = False
+        else:
+            areas_file = resolved
     state = AuthoringState(
-        Path(config_path), output_dir,
-        output_dir / '_noauthoring.ini',   # dummy path; authoring is off so it's never written
+        Path(config_path), output_dir, areas_file,
         config=config, world_save=world_save,
-        accept_uploads=False, upload_token=None)
-    handler = make_handler(state, authoring=False)
+        accept_uploads=False, upload_token=None,
+        edit_password=edit_password if authoring else None)
+    handler = make_handler(state, authoring=authoring)
+    if authoring:
+        try:
+            state.sync_manifest()   # keep served manifest in sync with the areas file
+        except Exception:  # noqa: BLE001
+            pass
     httpd = _QuietThreadingHTTPServer((args.host, args.port), handler)
 
     # ---- 3) background update check (non-blocking, best-effort) --------------
@@ -261,7 +292,9 @@ def main():
 
     # ---- banner --------------------------------------------------------------
     shown_host = 'localhost' if args.host in ('0.0.0.0', '127.0.0.1') else args.host
-    print(f"\n  Serving : {output_dir}  (read-only)")
+    print(f"\n  Serving : {output_dir}  ({'editing enabled (password-gated)' if authoring else 'read-only'})")
+    if authoring:
+        print(f"  Editing : staff type \"edit\" in the map, then unlock with the password.")
     if world_save:
         exists = "" if world_save.exists() else "  (not found yet - will pick it up when Run8 saves)"
         print(f"  World   : {world_save}{exists}")
@@ -273,6 +306,11 @@ def main():
         print(f"  Public  : forward TCP port {args.port} on your router and allow it through "
               f"Windows Firewall,\n            then share http://<your-address>:{args.port}/ "
               f"(a dynamic-DNS hostname keeps it stable).")
+        if authoring:
+            print("  WARNING : editing is enabled over plain HTTP on a public port - the "
+                  "password\n            can be sniffed. Put the map behind a TLS tunnel "
+                  "(Tailscale Funnel /\n            Caddy) instead of forwarding a raw port - "
+                  "see the hosting docs.")
     print("\nPress Ctrl+C to stop.\n")
     try:
         httpd.serve_forever()
