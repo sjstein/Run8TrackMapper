@@ -537,8 +537,10 @@ if __name__ == '__main__':
         '--production',
         action='store_true',
         dest='production',
-        help='Same as the default align viewer but WITHOUT the "Add Label" authoring button '
-             '(for hosting the map to end users)'
+        help='DEPRECATED no-op. Editing is now gated at serve time by an edit password '
+             '(serve.py --edit-password / RUN8_EDIT_PASSWORD): with no password the map is '
+             'read-only, so a separate "production" build is no longer needed. The authoring '
+             'UI is always present in the HTML but inert until the server allows editing.'
     )
     parser.add_argument(
         '--world',
@@ -554,7 +556,11 @@ if __name__ == '__main__':
 
     if args.tile_report:
         generate_tile_report(config, args.tile_report)
-    elif args.production:
-        generate_output(config, authoring=False, world_save=args.world)  # align viewer, no label authoring
     else:
-        generate_output(config, world_save=args.world)  # DEFAULT: manual-alignment viewer
+        if args.production:
+            print("Note: --production is deprecated and now a no-op. Editing is gated at serve "
+                  "time by an edit password (serve.py --edit-password / RUN8_EDIT_PASSWORD); "
+                  "with none the map is read-only.")
+        # DEFAULT (and only) build: manual-alignment viewer. The authoring UI is always
+        # present but inert until serve.py permits editing and the user unlocks (#56).
+        generate_output(config, world_save=args.world)

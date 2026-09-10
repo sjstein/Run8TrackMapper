@@ -2758,7 +2758,12 @@ ALIGN_JS = r'''
                 for (let i=0;i<(v.body||[]).length;i++){ const q=T(v.body[i][0],v.body[i][1]); v.body[i]=[q[0],q[1]]; }
         };
         MapApp.map.setView([a.lat, a.lon], 12);
-        MapApp.authoring = (typeof window.__run8_authoring === 'undefined') ? true : !!window.__run8_authoring;
+        // MapApp.authoring now means "editing is currently unlocked" (#56); it starts
+        // false and is turned on only after the user unlocks with the edit password
+        // (detectBackend + doUnlock). The authoring UI is compiled in regardless.
+        MapApp.authoring = false;
+        MapApp.editMode = 'disabled';
+        MapApp.editToken = null;
         MapApp.hasBackend = false;
         buildAlignUI();
         addTrackOpacitySlider();
@@ -3074,18 +3079,154 @@ ALIGN_JS = r'''
         if (e.originalEvent) L.DomEvent.preventDefault(e.originalEvent);
         openInGoogleMaps(e.latlng);
     }
-    // Probe for serve.py; sets MapApp.hasBackend. Fails closed to static mode.
+    // ---- Edit unlock (#56): a shared password unlocks label editing. The password
+    // is never sent: the client fetches a one-time nonce and sends HMAC(password,nonce).
+    // crypto.subtle needs a secure context (unavailable on plain-HTTP non-localhost, the
+    // very case we must support), so use a small pure-JS HMAC-SHA256 that works anywhere.
+    const _sha256 = (function(){
+        const K=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+        const rotr=(x,n)=>(x>>>n)|(x<<(32-n));
+        return function(bytes){
+            const l=bytes.length, total=(((l+8)>>6)+1)<<6;
+            const m=new Uint8Array(total); m.set(bytes); m[l]=0x80;
+            const dv=new DataView(m.buffer);
+            dv.setUint32(total-4, (l*8)>>>0, false);
+            dv.setUint32(total-8, Math.floor(l/0x20000000)>>>0, false);
+            let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+            const w=new Uint32Array(64);
+            for(let i=0;i<total;i+=64){
+                for(let t=0;t<16;t++) w[t]=dv.getUint32(i+t*4,false);
+                for(let t=16;t<64;t++){
+                    const s0=rotr(w[t-15],7)^rotr(w[t-15],18)^(w[t-15]>>>3);
+                    const s1=rotr(w[t-2],17)^rotr(w[t-2],19)^(w[t-2]>>>10);
+                    w[t]=(w[t-16]+s0+w[t-7]+s1)>>>0;
+                }
+                let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,hh=h7;
+                for(let t=0;t<64;t++){
+                    const S1=rotr(e,6)^rotr(e,11)^rotr(e,25), ch=(e&f)^(~e&g);
+                    const t1=(hh+S1+ch+K[t]+w[t])>>>0;
+                    const S0=rotr(a,2)^rotr(a,13)^rotr(a,22), maj=(a&b)^(a&c)^(b&c);
+                    const t2=(S0+maj)>>>0;
+                    hh=g;g=f;f=e;e=(d+t1)>>>0;d=c;c=b;b=a;a=(t1+t2)>>>0;
+                }
+                h0=(h0+a)>>>0;h1=(h1+b)>>>0;h2=(h2+c)>>>0;h3=(h3+d)>>>0;h4=(h4+e)>>>0;h5=(h5+f)>>>0;h6=(h6+g)>>>0;h7=(h7+hh)>>>0;
+            }
+            return [h0,h1,h2,h3,h4,h5,h6,h7].map(x=>('00000000'+(x>>>0).toString(16)).slice(-8)).join('');
+        };
+    })();
+    function _hexToBytes(h){ const a=new Uint8Array(h.length/2); for(let i=0;i<a.length;i++) a[i]=parseInt(h.substr(i*2,2),16); return a; }
+    function hmacSha256Hex(keyStr, msgStr){
+        const enc=new TextEncoder();
+        let key=enc.encode(keyStr);
+        if(key.length>64) key=_hexToBytes(_sha256(key));
+        const ipad=new Uint8Array(64), opad=new Uint8Array(64);
+        for(let i=0;i<64;i++){ const kb=i<key.length?key[i]:0; ipad[i]=kb^0x36; opad[i]=kb^0x5c; }
+        const msg=enc.encode(msgStr);
+        const inner=new Uint8Array(64+msg.length); inner.set(ipad); inner.set(msg,64);
+        const innerHash=_hexToBytes(_sha256(inner));
+        const outer=new Uint8Array(64+32); outer.set(opad); outer.set(innerHash,64);
+        return _sha256(outer);
+    }
+    // Inline password prompt -> challenge-response -> store token + reveal authoring UI.
+    // Opened by the "Unlock editing" button. (A small popup, not window.prompt.)
+    function doUnlock(){
+        let pop = document.getElementById('unlock-pop');
+        if (pop) { pop.remove(); return; }   // toggle off if already open
+        pop = document.createElement('div'); pop.id = 'unlock-pop';
+        pop.style.cssText = 'position:absolute;top:46px;left:170px;z-index:2000;background:var(--panel-bg);'
+            + 'color:var(--panel-fg);border:1px solid var(--border-strong);border-radius:6px;'
+            + 'box-shadow:0 2px 12px var(--shadow);padding:10px;font:13px Arial;';
+        pop.innerHTML = '<div style="margin-bottom:6px;font-weight:bold;">Unlock editing</div>'
+            + '<input id="unlock-pw" type="password" placeholder="Edit password" autocomplete="off" '
+            + 'style="width:190px;padding:4px;box-sizing:border-box;">'
+            + '<div id="unlock-msg" style="color:#c0392b;font-size:12px;min-height:15px;margin-top:4px;"></div>'
+            + '<div style="margin-top:6px;text-align:right;">'
+            + '<button id="unlock-cancel" style="margin-right:6px;">Cancel</button>'
+            + '<button id="unlock-go">Unlock</button></div>';
+        document.body.appendChild(pop);
+        const pw = pop.querySelector('#unlock-pw'), msg = pop.querySelector('#unlock-msg');
+        pw.focus();
+        const close = () => pop.remove();
+        pop.querySelector('#unlock-cancel').onclick = close;
+        const submit = () => {
+            const val = pw.value; if (!val) return;
+            msg.style.color = 'var(--text-muted)'; msg.textContent = 'Unlocking...';
+            fetch('api/unlock', {cache:'no-store'})
+                .then(r => r.ok ? r.json() : Promise.reject(new Error('editing not available')))
+                .then(ch => {
+                    if (!ch || !ch.nonce) throw new Error('editing not available');
+                    const proof = hmacSha256Hex(val, ch.nonce);
+                    return fetch('api/unlock', {method:'POST', headers:{'Content-Type':'application/json'},
+                                                body: JSON.stringify({nonce: ch.nonce, proof})});
+                })
+                .then(async r => {
+                    const j = await r.json().catch(() => ({}));
+                    if (!r.ok) { msg.style.color = '#c0392b'; msg.textContent = r.status === 429
+                            ? 'Too many attempts; wait and retry.'
+                            : (j.error || 'Incorrect password.'); return; }
+                    MapApp.editToken = j.token; close();
+                    if (MapApp.enableAuthoringUI) MapApp.enableAuthoringUI();
+                    if (MapApp.hasBackend) rebuildAreaLabels();   // markers become editable
+                })
+                .catch(err => { msg.style.color = '#c0392b'; msg.textContent = 'Unlock failed: ' + err.message; });
+        };
+        pop.querySelector('#unlock-go').onclick = submit;
+        pw.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); else if (e.key === 'Escape') close(); });
+    }
+    MapApp.doUnlock = doUnlock;
+    // Re-lock when the token is rejected (expired / server restarted): drop it and show
+    // the Unlock control again so the user can re-enter the password.
+    function relockEditing(){
+        MapApp.editToken = null;
+        if (MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();
+        if (MapApp.showUnlockControl && MapApp.editMode === 'locked') MapApp.showUnlockControl();
+    }
+
+    // ---- Live area-label refresh (#56): everyone (even read-only viewers) sees other
+    // editors' add/edit/delete within a few seconds, via the areas_version on /api/ping.
+    MapApp.areasVersion = null;
+    function refreshAreasFromServer(){
+        fetch('api/areas', {cache:'no-store'}).then(r => r.ok ? r.json() : null).then(j => {
+            if (!j || !j.areas || !MapApp.manifest) return;
+            MapApp.manifest.areas = j.areas;
+            MapApp.areasVersion = j.version;
+            rebuildAreaLabels();
+        }).catch(() => {});
+    }
+    function pollAreasOnce(){
+        return fetch('api/ping', {cache:'no-store'}).then(r => r.ok ? r.json() : null).then(j => {
+            if (!j) return;
+            // Don't yank the map out from under an in-progress placement gesture.
+            const busy = MapApp.labelMode || (MapApp.areaCapture && MapApp.areaCapture.pending);
+            if (MapApp.areasVersion !== null && j.areas_version !== MapApp.areasVersion && !busy) {
+                refreshAreasFromServer();
+            } else if (MapApp.areasVersion === null) {
+                MapApp.areasVersion = j.areas_version;
+            }
+        }).catch(() => {});
+    }
+    function startAreasPolling(){
+        if (MapApp._areasPoll) return;
+        MapApp._areasPoll = setInterval(pollAreasOnce, 5000);
+    }
+
+    // Probe for serve.py; sets MapApp.hasBackend + edit mode. Fails closed to static mode.
     function detectBackend(){
         return fetch('api/ping').then(r => r.ok ? r.json() : null)
             .then(j => {
                 MapApp.hasBackend = !!(j && j.ok);
-                // Honor a read-only server (serve.py --no-authoring): hide the Add
-                // Label button and make existing labels non-interactive, even though
-                // the page was generated as an authoring build.
-                if (j && j.ok && j.authoring === false && MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();
+                if (!MapApp.hasBackend) return;
+                // Editing model (#56): 'disabled' = read-only; 'locked' = show the
+                // "Unlock editing" control (authoring stays off until the user unlocks).
+                MapApp.editMode = j.edit_mode || (j.authoring === false ? 'disabled' : 'locked');
+                if (MapApp.editMode === 'locked' && MapApp.showUnlockControl) MapApp.showUnlockControl();
+                else if (MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();   // read-only
+                // Seed the areas poll version and start it so all viewers see live label edits.
+                MapApp.areasVersion = (typeof j.areas_version === 'number') ? j.areas_version : null;
+                startAreasPolling();
                 // If the server is watching a world save, poll it so rail-vehicle
                 // positions refresh live when the save file is re-written.
-                if (j && j.ok && j.world) startTrainsPolling();
+                if (j.world) startTrainsPolling();
             })
             .catch(() => { MapApp.hasBackend = false; });
     }
@@ -3152,10 +3293,15 @@ ALIGN_JS = r'''
     }
     function apiArea(method, id, body){
         const url = 'api/areas' + (id != null ? '/' + encodeURIComponent(id) : '');
-        return fetch(url, { method, headers: {'Content-Type':'application/json'},
+        const headers = {'Content-Type':'application/json'};
+        if (MapApp.editToken) headers['Authorization'] = 'Bearer ' + MapApp.editToken;  // (#56)
+        return fetch(url, { method, headers,
                             body: body ? JSON.stringify(body) : undefined })
             .then(async r => { const t = await r.text(); let j = {};
                 try { j = t ? JSON.parse(t) : {}; } catch(e){}
+                // Token expired / server restarted: drop back to the locked state so the
+                // user can re-enter the password.
+                if (r.status === 401) { relockEditing(); }
                 if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status)); return j; });
     }
     function escapeHtml(s){ return String(s == null ? '' : s)
@@ -3555,11 +3701,17 @@ ALIGN_JS = r'''
         const authoring = (typeof window.__run8_authoring === 'undefined') ? true : !!window.__run8_authoring;
         const btn=document.createElement('button'); btn.textContent='Align mode: OFF'; btn.style.cssText=bs+';left:52px';
         document.body.appendChild(btn);
-        let lbl=null;
-        if (authoring){
-            lbl=document.createElement('button'); lbl.textContent='Add Label: OFF'; lbl.style.cssText=bs+';left:170px';
-            document.body.appendChild(lbl);
-        }
+        // Add Label + Unlock buttons share the same slot; which shows depends on the edit
+        // state (#56): Unlock when locked, Add Label once unlocked, neither when read-only.
+        // Both start hidden; detectBackend / doUnlock reveal the right one.
+        let lbl=document.createElement('button'); lbl.textContent='Add Label: OFF';
+        lbl.style.cssText=bs+';left:170px'; lbl.style.display='none';
+        document.body.appendChild(lbl);
+        let unlockBtn=document.createElement('button'); unlockBtn.textContent='Unlock editing';
+        unlockBtn.title='Enter the edit password to add / edit labels';
+        unlockBtn.style.cssText=bs+';left:170px'; unlockBtn.style.display='none';
+        unlockBtn.onclick=()=>{ if(MapApp.doUnlock) MapApp.doUnlock(); };
+        document.body.appendChild(unlockBtn);
         // Help button + overlay: a quick reference of the map's mouse/key commands.
         const help=document.createElement('button'); help.textContent='Help';
         // Sit Help directly under the Align-mode button (same left, second row) so it
@@ -3620,16 +3772,21 @@ ALIGN_JS = r'''
             if(on){ MapApp.labelMode=false; updL(); MapApp.map.dragging.disable(); }
             else { MapApp.map.dragging.enable(); drag=null; setT(''); }
             updA(); }
-        function setLabel(on){ if(!authoring) return; MapApp.labelMode=on;
+        function setLabel(on){ if(!MapApp.authoring) return; MapApp.labelMode=on;
             if(on){ aligning=false; updA(); MapApp.map.dragging.enable(); drag=null; setT(''); }
             else if(MapApp.areaCapture && MapApp.areaCapture.pending){ finalizeAreaCapture(null); }
             updL(); }
         btn.onclick=()=> setAlign(!aligning);
         if(lbl) lbl.onclick=()=> setLabel(!MapApp.labelMode);
-        // Let a read-only backend (serve.py --no-authoring) drop the authoring UI:
-        // detectBackend() calls this when /api/ping reports authoring:false.
+        // Edit-state UI hooks (#56), driven by detectBackend()/doUnlock():
+        //   showUnlockControl  - locked: offer the Unlock button.
+        //   enableAuthoringUI  - unlocked: reveal Add Label, hide Unlock, allow editing.
+        //   disableAuthoringUI - read-only / re-locked: hide both, stop editing.
         MapApp.addLabelBtn = lbl;
-        MapApp.disableAuthoringUI = function(){ MapApp.authoring = false; if(lbl){ setLabel(false); lbl.style.display='none'; } };
+        MapApp.showUnlockControl = function(){ if(unlockBtn) unlockBtn.style.display=''; if(lbl) lbl.style.display='none'; };
+        MapApp.hideUnlockControl = function(){ if(unlockBtn) unlockBtn.style.display='none'; };
+        MapApp.enableAuthoringUI = function(){ MapApp.authoring = true; if(unlockBtn) unlockBtn.style.display='none'; if(lbl) lbl.style.display=''; };
+        MapApp.disableAuthoringUI = function(){ MapApp.authoring = false; if(lbl){ setLabel(false); lbl.style.display='none'; } if(unlockBtn) unlockBtn.style.display='none'; };
         // align-mode drag
         MapApp.map.on('mousedown', e=>{ if(!aligning) return;
             drag={ p:MapApp.map.mouseEventToContainerPoint(e.originalEvent), a:e.latlng, last:e.latlng }; });
@@ -3640,7 +3797,7 @@ ALIGN_JS = r'''
             MapApp.align.lat += (d.last.lat - d.a.lat); MapApp.align.lon += (d.last.lng - d.a.lng);
             rerenderAlign(); repositionAreaLabels(); setTimeout(applyTrackOpacity, 600); });
         // label-mode capture: first click = position, second = angle (Esc = horizontal)
-        MapApp.map.on('click', e=>{ if(!authoring || !MapApp.labelMode) return; MapApp.map.closePopup();
+        MapApp.map.on('click', e=>{ if(!MapApp.authoring || !MapApp.labelMode) return; MapApp.map.closePopup();
             if(MapApp.areaCapture && MapApp.areaCapture.pending) finalizeAreaCapture(e.latlng);
             else startAreaCapture(e.latlng); });
     }
