@@ -3174,13 +3174,14 @@ ALIGN_JS = r'''
         pw.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); else if (e.key === 'Escape') close(); });
     }
     MapApp.doUnlock = doUnlock;
-    // Re-lock when the token is rejected (expired / server restarted): drop it and show
-    // the Unlock control again so the user can re-enter the password.
+    // Leave / re-lock editing: user-initiated ("Leave editing" button) or automatic when
+    // the token is rejected (expired / server restarted). Drops the token and hides the
+    // authoring UI; to edit again the user types "edit" to reopen the unlock popup.
     function relockEditing(){
         MapApp.editToken = null;
         if (MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();
-        if (MapApp.showUnlockControl && MapApp.editMode === 'locked') MapApp.showUnlockControl();
     }
+    MapApp.relockEditing = relockEditing;
 
     // ---- Live area-label refresh (#56): everyone (even read-only viewers) sees other
     // editors' add/edit/delete within a few seconds, via the areas_version on /api/ping.
@@ -3216,11 +3217,11 @@ ALIGN_JS = r'''
             .then(j => {
                 MapApp.hasBackend = !!(j && j.ok);
                 if (!MapApp.hasBackend) return;
-                // Editing model (#56): 'disabled' = read-only; 'locked' = show the
-                // "Unlock editing" control (authoring stays off until the user unlocks).
+                // Editing model (#56): 'disabled' = read-only; 'locked' = editing possible
+                // but hidden - the user types "edit" to open the unlock popup. Either way
+                // the authoring UI stays off until a successful unlock; nothing to show now.
                 MapApp.editMode = j.edit_mode || (j.authoring === false ? 'disabled' : 'locked');
-                if (MapApp.editMode === 'locked' && MapApp.showUnlockControl) MapApp.showUnlockControl();
-                else if (MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();   // read-only
+                if (MapApp.editMode !== 'locked' && MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();
                 // Seed the areas poll version and start it so all viewers see live label edits.
                 MapApp.areasVersion = (typeof j.areas_version === 'number') ? j.areas_version : null;
                 startAreasPolling();
@@ -3701,17 +3702,17 @@ ALIGN_JS = r'''
         const authoring = (typeof window.__run8_authoring === 'undefined') ? true : !!window.__run8_authoring;
         const btn=document.createElement('button'); btn.textContent='Align mode: OFF'; btn.style.cssText=bs+';left:52px';
         document.body.appendChild(btn);
-        // Add Label + Unlock buttons share the same slot; which shows depends on the edit
-        // state (#56): Unlock when locked, Add Label once unlocked, neither when read-only.
-        // Both start hidden; detectBackend / doUnlock reveal the right one.
+        // Editing controls (#56). There is NO visible "unlock" button - typing the word
+        // "edit" opens the password popup (see the hidden-reveal listener below). Once
+        // unlocked, the Add Label + "Leave editing" buttons appear; both start hidden.
         let lbl=document.createElement('button'); lbl.textContent='Add Label: OFF';
         lbl.style.cssText=bs+';left:170px'; lbl.style.display='none';
         document.body.appendChild(lbl);
-        let unlockBtn=document.createElement('button'); unlockBtn.textContent='Unlock editing';
-        unlockBtn.title='Enter the edit password to add / edit labels';
-        unlockBtn.style.cssText=bs+';left:170px'; unlockBtn.style.display='none';
-        unlockBtn.onclick=()=>{ if(MapApp.doUnlock) MapApp.doUnlock(); };
-        document.body.appendChild(unlockBtn);
+        let leaveBtn=document.createElement('button'); leaveBtn.textContent='Leave editing';
+        leaveBtn.title='Exit edit mode (re-lock). Type "edit" to unlock again.';
+        leaveBtn.style.cssText=bs+';left:290px'; leaveBtn.style.display='none';
+        leaveBtn.onclick=()=>{ if(MapApp.relockEditing) MapApp.relockEditing(); };
+        document.body.appendChild(leaveBtn);
         // Help button + overlay: a quick reference of the map's mouse/key commands.
         const help=document.createElement('button'); help.textContent='Help';
         // Sit Help directly under the Align-mode button (same left, second row) so it
@@ -3778,15 +3779,24 @@ ALIGN_JS = r'''
             updL(); }
         btn.onclick=()=> setAlign(!aligning);
         if(lbl) lbl.onclick=()=> setLabel(!MapApp.labelMode);
-        // Edit-state UI hooks (#56), driven by detectBackend()/doUnlock():
-        //   showUnlockControl  - locked: offer the Unlock button.
-        //   enableAuthoringUI  - unlocked: reveal Add Label, hide Unlock, allow editing.
+        // Edit-state UI hooks (#56), driven by detectBackend()/doUnlock()/relockEditing():
+        //   enableAuthoringUI  - unlocked: reveal Add Label + Leave editing, allow editing.
         //   disableAuthoringUI - read-only / re-locked: hide both, stop editing.
         MapApp.addLabelBtn = lbl;
-        MapApp.showUnlockControl = function(){ if(unlockBtn) unlockBtn.style.display=''; if(lbl) lbl.style.display='none'; };
-        MapApp.hideUnlockControl = function(){ if(unlockBtn) unlockBtn.style.display='none'; };
-        MapApp.enableAuthoringUI = function(){ MapApp.authoring = true; if(unlockBtn) unlockBtn.style.display='none'; if(lbl) lbl.style.display=''; };
-        MapApp.disableAuthoringUI = function(){ MapApp.authoring = false; if(lbl){ setLabel(false); lbl.style.display='none'; } if(unlockBtn) unlockBtn.style.display='none'; };
+        MapApp.enableAuthoringUI = function(){ MapApp.authoring = true; if(lbl) lbl.style.display=''; if(leaveBtn) leaveBtn.style.display=''; };
+        MapApp.disableAuthoringUI = function(){ MapApp.authoring = false; if(lbl){ setLabel(false); lbl.style.display='none'; } if(leaveBtn) leaveBtn.style.display='none'; };
+        // Hidden reveal (#56): typing the word "edit" (when not in a text field) opens the
+        // unlock popup, but only while the server reports the locked state. No visible control.
+        let _hot='';
+        document.addEventListener('keydown', e=>{
+            const t=e.target;
+            if (t && (t.tagName==='INPUT' || t.tagName==='TEXTAREA' || t.isContentEditable)) return;
+            if (e.key && e.key.length===1 && /[a-z]/i.test(e.key)) _hot=(_hot+e.key.toLowerCase()).slice(-6);
+            else { _hot=''; return; }
+            if (_hot.endsWith('edit') && MapApp.hasBackend && MapApp.editMode==='locked' && !MapApp.authoring){
+                _hot=''; if(MapApp.doUnlock) MapApp.doUnlock();
+            }
+        });
         // align-mode drag
         MapApp.map.on('mousedown', e=>{ if(!aligning) return;
             drag={ p:MapApp.map.mouseEventToContainerPoint(e.originalEvent), a:e.latlng, last:e.latlng }; });
