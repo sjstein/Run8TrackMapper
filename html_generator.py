@@ -3794,7 +3794,9 @@ ALIGN_JS = r'''
             if (e.key && e.key.length===1 && /[a-z]/i.test(e.key)) _hot=(_hot+e.key.toLowerCase()).slice(-6);
             else { _hot=''; return; }
             if (_hot.endsWith('edit') && MapApp.hasBackend && MapApp.editMode==='locked' && !MapApp.authoring){
-                _hot=''; if(MapApp.doUnlock) MapApp.doUnlock();
+                // Swallow this keystroke so the triggering "t" isn't typed into the
+                // password field the popup focuses (#56).
+                _hot=''; e.preventDefault(); if(MapApp.doUnlock) MapApp.doUnlock();
             }
         });
         // align-mode drag
