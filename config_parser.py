@@ -8,11 +8,16 @@ Parses INI files with the following structure:
 name = Southern California
 tile_corrections = tile_corrections_socal.csv
 industry_db = path/to/Regions/SouthernCA/Config.ind
+region_dir = path/to/V3Routes/Regions/SouthernCA
+# Optional: base dir holding the route folders. If omitted it is derived from
+# region_dir (its V3Routes ancestor), so a region `directory` can be a bare name.
+# routes_dir = path/to/V3Routes
 
 [region.mojave]
 display_name = Mojave Subdivision
 route_prefix = 1
-directory = path/to/V3Routes/BNSF_MojaveSub
+directory = BNSF_MojaveSub          ; bare route-folder name (resolved under routes_dir)
+# directory = path/to/V3Routes/BNSF_MojaveSub   ; a full path also still works
 enabled_by_default = true
 
 [region.barstow]
@@ -298,6 +303,21 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
     return result
 
 
+def derive_routes_dir(region_dir: Path) -> Path:
+    """Base directory that holds the per-region route folders (DLC) — used to resolve a
+    [region.*] `directory` given as a bare route-folder name instead of a full path (#55).
+
+    The standard Run8 layout is ``<...>/V3Routes/Regions/<Region>``, with the route folders
+    sitting as siblings of ``Regions`` directly under ``V3Routes``. So use the nearest
+    ``V3Routes`` ancestor of region_dir; if there is none (non-standard layout), fall back
+    to two levels up from region_dir. An explicit [visualization] routes_dir overrides this.
+    """
+    for p in region_dir.parents:
+        if p.name.lower() == 'v3routes':
+            return p
+    return region_dir.parent.parent
+
+
 def parse_config(config_path: str, require_source_files: bool = True) -> VisualizationConfig:
     """
     Parse a multi-region configuration file.
@@ -328,6 +348,8 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
     parser.read(config_path)
 
     errors = []
+    region_dir_str = ''  # [visualization] region_dir (base of industry DB + terrain tiles)
+    routes_dir_str = ''  # optional [visualization] routes_dir (base for bare route-folder names, #55)
     areas_file_str = ''  # optional; comma-separated external areas file(s)
     initial_map_opacity = 0.2   # [visualization] initial_map_opacity (base map)
     initial_track_opacity = 0.8  # [visualization] initial_track_opacity (track vectors)
@@ -352,6 +374,12 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         region_dir_str = viz.get('region_dir', '').strip()
         if not region_dir_str:
             errors.append("[visualization] region_dir is required")
+
+        # Optional routes_dir: the base directory that holds the per-region route folders
+        # (DLC). When set, a [region.*] `directory` given as a bare folder name is resolved
+        # against it (#55). If omitted, the base is derived from region_dir (its V3Routes
+        # ancestor). Resolved relative to the config dir when not absolute.
+        routes_dir_str = viz.get('routes_dir', '').strip()
 
         # Optional industry_file: an explicit path to the industry database (Config.ind).
         # When given it overrides the default region_dir/Config.ind; resolved relative to
@@ -403,6 +431,18 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         if not output_dir_str:
             errors.append("[output] output_dir is required")
 
+    # Base directory for per-region route folders (#55). A [region.*] `directory` may be a
+    # full path (unchanged, back-compat) OR just the route folder name, resolved against
+    # this base. An explicit routes_dir wins; otherwise it is derived from region_dir.
+    if routes_dir_str:
+        routes_base = Path(routes_dir_str)
+        if not routes_base.is_absolute():
+            routes_base = config_file.parent / routes_base
+    elif region_dir_str:
+        routes_base = derive_routes_dir(Path(region_dir_str))
+    else:
+        routes_base = None
+
     # Parse [region.*] sections
     region_sections = [s for s in parser.sections() if s.startswith('region.')]
     if not region_sections:
@@ -428,8 +468,20 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
                 route_prefix = 0
 
         directory_str = region.get('directory', '').strip()
+        # Resolve `directory`: an absolute path is used as-is (back-compat); a bare route
+        # folder name (or any relative path) is resolved against routes_base (#55).
+        region_directory = None
         if not directory_str:
             errors.append(f"[{section_name}] directory is required")
+        else:
+            dpath = Path(directory_str)
+            if dpath.is_absolute():
+                region_directory = dpath
+            elif routes_base is not None:
+                region_directory = routes_base / dpath
+            else:
+                errors.append(f"[{section_name}] directory '{directory_str}' is relative but "
+                              f"neither [visualization] routes_dir nor region_dir is set to resolve it")
 
         enabled_str = region.get('enabled_by_default', 'false').strip().lower()
         enabled_by_default = enabled_str in ('true', 'yes', '1')
@@ -442,12 +494,12 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         track_color_str = region.get('track_color', '').strip()
         track_color = track_color_str if track_color_str else None
 
-        if display_name and directory_str:
+        if display_name and region_directory is not None:
             regions.append(RegionConfig(
                 id=region_id,
                 display_name=display_name,
                 route_prefix=route_prefix,
-                directory=Path(directory_str),
+                directory=region_directory,
                 enabled_by_default=enabled_by_default,
                 terrain_tile_dir=terrain_tile_dir,
                 track_color=track_color
