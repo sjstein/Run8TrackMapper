@@ -971,10 +971,11 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                         ? (section.is_ctc_switch ? ' (CTC Switch)' : ' (Hand-throw Switch)') : '';
                     let sectionPopup = `<b>Section ${section.id}${sectionType}</b><br>`;
                     sectionPopup += `Length: ${section.length_ft.toFixed(1)} ft (${section.length_m.toFixed(1)} m)<br>`;
+                    sectionPopup += `Grade: ${gradeText(section.grade_pct)}<br>`;
                     sectionPopup += `Paths: ${section.paths.length}`;
 
                     polyline.bindPopup(sectionPopup, {maxWidth: 250});
-                    polyline.bindTooltip(`Section ${section.id}`, {sticky: true});
+                    polyline.bindTooltip(`Section ${section.id} · grade ${gradeText(section.grade_pct)}`, {sticky: true});
 
                     // Hover highlight handlers
                     polyline.on('mouseover', function() {
@@ -2049,6 +2050,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     function gradeRamp(){ const g=_gradeCfg(); return (g && g.ramp && g.ramp.length>=2) ? g.ramp
                           : ['#c8c8c8','#ffd400','#ff7a1a','#d7191c']; }
     function gradeMaxPct(){ const g=_gradeCfg(); return (g && g.max_pct>0) ? g.max_pct : 3.0; }
+    // Grade shown in tooltips/popups as a magnitude (the stored sign is arbitrary node
+    // ordering, so up/down isn't meaningful; the heat map is magnitude too). (#57)
+    function gradeText(pct){ return (Math.abs(+pct || 0)).toFixed(2) + '%'; }
     function _hex3(c){ c=String(c||'').replace('#',''); if(c.length===3) c=c.split('').map(x=>x+x).join('');
         return [parseInt(c.slice(0,2),16)||0, parseInt(c.slice(2,4),16)||0, parseInt(c.slice(4,6),16)||0]; }
     function _rgb3(a){ return '#'+a.map(v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join(''); }
@@ -2087,7 +2091,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const ramp = gradeRamp(), mx = gradeMaxPct();
         if (!el){
             el = document.createElement('div'); el.id = 'grade-legend';
-            el.style.cssText = 'position:absolute;bottom:30px;left:10px;z-index:1000;'
+            el.style.cssText = 'position:absolute;left:10px;z-index:1000;'
                 + 'background:var(--panel-bg,rgba(20,22,28,.88));color:var(--panel-fg,#eee);'
                 + 'border:1px solid var(--border-strong,#555);border-radius:6px;padding:6px 8px;'
                 + 'font:12px system-ui,Arial;box-shadow:0 2px 8px rgba(0,0,0,.4);pointer-events:none;';
@@ -2099,6 +2103,10 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             + `background:linear-gradient(to right,${stops});"></div>`
             + '<div style="display:flex;justify-content:space-between;">'
             + `<span>0%</span><span>${(mx/2).toFixed(1)}%</span><span>${mx}%+</span></div>`;
+        // Sit just above the opacity / text-size control box so it isn't obscured by it (#57).
+        const oc = document.getElementById('opacity-control');
+        const ocBottom = oc ? (parseInt(getComputedStyle(oc).bottom, 10) || 60) : 60;
+        el.style.bottom = (oc ? ocBottom + oc.offsetHeight + 8 : 160) + 'px';
     }
 
     function getIndustriesForSection(regionId, sectionId) {
@@ -2303,6 +2311,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const sectionType = section.is_switch ? 'Switch/Turnout' : 'Track Section';
         let content = `<b>Section ${section.id}</b> (${sectionType})<br>`;
         content += `Length: ${section.length_ft.toFixed(1)} ft (${section.length_m.toFixed(1)} m)<br>`;
+        content += `Grade: ${gradeText(section.grade_pct)}<br>`;
         content += `Track Type: ${section.track_type}<br>`;
         content += `Retarder: ${section.retarder_mph}`;
         L.popup({maxWidth: 300}).setLatLng(latlng).setContent(content).openOn(MapApp.map);
