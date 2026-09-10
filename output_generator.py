@@ -369,7 +369,7 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
         print(f"  Home tile: {tile_based_config.home_tile}")
         print(f"  Tile size: {tile_based_config.tile_width}m x {tile_based_config.tile_height}m")
     else:
-        print("\nWarning: no [tile_based_plot] section in config; using default tile parameters")
+        print("\nWarning: no [tile_grid] section in config; using default tile parameters")
         from config_parser import TileBasedConfig
         tile_based_config = TileBasedConfig()
 

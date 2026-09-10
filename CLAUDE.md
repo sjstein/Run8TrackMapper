@@ -277,8 +277,10 @@ defaults shown.
 - `full_zoom` (14) — zoom at/above which the line is full width; below it the width halves per
   zoom level down to `min_width`. `0` = fixed `width` (no zoom scaling).
 
-**`[tile_based_plot]`** — the tile → world-metre coordinate frame the align viewer draws and
-aligns on (`TileBasedConfig`, emitted as `manifest.tile_params`):
+**`[tile_grid]`** (formerly `[tile_based_plot]`, still accepted as an alias) — the tile →
+world-metre coordinate frame the align viewer draws and aligns on. It is **not** leftover from
+the removed tile-based *viewer*; it's the coordinate system the align viewer is built on
+(`TileBasedConfig`, emitted as `manifest.tile_params`):
 - `home_tile` (`tile_x,tile_z`, default `0,0`) — the reference tile taken as the world origin;
   every track/label/tile position is measured as an offset from it.
 - `tile_width` / `tile_height` (842.3 / 1023.2) — tile size in **metres**, used to convert Run8

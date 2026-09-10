@@ -29,8 +29,9 @@ METERS_PER_DEGREE_LAT = 111139.0
 # Run8 local tile size in meters (SW corner is local (0, 0); x increases east,
 # z decreases going north). Used to normalise local coords into a [0, 1]
 # fraction across a tile for bilinear lat/lon interpolation. Matches the
-# [tile_based_plot] defaults; kept here so geographic mode does not require a
-# TileBasedConfig. Override via convert_run8_to_latlon's tile_width/tile_height.
+# [tile_grid] defaults (the config section formerly named [tile_based_plot]); kept here so
+# geographic mode does not require a TileBasedConfig. Override via convert_run8_to_latlon's
+# tile_width/tile_height.
 LOCAL_TILE_WIDTH_M = 842.3
 LOCAL_TILE_HEIGHT_M = 1023.2
 
