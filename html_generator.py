@@ -122,7 +122,8 @@ def generate_javascript() -> str:
             industries: false,
             aiLocations: false,
             tileBoundaries: false,
-            trains: false
+            trains: false,
+            grade: false            // Grade heat-map colour mode (#57)
         },
         // Train display options (the "Options" button next to the Trains overlay).
         trainOptions: {
@@ -572,6 +573,12 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             {id: 'tileBoundaries', label: 'Tile Boundaries'},
             {id: 'trains', label: 'Trains'}
         ];
+        // Grade heat-map colour mode (#57): a track-colouring toggle, shown only when the
+        // build carries grade config. Its default-on state comes from [grade] show_by_default.
+        if (MapApp.manifest && MapApp.manifest.grade) {
+            overlays.push({id: 'grade', label: 'Grade'});
+            MapApp.overlayStates.grade = !!MapApp.manifest.grade.show_by_default;
+        }
         for (const overlay of overlays) {
             const item = document.createElement('div');
             item.className = 'overlay-item';
@@ -590,6 +597,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             // signals; hiding intermediates de-clutters.
             if (overlay.id === 'signals') addSignalFilterButton(item);
         }
+        updateGradeLegend();   // show the grade legend now if grade mode starts on (#57)
 
         // Setup local symbol filter dropdown
         document.getElementById('local-symbol-select').addEventListener('change', (e) => {
@@ -956,16 +964,18 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     polyline._trackLine = true;
                     polyline._sectionId = section.id;
                     polyline._origColor = trackColor;   // per-polyline normal colour (region/switch aware)
+                    polyline._gradePct = section.grade_pct || 0;   // for the Grade colour mode (#57)
 
                     // Build detailed section popup
                     const sectionType = section.is_switch
                         ? (section.is_ctc_switch ? ' (CTC Switch)' : ' (Hand-throw Switch)') : '';
                     let sectionPopup = `<b>Section ${section.id}${sectionType}</b><br>`;
                     sectionPopup += `Length: ${section.length_ft.toFixed(1)} ft (${section.length_m.toFixed(1)} m)<br>`;
+                    sectionPopup += `Grade: ${gradeText(section.grade_pct)}<br>`;
                     sectionPopup += `Paths: ${section.paths.length}`;
 
                     polyline.bindPopup(sectionPopup, {maxWidth: 250});
-                    polyline.bindTooltip(`Section ${section.id}`, {sticky: true});
+                    polyline.bindTooltip(`Section ${section.id} · grade ${gradeText(section.grade_pct)}`, {sticky: true});
 
                     // Hover highlight handlers
                     polyline.on('mouseover', function() {
@@ -975,14 +985,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                         }
                     });
                     polyline.on('mouseout', function() {
-                        // Restore original color if not selected
+                        // Restore resting color if not selected (grade mode > industry > normal).
                         if (!MapApp.selectedSections.has(secKey(regionId, section.id))) {
-                            // Determine correct color based on overlay state
-                            let restoreColor = trackColor;
-                            if (MapApp.overlayStates.industries && MapApp.industrySectionIds.has(`${regionId}_${section.id}`)) {
-                                restoreColor = COLORS.industryTrack;
-                            }
-                            this.setStyle({ color: restoreColor });
+                            this.setStyle({ color: sectionRestColor(regionId, this) });
                         }
                     });
 
@@ -1149,6 +1154,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             if (MapApp.overlayStates.aiLocations) layers.aiLocations.addTo(MapApp.map);
             if (MapApp.overlayStates.tileBoundaries) layers.tileBoundaries.addTo(MapApp.map);
             if (MapApp.overlayStates.trains) layers.trains.addTo(MapApp.map);
+            if (MapApp.overlayStates.grade) refreshAllTrackColors();  // paint this region by grade (#57)
             updateTrainLabelVisibility();
             // Area labels are gated by the visible regions' tiles - re-evaluate now
             // that this region's tiles are available.
@@ -2007,6 +2013,13 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             updateIndustryTrackColors(enabled);
             if (enabled && MapApp.currentLocalFilter) applyLocalSymbolHighlighting();
         }
+
+        // Grade colour mode (#57): recolour all track by grade (or restore normal/industry
+        // colours when turned off) and show/hide the legend. Not a layer group.
+        if (overlayId === 'grade') {
+            refreshAllTrackColors();
+            updateGradeLegend();
+        }
     }
 
     // Colour (or restore) industry tracks. Iterates each region's OWN section layers
@@ -2014,6 +2027,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     // global sectionIndex only keeps the last-loaded region's polyline per id, so a
     // shadowed industry section would be missed (the "green only on mouse-over" bug).
     function updateIndustryTrackColors(showIndustryColor) {
+        if (MapApp.overlayStates.grade) return;   // grade colour mode owns the track colours (#57)
         MapApp.loadedRegions.forEach((region, regionId) => {
             if (!region.layers || !region.layers.sections) return;
             region.layers.sections.eachLayer(group => {
@@ -2027,6 +2041,72 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 });
             });
         });
+    }
+
+    // ---- Grade heat-map colouring (#57) ----
+    // Config comes from manifest.grade ({max_pct, ramp, show_by_default}); precomputed
+    // grade_pct rides on each section (and each track polyline as _gradePct).
+    function _gradeCfg(){ return (MapApp.manifest && MapApp.manifest.grade) || null; }
+    function gradeRamp(){ const g=_gradeCfg(); return (g && g.ramp && g.ramp.length>=2) ? g.ramp
+                          : ['#c8c8c8','#ffd400','#ff7a1a','#d7191c']; }
+    function gradeMaxPct(){ const g=_gradeCfg(); return (g && g.max_pct>0) ? g.max_pct : 3.0; }
+    // Grade shown in tooltips/popups as a magnitude (the stored sign is arbitrary node
+    // ordering, so up/down isn't meaningful; the heat map is magnitude too). (#57)
+    function gradeText(pct){ return (Math.abs(+pct || 0)).toFixed(2) + '%'; }
+    function _hex3(c){ c=String(c||'').replace('#',''); if(c.length===3) c=c.split('').map(x=>x+x).join('');
+        return [parseInt(c.slice(0,2),16)||0, parseInt(c.slice(2,4),16)||0, parseInt(c.slice(4,6),16)||0]; }
+    function _rgb3(a){ return '#'+a.map(v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join(''); }
+    // Map |grade%| through the ramp (0 -> first colour, >=max_pct -> last).
+    function gradeColor(pct){
+        const ramp=gradeRamp(); const t=Math.min(Math.abs(+pct||0)/gradeMaxPct(),1);
+        const seg=t*(ramp.length-1); const i=Math.min(Math.floor(seg),ramp.length-2); const f=seg-i;
+        const a=_hex3(ramp[i]), b=_hex3(ramp[i+1]);
+        return _rgb3([a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f]);
+    }
+    // A track section's resting colour: grade mode wins, then industry green, then its own colour.
+    function sectionRestColor(regionId, pl){
+        if (MapApp.overlayStates.grade) return gradeColor(pl._gradePct);
+        if (MapApp.overlayStates.industries && MapApp.industrySectionIds.has(regionId+'_'+pl._sectionId))
+            return COLORS.industryTrack;
+        return pl._origColor || COLORS.track;
+    }
+    // Recolour every (non-selected) track polyline to its current resting colour.
+    function refreshAllTrackColors(){
+        MapApp.loadedRegions.forEach((region, regionId) => {
+            if (!region.layers || !region.layers.sections) return;
+            region.layers.sections.eachLayer(group => {
+                if (!group.eachLayer) return;
+                group.eachLayer(pl => {
+                    if (!pl._trackLine || !pl.setStyle) return;
+                    if (MapApp.selectedSections.has(secKey(regionId, pl._sectionId))) return;  // keep selection red
+                    pl.setStyle({ color: sectionRestColor(regionId, pl) });
+                });
+            });
+        });
+    }
+    // Floating legend for the grade ramp; present only while grade mode is on.
+    function updateGradeLegend(){
+        let el = document.getElementById('grade-legend');
+        if (!MapApp.overlayStates.grade){ if (el) el.remove(); return; }
+        const ramp = gradeRamp(), mx = gradeMaxPct();
+        if (!el){
+            el = document.createElement('div'); el.id = 'grade-legend';
+            el.style.cssText = 'position:absolute;left:10px;z-index:1000;'
+                + 'background:var(--panel-bg,rgba(20,22,28,.88));color:var(--panel-fg,#eee);'
+                + 'border:1px solid var(--border-strong,#555);border-radius:6px;padding:6px 8px;'
+                + 'font:12px system-ui,Arial;box-shadow:0 2px 8px rgba(0,0,0,.4);pointer-events:none;';
+            (document.getElementById('map') || document.body).appendChild(el);
+        }
+        const stops = ramp.map((c,i)=>`${c} ${Math.round(i/(ramp.length-1)*100)}%`).join(',');
+        el.innerHTML = '<div style="font-weight:bold;margin-bottom:3px;">Track grade</div>'
+            + `<div style="width:150px;height:12px;border:1px solid #888;`
+            + `background:linear-gradient(to right,${stops});"></div>`
+            + '<div style="display:flex;justify-content:space-between;">'
+            + `<span>0%</span><span>${(mx/2).toFixed(1)}%</span><span>${mx}%+</span></div>`;
+        // Sit just above the opacity / text-size control box so it isn't obscured by it (#57).
+        const oc = document.getElementById('opacity-control');
+        const ocBottom = oc ? (parseInt(getComputedStyle(oc).bottom, 10) || 60) : 60;
+        el.style.bottom = (oc ? ocBottom + oc.offsetHeight + 8 : 160) + 'px';
     }
 
     function getIndustriesForSection(regionId, sectionId) {
@@ -2152,7 +2232,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             const idx = MapApp.sectionIndex.get(key);
             const restoreColor = (idx && idx.originalColor) || COLORS.track;
             featureGroup.eachLayer(layer => {
-                if (layer.setStyle) layer.setStyle({color: restoreColor, weight: trackWeightPx()});
+                if (layer.setStyle) layer.setStyle({
+                    color: layer._trackLine ? sectionRestColor(regionId, layer) : restoreColor,
+                    weight: trackWeightPx()});
             });
 
             if (MapApp.selectedSections.size === 0) {
@@ -2175,7 +2257,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             const idx = MapApp.sectionIndex.get(key);
             const restoreColor = (idx && idx.originalColor) || COLORS.track;
             data.polyline.eachLayer(layer => {
-                if (layer.setStyle) layer.setStyle({color: restoreColor, weight: trackWeightPx()});
+                if (layer.setStyle) layer.setStyle({
+                    color: layer._trackLine ? sectionRestColor(data.region_id, layer) : restoreColor,
+                    weight: trackWeightPx()});
             });
         }
         MapApp.selectedSections.clear();
@@ -2227,6 +2311,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const sectionType = section.is_switch ? 'Switch/Turnout' : 'Track Section';
         let content = `<b>Section ${section.id}</b> (${sectionType})<br>`;
         content += `Length: ${section.length_ft.toFixed(1)} ft (${section.length_m.toFixed(1)} m)<br>`;
+        content += `Grade: ${gradeText(section.grade_pct)}<br>`;
         content += `Track Type: ${section.track_type}<br>`;
         content += `Retarder: ${section.retarder_mph}`;
         L.popup({maxWidth: 300}).setLatLng(latlng).setContent(content).openOn(MapApp.map);

@@ -50,6 +50,20 @@ class TileBasedConfig:
     tile_height: float = 1023.2          # Tile height in meters
 
 
+# Default grade heat-map ramp (magnitude only): flat = muted grey, steep = red.
+DEFAULT_GRADE_RAMP = ["#c8c8c8", "#ffd400", "#ff7a1a", "#d7191c"]
+
+
+@dataclass
+class GradeConfig:
+    """Configuration for the grade heat-map track colouring (#57), from [grade]."""
+    max_pct: float = 3.0                 # |grade| at/above which the ramp saturates (red)
+    smooth_below_m: float = 20.0         # sections shorter than this get windowed smoothing
+    window_m: float = 80.0               # total smoothing window (m) for short sections
+    ramp: List[str] = field(default_factory=lambda: list(DEFAULT_GRADE_RAMP))  # low->high colours
+    show_by_default: bool = False        # start with the Grade colour mode on
+
+
 # Area/place label categories are defined entirely by the config's [label_types]
 # section (id = Display Name, #color) — no categories are baked into the code. A
 # label with no type, or a type not present in [label_types], is treated as
@@ -160,6 +174,7 @@ class VisualizationConfig:
     regions: List[RegionConfig] = field(default_factory=list)
     colors: ColorConfig = field(default_factory=ColorConfig)
     tile_based: Optional[TileBasedConfig] = None
+    grade: Optional[GradeConfig] = None  # [grade] grade heat-map settings (#57)
     initial_center: Optional[Tuple[float, float]] = None  # (lat, lon) for initial map center
     initial_map_opacity: float = 0.2   # [visualization] initial_map_opacity: base-map slider (fraction)
     initial_track_opacity: float = 0.8  # [visualization] initial_track_opacity: track slider (fraction)
@@ -610,6 +625,24 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         if _do:
             train_deoverlap = _do in ('1', 'true', 'yes', 'on')
 
+    # Parse [grade] section (optional): grade heat-map track colouring (#57).
+    grade_cfg = GradeConfig()
+    if 'grade' in parser:
+        gs = parser['grade']
+        grade_cfg.max_pct = _cfg_float(gs, 'max_pct', grade_cfg.max_pct)
+        grade_cfg.smooth_below_m = _cfg_float(gs, 'smooth_below_m', grade_cfg.smooth_below_m)
+        grade_cfg.window_m = _cfg_float(gs, 'window_m', grade_cfg.window_m)
+        _ramp = gs.get('ramp', '').split(';', 1)[0].strip()
+        if _ramp:
+            cols = [c.strip() for c in _ramp.split(',') if c.strip()]
+            if len(cols) >= 2:
+                grade_cfg.ramp = cols
+            else:
+                errors.append("[grade] ramp must be a comma-separated list of at least 2 colours")
+        _sbd = gs.get('show_by_default', '').split(';', 1)[0].split('#', 1)[0].strip().lower()
+        if _sbd:
+            grade_cfg.show_by_default = _sbd in ('1', 'true', 'yes', 'on')
+
     # Parse [track] section (optional): zoom-scaled track line width.
     track_width, track_min_width, track_full_zoom = 5.0, 1.5, 14.0
     if 'track' in parser:
@@ -720,6 +753,7 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
         regions=regions,
         colors=colors,
         tile_based=tile_based,
+        grade=grade_cfg,
         initial_center=initial_center,
         initial_map_opacity=initial_map_opacity,
         initial_track_opacity=initial_track_opacity,
