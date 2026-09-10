@@ -55,11 +55,13 @@ python output_generator.py config-socal.ini --production
 
 **4. Copy the regenerated output to the droplet.**
 
-**Easiest — one command** (Git Bash, from the repo root):
+**Easiest — one command** (Git Bash, from the repo root). Pass the same config you
+regenerated with — the paths to ship are read from it (`[output] output_dir`, and for
+`--all` the config's `areas_file` / `railvehicle_db`):
 ```bash
-deploy/push-output.sh                 # ships output/socal only (the usual case)
-deploy/push-output.sh --all           # also ships db_railvehicles.db + areas_socal.ini
-deploy/push-output.sh --dry-run       # show what it would do
+deploy/push-output.sh config-socal.ini            # ships the config's output dir only (the usual case)
+deploy/push-output.sh config-socal.ini --all      # also ships its railvehicle_db + areas_file
+deploy/push-output.sh config-socal.ini --dry-run  # show what it would do
 ```
 It packs, uploads, extracts into the app dir, fixes ownership, and verifies `/api/ping`
 (it uses `ssh -t`, so it'll prompt for your sudo password on the droplet). That's the whole of
