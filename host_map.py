@@ -3,28 +3,33 @@
 
 This is the spine of the self-host bundle. One command (or one double-click of the
 packaged .exe) both **generates** the operator's map from their local Run8 install
-and **serves** it read-only to the internet, watching their world autosave so trains
-move live. It is the distributed alternative to hosting everyone's maps on a central
-droplet: the map runs on the same Windows box that runs the operator's r8server.
+and **serves** it to the internet (read-only by default; optional password-gated
+label editing, #56), watching their world autosave so trains move live. It is the
+distributed alternative to hosting everyone's maps on a central droplet: the map runs
+on the same Windows box that runs the operator's r8server.
 
     python host_map.py <config.ini> [--port 8000] [--host 0.0.0.0]
                         [--world "...\\AutoSaves\\Auto Save World.xml"]
-                        [--regenerate] [--no-generate] [--no-update-check]
+                        [--edit-password PW] [--regenerate] [--no-generate]
+                        [--no-update-check]
 
 What it does, in order:
   1. Parse the operator's config (the same INI `output_generator.py` uses).
-  2. Generate the production map (align viewer, no "Add Label" button) if the output
-     is missing, or always with --regenerate. Skipped with --no-generate.
-  3. Serve that output read-only, bound to 0.0.0.0 so a forwarded TCP port reaches it,
-     watching the world save for live train updates (no upload endpoint, no token).
+  2. Generate the map (align viewer; the authoring UI is compiled in but inert until
+     editing is unlocked) if the output is missing, or always with --regenerate.
+     Skipped with --no-generate.
+  3. Serve that output, bound to 0.0.0.0 so a forwarded TCP port reaches it, watching
+     the world save for live train updates. Editing is READ-ONLY unless an edit
+     password is set (RUN8_EDIT_PASSWORD / --edit-password, #56); no upload endpoint.
   4. In the background, check whether a newer bundle has been published and, if so,
      print a one-line notice (never blocks or fails startup).
 
-Posture (deliberate, see deploy_handoff.md "DIRECTION CHANGE"): this faces the
-internet directly with no TLS and no reverse proxy. That is acceptable because the
-server is READ-ONLY (no authoring, no uploads) and its one expensive operation -
-train placement - is mtime-cached, so it is a public, no-secrets map. Operators who
-have a domain can still front it with Caddy for HTTPS (an advanced, optional step).
+Posture (deliberate, see deploy_handoff.md "DIRECTION CHANGE"): by default this faces
+the internet directly with no TLS and no reverse proxy, which is fine for a public,
+read-only, no-secrets map (its one expensive operation - train placement - is
+mtime-cached). If an edit password is set, editing is gated by it, and the map should
+then be served over https via a tunnel (Tailscale Funnel) or Caddy - see the hosting
+docs; a startup warning is printed for a public plain-HTTP editing bind.
 """
 
 import argparse
