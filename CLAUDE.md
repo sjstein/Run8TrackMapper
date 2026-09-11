@@ -250,7 +250,8 @@ track_color = #2266ff
 # All colors are optional - defaults shown
 track = #0066cc
 track_selected = #ff0000
-switch = #800080
+switch = #800080          # hand-throw switches/turnouts
+switch_ctc = #c000c0      # CTC (dispatcher-controlled) switches
 industry_track = #00aa00
 signal_absolute = #FF6B35
 signal_intermediate = #FFD700
