@@ -917,13 +917,15 @@ def main():
     else:
         print(f"  Editing : read-only (set RUN8_EDIT_PASSWORD / --edit-password to enable)")
 
-    # A password over plain HTTP on an exposed interface is sniffable; steer the
-    # operator to a TLS tunnel (the map is served without TLS by this server).
+    # The password is never sent (challenge-response), but the session token travels in
+    # cleartext over plain HTTP, so an unlocked edit session can be hijacked on an exposed
+    # interface. Steer the operator to a TLS tunnel (the map is served without TLS here).
     _loopback = args.host in ('127.0.0.1', '::1', 'localhost')
     if authoring and not _loopback:
         print("  WARNING : editing is enabled on a non-localhost interface over plain HTTP.\n"
-              "            Put this behind a TLS tunnel (Tailscale Funnel / Caddy) - see the\n"
-              "            hosting docs - so the password isn't sent in the clear.")
+              "            The password itself is never sent, but an unlocked edit session can\n"
+              "            be hijacked by a network sniffer. Put this behind a TLS tunnel\n"
+              "            (Tailscale Funnel / Caddy) - see the hosting docs.")
     if world_save:
         exists = " (not found yet)" if not world_save.exists() else ""
         role = "upload slot" if args.accept_uploads else "live-watched"

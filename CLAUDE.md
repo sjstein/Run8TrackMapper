@@ -465,8 +465,9 @@ the whole map is read-only, and the authoring UI is always compiled into the HTM
 - **Self-host bundle.** `host_map.py` (`Run8MapHost.exe`) honours the same
   `RUN8_EDIT_PASSWORD`; with none it stays read-only, and it warns at startup when editing is
   enabled on a public (`0.0.0.0`) bind over plain HTTP.
-- **Exposure.** A password over plain HTTP is sniffable, so the operator docs steer editing
-  hosts to a **TLS tunnel** — **Tailscale Funnel** (primary), or **Caddy** for domain owners —
+- **Exposure.** The password is never sent (challenge-response), but the session **token**
+  travels in cleartext over plain HTTP, so an unlocked edit session can be hijacked — hence the
+  operator docs steer editing hosts to a **TLS tunnel** — **Tailscale Funnel** (primary), or **Caddy** for domain owners —
   in `packaging/README-operator.txt`; `serve.py` / `host_map.py` print a startup warning on a
   non-localhost plain-HTTP bind. Deploying an edit password to the droplet (already behind
   Caddy) is a **Path B** change: set `RUN8_EDIT_PASSWORD` in `run8map.env` and restart.

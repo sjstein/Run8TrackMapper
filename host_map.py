@@ -307,9 +307,10 @@ def main():
               f"Windows Firewall,\n            then share http://<your-address>:{args.port}/ "
               f"(a dynamic-DNS hostname keeps it stable).")
         if authoring:
-            print("  WARNING : editing is enabled over plain HTTP on a public port - the "
-                  "password\n            can be sniffed. Put the map behind a TLS tunnel "
-                  "(Tailscale Funnel /\n            Caddy) instead of forwarding a raw port - "
+            print("  WARNING : editing is enabled over plain HTTP on a public port. The "
+                  "password\n            itself is never sent, but an unlocked edit session can "
+                  "be hijacked\n            by a sniffer. Put the map behind a TLS tunnel "
+                  "(Tailscale Funnel /\n            Caddy) instead of a raw port forward - "
                   "see the hosting docs.")
     print("\nPress Ctrl+C to stop.\n")
     try:
