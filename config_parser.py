@@ -815,6 +815,12 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
     if config.industry_file and not config.industry_db.exists():
         file_errors.append(f"[visualization] industry_file not found: {config.industry_db}")
 
+    # Call out which industry database will be parsed - especially useful when an
+    # explicit [visualization] industry_file points at a non-standard location.
+    if config.industry_db.exists():
+        src = "explicit industry_file" if config.industry_file else "derived from region_dir"
+        print(f"  Note: industries will be parsed from {config.industry_db} ({src})")
+
     for region in config.regions:
         if not region.directory.exists():
             file_errors.append(f"[region.{region.id}] directory not found: {region.directory}")
