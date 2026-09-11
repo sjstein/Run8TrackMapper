@@ -77,13 +77,20 @@ can optionally let your trusted staff add and edit the text labels (yard names,
 control points, track labels...) live on the map, protected by a shared password.
 
   *** READ THIS FIRST - SECURITY ***
-  Editing is protected by a password, and that password travels over the network.
-  If your map is exposed as a plain "http://" address (a normal router port
-  forward), that password can be read by anyone watching the traffic. So:
+  The edit password itself is NEVER sent over the network - the map proves you
+  know it without transmitting it - so the password cannot be sniffed or stolen,
+  even over a plain "http://" connection.
 
-    - Read-only map  -> a plain port forward (http) is fine. Nothing to protect.
-    - Editing enabled -> you MUST serve it over https, using a free tunnel (below).
-                         Do NOT enable editing on a raw port-forwarded http map.
+  What a plain "http://" address DOES expose is the temporary edit SESSION: after
+  a staff member unlocks, someone watching the traffic could hijack that active
+  session and add / change / delete labels until it expires (they still never
+  learn the password). These are only map labels (reversible, auto-backed-up to a
+  .bak file), so some hosts accept this - but serving over https removes the risk.
+
+    - Read-only map   -> a plain port forward (http) is completely fine.
+    - Editing enabled -> https via a free tunnel is STRONGLY RECOMMENDED (below).
+                         A plain port forward still works, but only do it if you
+                         accept the session-hijack risk described above.
 
 Turn editing on:
 
@@ -93,8 +100,10 @@ Turn editing on:
      Pick something long; share it only with staff who should edit. Leaving it
      blank keeps the map read-only.
 
-  2. Expose the map over https with a tunnel (see the next section), NOT a raw
-     port forward. Start the map, then start the tunnel.
+  2. Strongly recommended: expose the map over https with a tunnel (see the next
+     section) rather than a raw port forward, so an active edit session can't be
+     hijacked. Start the map, then start the tunnel. (A plain port forward works
+     too, if you accept that risk.)
 
   3. Staff editing: on the map, TYPE the word  edit  (just type it, there is no
      button), enter the password, and the "Add Label" tools appear. Click
@@ -105,12 +114,13 @@ Turn editing on:
 
 
 ----------------------------------------------------------------------------
- EXPOSING THE MAP SECURELY (https) - REQUIRED IF EDITING IS ON
+ EXPOSING THE MAP SECURELY (https) - STRONGLY RECOMMENDED IF EDITING IS ON
 ----------------------------------------------------------------------------
 
-These give your map a proper "https://" address so the edit password is
-encrypted. A tunnel also means you do NOT port-forward anything (nothing on this
-PC is opened to the internet directly).
+These give your map a proper "https://" address so the whole edit session is
+encrypted (the password is already safe either way - see above). A tunnel also
+means you do NOT port-forward anything (nothing on this PC is opened to the
+internet directly).
 
 RECOMMENDED - Tailscale Funnel (free, https, no port forwarding, stable address):
 

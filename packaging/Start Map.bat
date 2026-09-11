@@ -30,10 +30,11 @@ REM  RUN8_EDIT_PASSWORD (OPTIONAL): leave BLANK for a normal read-only public ma
 REM               Set a shared password to let your staff edit area labels on the
 REM               live map (on the map they type the word "edit", then enter this
 REM               password). See the "ENABLE LABEL EDITING" section of the README.
-REM               *** IMPORTANT *** If you set a password, do NOT expose the map by
-REM               forwarding a raw port - the password would travel UNENCRYPTED over
-REM               plain http. Put the map behind a free HTTPS tunnel first
-REM               (Tailscale Funnel - see the README).
+REM               *** IMPORTANT *** The password itself is never sent over the
+REM               network, but if you expose the map on a plain http port an active
+REM               edit session can be hijacked by someone watching the traffic. An
+REM               HTTPS tunnel (Tailscale Funnel - see the README) is strongly
+REM               recommended when editing is on.
 set "RUN8_EDIT_PASSWORD="
 
 REM ===========================================================================
