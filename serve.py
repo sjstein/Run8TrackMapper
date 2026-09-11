@@ -30,11 +30,15 @@ color?,font_size?,box?,rotation?}.
 
 import argparse
 import gzip
+import hashlib
+import hmac
 import json
 import math
 import os
+import secrets
 import sys
 import threading
+import time
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +57,18 @@ from rv_length_db import load_rv_lengths
 # so a busy server's save still fits, while rejecting anything absurd / hostile).
 MAX_UPLOAD_COMPRESSED = 64 * 1024 * 1024     # bytes read off the wire
 MAX_UPLOAD_DECOMPRESSED = 256 * 1024 * 1024  # bytes after gunzip (zip-bomb guard)
+
+# ---- Edit-auth (#56): a shared password unlocks label editing on an exposed host.
+# The password never crosses the wire: the client fetches a one-time nonce, sends
+# HMAC(password, nonce), and gets back a short-lived bearer token used on writes.
+EDIT_NONCE_TTL = 120        # seconds a challenge nonce is valid (single use)
+EDIT_TOKEN_TTL = 12 * 3600  # session-token lifetime; slides on each authorized write
+# Per-IP brute-force backoff: after this many failed unlocks within the window, that
+# IP is locked out for the cooldown. The endpoint is internet-reachable, so this
+# matters (constant-time compare alone doesn't stop online guessing).
+AUTH_FAIL_MAX = 8
+AUTH_FAIL_WINDOW = 300
+AUTH_LOCKOUT = 300
 
 
 class WorldUploadError(Exception):
@@ -105,13 +121,21 @@ class AuthoringState:
 
     def __init__(self, config_path: Path, output_dir: Path, areas_file: Path,
                  config=None, world_save: Path = None,
-                 accept_uploads: bool = False, upload_token: str = None):
+                 accept_uploads: bool = False, upload_token: str = None,
+                 edit_password: str = None):
         self.config_path = config_path
         self.output_dir = output_dir
         self.manifest_path = output_dir / "manifest.json"
         self.store = AreaStore(areas_file)
         self.areas_file = areas_file
         self.lock = threading.Lock()
+
+        # ---- edit auth (#56) ----
+        self.edit_password = edit_password or None
+        self._edit_nonces = {}   # nonce -> expiry epoch (single-use challenge)
+        self._edit_tokens = {}   # token -> expiry epoch (sliding session)
+        self._auth_fails = {}    # client ip -> (fail_count, locked_until_epoch)
+        self._areas_rev = 0      # bumped on every successful label write (poll signal)
 
         # ---- world-save train plotting (optional, with live mtime watch) ----
         self.config = config
@@ -317,6 +341,69 @@ class AuthoringState:
             json.dump(manifest, f, indent=2)
         os.replace(tmp, self.manifest_path)
 
+    # ---- edit auth + change signal (#56; call under self.lock) ----------
+    def bump_areas(self):
+        """Advance the areas revision so polling viewers refetch (multi-editor)."""
+        self._areas_rev += 1
+
+    @property
+    def areas_version(self):
+        return self._areas_rev
+
+    def _gc_auth(self):
+        now = time.time()
+        self._edit_nonces = {n: e for n, e in self._edit_nonces.items() if e > now}
+        self._edit_tokens = {t: e for t, e in self._edit_tokens.items() if e > now}
+
+    def new_edit_nonce(self):
+        """A one-time challenge nonce (or None if editing isn't password-gated)."""
+        if not self.edit_password:
+            return None
+        self._gc_auth()
+        nonce = secrets.token_hex(16)
+        self._edit_nonces[nonce] = time.time() + EDIT_NONCE_TTL
+        return nonce
+
+    def locked_out(self, ip: str) -> bool:
+        rec = self._auth_fails.get(ip)
+        return bool(rec) and rec[1] > time.time()
+
+    def _record_fail(self, ip: str):
+        count, _ = self._auth_fails.get(ip, (0, 0.0))
+        count += 1
+        until = time.time() + AUTH_LOCKOUT if count >= AUTH_FAIL_MAX else 0.0
+        self._auth_fails[ip] = (0 if until else count, until)
+
+    def verify_unlock(self, nonce: str, proof: str, ip: str):
+        """Check an HMAC(password, nonce) proof; on success return a fresh session
+        token, else None. Nonces are single-use; failures feed the per-IP backoff."""
+        if not self.edit_password:
+            return None
+        self._gc_auth()
+        exp = self._edit_nonces.pop(str(nonce), None)   # single use, even on failure
+        if exp is None or exp < time.time():
+            self._record_fail(ip)
+            return None
+        expected = hmac.new(self.edit_password.encode('utf-8'),
+                            str(nonce).encode('utf-8'), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected, str(proof or '')):
+            self._record_fail(ip)
+            return None
+        self._auth_fails.pop(ip, None)                  # reset backoff on success
+        token = secrets.token_hex(24)
+        self._edit_tokens[token] = time.time() + EDIT_TOKEN_TTL
+        return token
+
+    def check_edit_token(self, token: str) -> bool:
+        """True if `token` is a live session token; refreshes its expiry (sliding)."""
+        if not token:
+            return False
+        exp = self._edit_tokens.get(token)
+        if exp is None or exp < time.time():
+            return False
+        self._edit_tokens[token] = time.time() + EDIT_TOKEN_TTL
+        return True
+
 
 def _clean_common_fields(payload: dict, area: dict):
     """Apply the optional label fields (color/font_size/box/rotation/label)
@@ -438,12 +525,28 @@ def make_handler(state: AuthoringState, authoring: bool):
                 self._send_json({'ok': True,
                                  'areas_file': state.areas_file.name,
                                  'authoring': authoring,
+                                 # Editing model (#56): 'disabled' = read-only (no edit
+                                 # password set); 'locked' = editing possible, unlock with
+                                 # the password first. The viewer polls areas_version to
+                                 # pick up other editors' changes (multi-editor refresh).
+                                 'edit_mode': 'locked' if authoring else 'disabled',
+                                 'areas_version': state.areas_version,
                                  'uploads': state.accept_uploads,
                                  # Report a world as present when uploads are enabled even
                                  # before the first push, so the viewer starts polling
                                  # /api/trains right away and picks up trains on arrival.
                                  'world': bool(state.accept_uploads
                                                or (state.world_save and state.world_save.exists()))})
+                return
+            if path == '/api/unlock':
+                # Challenge: hand out a one-time nonce. The client returns
+                # HMAC(password, nonce) via POST /api/unlock (the password is never sent).
+                if not authoring:
+                    self._error('Editing is not enabled on this server', 403)
+                    return
+                with state.lock:
+                    nonce = state.new_edit_nonce()
+                self._send_json({'nonce': nonce})
                 return
             if path == '/api/trains':
                 try:
@@ -455,7 +558,9 @@ def make_handler(state: AuthoringState, authoring: bool):
             if path == '/api/areas':
                 try:
                     with state.lock:
-                        self._send_json({'areas': state.merged_areas()})
+                        payload = {'areas': state.merged_areas(),
+                                   'version': state.areas_version}
+                    self._send_json(payload)
                 except Exception as e:  # noqa: BLE001
                     self._error(str(e), 500)
                 return
@@ -469,11 +574,13 @@ def make_handler(state: AuthoringState, authoring: bool):
             if path == '/api/world':
                 self._handle_world_upload()
                 return
+            if path == '/api/unlock':
+                self._handle_unlock_post()
+                return
             if path != '/api/areas':
                 self._error('Not found', 404)
                 return
-            if not authoring:
-                self._error('This server is read-only (started with --no-authoring)', 403)
+            if not self._require_edit():
                 return
             try:
                 payload = self._read_json()
@@ -485,6 +592,7 @@ def make_handler(state: AuthoringState, authoring: bool):
                     area = self._build_new_area(payload)
                     state.store.add(area)
                     state.sync_manifest()
+                    state.bump_areas()
                 self._send_json(area, status=201)
             except (ValueError, KeyError) as e:
                 self._error(str(e))
@@ -499,8 +607,7 @@ def make_handler(state: AuthoringState, authoring: bool):
             if not path.startswith('/api/areas/') or not area_id:
                 self._error('Not found', 404)
                 return
-            if not authoring:
-                self._error('This server is read-only (started with --no-authoring)', 403)
+            if not self._require_edit():
                 return
             try:
                 payload = self._read_json()
@@ -525,6 +632,7 @@ def make_handler(state: AuthoringState, authoring: bool):
                     _clean_common_fields(payload, area)
                     state.store.update(area_id, area)
                     state.sync_manifest()
+                    state.bump_areas()
                 self._send_json(area)
             except (ValueError, KeyError) as e:
                 self._error(str(e))
@@ -539,18 +647,61 @@ def make_handler(state: AuthoringState, authoring: bool):
             if not path.startswith('/api/areas/') or not area_id:
                 self._error('Not found', 404)
                 return
-            if not authoring:
-                self._error('This server is read-only (started with --no-authoring)', 403)
+            if not self._require_edit():
                 return
             try:
                 with state.lock:
                     state.store.delete(area_id)
                     state.sync_manifest()
+                    state.bump_areas()
                 self._send_json({'ok': True})
             except AreaStoreError as e:
                 self._error(str(e), 404)
             except Exception as e:  # noqa: BLE001
                 self._error(str(e), 500)
+
+        # ---- edit auth (#56) -------------------------------------------
+        def _edit_authorized(self):
+            """True if the request carries a live edit session token (Bearer)."""
+            auth = self.headers.get('Authorization', '')
+            prefix = 'Bearer '
+            token = auth[len(prefix):] if auth.startswith(prefix) else ''
+            with state.lock:
+                return state.check_edit_token(token)
+
+        def _require_edit(self):
+            """Guard for label writes. Sends the error + returns False when the
+            server is read-only (no password) or the caller hasn't unlocked."""
+            if not authoring:
+                self._error('This server is read-only. Start it with an edit '
+                            'password (RUN8_EDIT_PASSWORD) to enable editing.', 403)
+                return False
+            if not self._edit_authorized():
+                self._error('Editing is locked. Unlock with the edit password first.', 401)
+                return False
+            return True
+
+        def _handle_unlock_post(self):
+            """Verify HMAC(password, nonce) and issue a session token (or 401/429)."""
+            if not authoring:
+                self._error('Editing is not enabled on this server', 403)
+                return
+            try:
+                payload = self._read_json()
+            except json.JSONDecodeError:
+                self._error('Invalid JSON body')
+                return
+            ip = self.client_address[0] if self.client_address else '?'
+            with state.lock:
+                locked = state.locked_out(ip)
+                token = None if locked else state.verify_unlock(
+                    payload.get('nonce'), payload.get('proof'), ip)
+            if locked:
+                self._error('Too many failed attempts; wait a bit and try again', 429)
+            elif token:
+                self._send_json({'token': token, 'expires_in': EDIT_TOKEN_TTL})
+            else:
+                self._error('Incorrect password', 401)
 
         # ---- world-save upload (POST /api/world) -----------------------
         def _upload_authorized(self):
@@ -620,7 +771,9 @@ def make_handler(state: AuthoringState, authoring: bool):
             except (KeyError, TypeError, ValueError):
                 raise ValueError("tile_x, tile_z, local_x, local_z are required numbers")
 
-            desired = (payload.get('id') or '').strip() or slugify(label) or f"area_{tile_x}_{tile_z}"
+            # Always slugify a client-supplied id too, so it can't inject INI syntax
+            # (the store validates as well, but reject early with a clean id) (#56).
+            desired = slugify(payload.get('id') or '') or slugify(label) or f"area_{tile_x}_{tile_z}"
             area_id = state.unique_id(desired)
 
             area = {'id': area_id, 'label': label,
@@ -674,7 +827,14 @@ def main():
     parser.add_argument('--areas-file', dest='areas_file',
                         help='Override the areas file labels are written to (default: first areas_file in the config)')
     parser.add_argument('--no-authoring', dest='authoring', action='store_false',
-                        help='Serve read-only (disable the create/edit/delete API)')
+                        help='Force read-only even if an edit password is set (disable the '
+                             'create/edit/delete API entirely)')
+    parser.add_argument('--edit-password', dest='edit_password', metavar='PASSWORD',
+                        help='Shared password that unlocks label editing. Editing is '
+                             'READ-ONLY unless this (or the RUN8_EDIT_PASSWORD env var, '
+                             'preferred so the secret is not in argv / `ps`) is set. On an '
+                             'internet-exposed host, serve behind a TLS tunnel (see the '
+                             'hosting docs) since the map is plain HTTP.')
     parser.add_argument('--world', metavar='FILE', dest='world',
                         help='Run8 world save (.xml) to plot trains from, watched for live '
                              'updates (overrides [visualization] world_save in the config). '
@@ -694,6 +854,13 @@ def main():
     # the env var keeps the secret out of the command line (visible in `ps` and
     # `systemctl status`); the systemd unit sets it from an EnvironmentFile.
     upload_token = args.upload_token or os.environ.get('RUN8_UPLOAD_TOKEN') or None
+
+    # Edit password (#56): --edit-password wins, else RUN8_EDIT_PASSWORD (preferred, so
+    # the secret isn't in argv / `ps`). Its PRESENCE is the switch: no password -> the
+    # whole map is read-only (there is no --production any more). --no-authoring forces
+    # read-only even when a password is set.
+    edit_password = args.edit_password or os.environ.get('RUN8_EDIT_PASSWORD') or None
+    authoring = bool(edit_password) and args.authoring
 
     # serve.py reads only the already-generated output/<name>/data/*.json, never the
     # track DBs / terrain tiles / tile_corrections named in the config. Skip the
@@ -720,7 +887,7 @@ def main():
         sys.exit(1)
 
     areas_file = None
-    if args.authoring:
+    if authoring:
         areas_file = _resolve_writable_areas_file(config, args.config, args.areas_file)
         if areas_file is None:
             sys.exit(1)
@@ -729,23 +896,34 @@ def main():
                            areas_file or output_dir / '_noauthoring.ini',
                            config=config, world_save=world_save,
                            accept_uploads=args.accept_uploads,
-                           upload_token=upload_token)
-    if args.authoring:
+                           upload_token=upload_token,
+                           edit_password=edit_password)
+    if authoring:
         # Make sure the served manifest matches the areas files on disk at startup.
         try:
             state.sync_manifest()
         except Exception as e:  # noqa: BLE001
             print(f"WARNING: could not sync manifest at startup: {e}")
 
-    handler = make_handler(state, args.authoring)
+    handler = make_handler(state, authoring)
     httpd = _QuietThreadingHTTPServer((args.host, args.port), handler)
 
     print(f"\nRun8 area-label authoring server")
     print(f"  Serving : {output_dir}")
-    if args.authoring:
-        print(f"  Writing : {areas_file}")
+    if authoring:
+        print(f"  Editing : ENABLED (password-gated); writing to {areas_file}")
+    elif edit_password and not args.authoring:
+        print(f"  Editing : disabled (--no-authoring overrides the edit password)")
     else:
-        print(f"  Mode    : read-only (no label authoring)")
+        print(f"  Editing : read-only (set RUN8_EDIT_PASSWORD / --edit-password to enable)")
+
+    # A password over plain HTTP on an exposed interface is sniffable; steer the
+    # operator to a TLS tunnel (the map is served without TLS by this server).
+    _loopback = args.host in ('127.0.0.1', '::1', 'localhost')
+    if authoring and not _loopback:
+        print("  WARNING : editing is enabled on a non-localhost interface over plain HTTP.\n"
+              "            Put this behind a TLS tunnel (Tailscale Funnel / Caddy) - see the\n"
+              "            hosting docs - so the password isn't sent in the clear.")
     if world_save:
         exists = " (not found yet)" if not world_save.exists() else ""
         role = "upload slot" if args.accept_uploads else "live-watched"

@@ -30,7 +30,7 @@ is what the viewer is built on.)
 | Flag | Viewer |
 |------|--------|
 | *(none)* | **Manual-alignment viewer (default).** The contiguous tile-based track drawn over a real OSM / Satellite map (with an OpenRailwayMap overlay), draggable by eye to align a chosen area. Includes all overlays, search, the local-symbol filter, Area Label display, and Area Label authoring. |
-| `--production` | Same as the default, but hides the "Add Label" authoring button (for hosting the map to end users). |
+| `--production` | **Deprecated no-op** (#56). The authoring UI is always built but inert; editing is gated at serve time by an edit password (`serve.py` / `host_map.py` `RUN8_EDIT_PASSWORD`) — no password = read-only. See **Password-gated remote editing (#56)**. |
 | `--align` | Explicitly selects the default viewer; now a no-op kept for backward compatibility. |
 
 > **Why manual alignment is the default:** the Run8 route is a *topological* model — section lengths are compressed/stretched and a few tiles carry genuine route-designer defects — so no automatic transform georeferences the whole network. The default viewer instead renders the internally-consistent (contiguous) tile grid on a real map and lets you slide it into place per area of interest. See `openrailways_goals.txt` for background.
@@ -389,8 +389,10 @@ that can only hand out files), run the bundled **`serve.py`**, a stdlib-only ser
 (no Flask/extra dependency) that serves the same output **and** accepts label edits:
 
 ```bash
-python serve.py <config.ini> [--port 8000] [--host 127.0.0.1] [--areas-file FILE] [--no-authoring]
+python serve.py <config.ini> [--port 8000] [--host 127.0.0.1] [--areas-file FILE] [--edit-password PW] [--no-authoring]
 ```
+Editing is off unless an edit password is set (`--edit-password` / `RUN8_EDIT_PASSWORD`) —
+see **Password-gated remote editing (#56)** below.
 
 With it running, the manual-alignment viewer's authoring popups gain a **Save**
 button (new labels) and, on **click of any existing label**, an **edit popup**
@@ -408,8 +410,8 @@ run reproduces everything.
 - **Detection is automatic:** the viewer probes `GET /api/ping`; if there's no
   backend (opened as a static file, or served by plain `http.server`) it silently
   falls back to the old **Generate INI → copy/paste** popup for new labels, and
-  existing labels are non-interactive. `--production` (no "Add Label" button) is
-  unaffected either way.
+  existing labels are non-interactive. When a backend *is* present, whether editing
+  is offered depends on `edit_mode` (see the #56 section below), not on a build flag.
 - **File safety:** writes are atomic (temp + replace) and back up the previous
   contents to `<areas_file>.bak` before each change; only the exact `[area.<id>]`
   block a mutation targets is rewritten, so comments/order elsewhere are preserved.
@@ -424,6 +426,50 @@ run reproduces everything.
 
 Without the server, the flow is still: popup **Generate INI** → paste the `[area.*]`
 block into the areas file → re-run `output_generator.py`.
+
+##### Password-gated remote editing (#56)
+Editing is gated by a **shared password** so a self-hosted, internet-exposed map can be
+public read-only while trusted staff edit labels. **The presence of an edit password is the
+switch** — there is no `--production` any more (it is a deprecated no-op); with no password
+the whole map is read-only, and the authoring UI is always compiled into the HTML but inert.
+
+- **Enabling.** `serve.py` / `host_map.py` read `RUN8_EDIT_PASSWORD` (preferred, keeps the
+  secret out of argv) or `--edit-password`; `authoring = bool(edit_password)` (a
+  `--no-authoring` flag still forces read-only). Reuses the existing bearer-token pattern that
+  already gates `POST /api/world` (`--upload-token`).
+- **Unlock — challenge-response, the raw password never crosses the wire.** `GET /api/unlock`
+  → a one-time nonce; `POST /api/unlock {nonce, HMAC(password,nonce)}` → a short-lived
+  in-memory session token (`hmac.compare_digest`, sliding TTL). Per-IP brute-force lockout on
+  failed attempts. The viewer computes the HMAC with a **bundled pure-JS HMAC-SHA256** because
+  `crypto.subtle` needs a secure context, which plain-HTTP non-localhost hosts lack.
+- **Enforcement.** The session token (`Authorization: Bearer`) is required on
+  `POST/PUT/DELETE /api/areas`, checked server-side. `GET /api/ping` reports `edit_mode`
+  (`disabled` | `locked`) and an `areas_version` (bumped on every write).
+- **Viewer flow.** Starts locked; typing the word **`edit`** (a *hidden* reveal — no visible
+  button, obscurity not security) opens an inline password popup; a successful unlock stores
+  the token, reveals the **Add Label** + **Leave editing** buttons, turns the Area Labels
+  overlay on, and makes markers editable. A 401 re-locks. A new label defaults to the
+  last-used type (`MapApp.lastLabelType`). Code in `ALIGN_JS`: `doUnlock` / `hmacSha256Hex`
+  (+ `_sha256`) / `relockEditing` / the `edit`-hotword `keydown` listener; `apiArea` attaches
+  the Bearer token.
+- **Multi-editor live refresh.** The viewer polls `/api/ping` every ~5 s and, when
+  `areas_version` changes (skipped mid-placement), refetches `/api/areas` and rebuilds the
+  labels — so all viewers, even read-only ones, see others' add/edit/delete within seconds.
+  `area_store` writes are already serialized under one lock and block-scoped, so concurrent
+  edits to *different* labels are safe; there is **no** per-label conflict guard (same-label =
+  last-write-wins, `.bak`-recoverable, judged rare enough).
+- **Input hardening (`area_store`).** The write path is internet-reachable, so
+  `format_area_block` validates the `[area.<id>]` id charset, caps label/field lengths, and
+  rejects newlines in free-text values so a crafted label can't inject a section/key (serve.py
+  also slugifies a client-supplied id).
+- **Self-host bundle.** `host_map.py` (`Run8MapHost.exe`) honours the same
+  `RUN8_EDIT_PASSWORD`; with none it stays read-only, and it warns at startup when editing is
+  enabled on a public (`0.0.0.0`) bind over plain HTTP.
+- **Exposure.** A password over plain HTTP is sniffable, so the operator docs steer editing
+  hosts to a **TLS tunnel** — **Tailscale Funnel** (primary), or **Caddy** for domain owners —
+  in `packaging/README-operator.txt`; `serve.py` / `host_map.py` print a startup warning on a
+  non-localhost plain-HTTP bind. Deploying an edit password to the droplet (already behind
+  Caddy) is a **Path B** change: set `RUN8_EDIT_PASSWORD` in `run8map.env` and restart.
 
 #### Signals (dispatcher-style glyphs)
 Signals render as a **circle + T** glyph (a head with a mast and one crossbar per head,

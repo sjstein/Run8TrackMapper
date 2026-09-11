@@ -30,6 +30,25 @@ _ANY_HEADER_RE = re.compile(r'^\s*\[[^\]]+\]\s*$')
 # trailing blank lines / comments after the block are left with the file).
 _AREA_KEY_RE = re.compile(r'^\s*(label|tile|local|color|font_size|box|rotation|type)\s*=', re.I)
 
+# Input hardening (#56): the write path is reachable over an authenticated but
+# internet-exposed API, so a crafted field must never break out of its [area.<id>]
+# block (e.g. a newline in a value, or a `]`/newline in the id, injecting a new
+# section or key). These are the last line of defence, enforced at the write layer
+# regardless of caller.
+MAX_LABEL_LEN = 200
+MAX_FIELD_LEN = 120
+_ID_RE = re.compile(r'^[A-Za-z0-9_.\-]+$')   # no `[`, `]`, whitespace or newlines
+
+
+def _safe_field(value, name: str, maxlen: int) -> str:
+    """Reject a value that could corrupt the INI (newlines) or is absurdly long."""
+    s = str(value)
+    if '\n' in s or '\r' in s:
+        raise AreaStoreError(f"{name} must not contain newlines")
+    if len(s) > maxlen:
+        raise AreaStoreError(f"{name} is too long (max {maxlen} characters)")
+    return s
+
 
 def slugify(text: str) -> str:
     """Turn a label into a safe [area.<id>] slug (lowercase, underscores)."""
@@ -55,13 +74,25 @@ def _fmt_num(value) -> str:
 
 
 def format_area_block(area: Dict) -> str:
-    """Render one area dict as an [area.<id>] INI block (trailing newline)."""
-    lines = [f"[area.{area['id']}]",
-             f"label = {_encode_label(area['label'])}",
+    """Render one area dict as an [area.<id>] INI block (trailing newline).
+
+    Validates every field that reaches the file so a hostile value cannot inject a
+    new section/key (#56): the id must match `_ID_RE` (no `]`/newline/space), the
+    label is length-capped (newlines are escaped by `_encode_label`), and free-text
+    values (color/type) are newline-checked and length-capped.
+    """
+    aid = str(area['id'])
+    if not _ID_RE.match(aid):
+        raise AreaStoreError(f"invalid area id {aid!r} (allowed: letters, digits, _ . -)")
+    label = str(area['label'])
+    if len(label) > MAX_LABEL_LEN:
+        raise AreaStoreError(f"label is too long (max {MAX_LABEL_LEN} characters)")
+    lines = [f"[area.{aid}]",
+             f"label = {_encode_label(label)}",
              f"tile = {_fmt_num(area['tile_x'])},{_fmt_num(area['tile_z'])}",
              f"local = {_fmt_num(area['local_x'])},{_fmt_num(area['local_z'])}"]
     if area.get('color'):
-        lines.append(f"color = {area['color']}")
+        lines.append(f"color = {_safe_field(area['color'], 'color', MAX_FIELD_LEN)}")
     if area.get('font_size'):
         lines.append(f"font_size = {int(area['font_size'])}")
     if area.get('box'):
@@ -69,7 +100,7 @@ def format_area_block(area: Dict) -> str:
     if area.get('rotation'):
         lines.append(f"rotation = {_fmt_num(area['rotation'])}")
     if area.get('type') and area['type'] != 'other':
-        lines.append(f"type = {area['type']}")
+        lines.append(f"type = {_safe_field(area['type'], 'type', MAX_FIELD_LEN)}")
     return "\n".join(lines) + "\n"
 
 
