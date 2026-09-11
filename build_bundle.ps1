@@ -57,11 +57,14 @@ if (-not (Test-Path $distApp)) {
 
 # --- stage the operator-editable files beside the exe -----------------------
 Write-Host "`nStaging operator files into $distApp ..." -ForegroundColor Cyan
+# NOTE: config-socal.ini / areas_socal.ini are NOT staged loose - they ride inside the
+# exe as templates (run8maphost.spec datas) and host_map seeds them beside the exe on
+# first run, so an update can't overwrite an operator's edits. The operator's settings
+# live in settings.bat (seeded by Start Map.bat from the template); only the template ships.
 $staged = @(
-    @{ Src = 'config-socal.ini';              Dst = 'config-socal.ini' },
-    @{ Src = 'areas_socal.ini';               Dst = 'areas_socal.ini' },
-    @{ Src = 'packaging\README-operator.txt'; Dst = 'README.txt' },
-    @{ Src = 'packaging\Start Map.bat';       Dst = 'Start Map.bat' }
+    @{ Src = 'packaging\README-operator.txt';  Dst = 'README.txt' },
+    @{ Src = 'packaging\Start Map.bat';         Dst = 'Start Map.bat' },
+    @{ Src = 'packaging\settings.default.bat';  Dst = 'settings.default.bat' }
 )
 foreach ($f in $staged) {
     $src = Join-Path $PSScriptRoot $f.Src
@@ -86,5 +89,5 @@ Write-Host "  sha256: $sha"
 Write-Host "`nDone." -ForegroundColor Green
 Write-Host "  Bundle folder : $distApp"
 Write-Host "  Release zip   : $zip  (+ .sha256)  <- attach to the GitHub Release (see packaging/RELEASING.md)"
-Write-Host "Smoke-test the exe:"
-Write-Host "  cd `"$distApp`"; .\Run8MapHost.exe config-socal.ini --host 127.0.0.1 --port 8001 --world `"<autosave path>`""
+Write-Host "Smoke-test the exe (it seeds config-socal.ini + areas_socal.ini beside itself on first run):"
+Write-Host "  cd `"$distApp`"; .\Run8MapHost.exe --host 127.0.0.1 --port 8001 --world `"<autosave path>`""
