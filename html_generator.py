@@ -2766,6 +2766,7 @@ ALIGN_JS = r'''
         MapApp.editToken = null;
         MapApp.hasBackend = false;
         buildAlignUI();
+        installAlignHint();
         addTrackOpacitySlider();
         addAreaLabelFontSlider();
         MapApp.overlayStates.areaLabels = false;
@@ -3706,8 +3707,8 @@ ALIGN_JS = r'''
         const bs='position:absolute;top:10px;z-index:1500;padding:6px 10px;cursor:pointer;'+
           'background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);border-radius:6px;box-shadow:0 1px 6px var(--shadow);font:13px Arial';
         const authoring = (typeof window.__run8_authoring === 'undefined') ? true : !!window.__run8_authoring;
-        const btn=document.createElement('button'); btn.textContent='Align mode: OFF'; btn.style.cssText=bs+';left:52px';
-        document.body.appendChild(btn);
+        // Aligning is no longer a modal button (#100) - hold Alt and drag the track
+        // (see the Alt-drag handlers below and the one-time hint on the first real base map).
         // Editing controls (#56). There is NO visible "unlock" button - typing the word
         // "edit" opens the password popup (see the hidden-reveal listener below). Once
         // unlocked, the Add Label + "Leave editing" buttons appear; both start hidden.
@@ -3721,10 +3722,8 @@ ALIGN_JS = r'''
         document.body.appendChild(leaveBtn);
         // Help button + overlay: a quick reference of the map's mouse/key commands.
         const help=document.createElement('button'); help.textContent='Help';
-        // Sit Help directly under the Align-mode button (same left, second row) so it
-        // doesn't float far to the right when the Add Label button is absent
-        // (production build). bs sets top:10px; the trailing top:46px overrides it.
-        help.style.cssText=bs+';left:52px;top:46px';
+        // Help takes the top-left slot the Align-mode button used to occupy (#100).
+        help.style.cssText=bs+';left:52px';
         document.body.appendChild(help);
         let helpEl=null;
         function kbd(s){ return '<kbd style="background:var(--kbd-bg);border:1px solid var(--border);border-radius:3px;padding:0 5px;font:12px monospace">'+s+'</kbd>'; }
@@ -3751,7 +3750,7 @@ ALIGN_JS = r'''
                     +hrow('Right-click the map','Open that exact point in Google Maps (new tab) to cross-check imagery.')
                     +hrow('Enable a region (checkbox)','Loads the region on demand and fits the map to it.')
                     +hrow('Search button','Find a track section, signal, industry, AI location, or train / rail vehicle.')
-                    +hrow('Align mode button','Turn on, then drag the track to slide it onto the real map; release to commit the alignment.')
+                    +hrow(kbd('Alt')+' + drag the track','Hold Alt and drag to slide the track onto the real map; release to commit the alignment. (Normal drag still pans.)')
                     +(authoring ?
                         hrow('Add Label button','Turn on, click to place a label, then click a second point to set the text angle ('+kbd('Esc')+' = horizontal).')
                        +hrow('Click a label','Edit its text, colour, font, rotation or box — or delete it.')
@@ -3772,18 +3771,22 @@ ALIGN_JS = r'''
         function setT(t){ panes.overlayPane.style.transform=t;
             if(panes.markerPane) panes.markerPane.style.transform=t;
             if(panes.shadowPane) panes.shadowPane.style.transform=t; }
-        let aligning=false, drag=null; MapApp.labelMode=false;
-        function updA(){ btn.textContent='Align mode: '+(aligning?'ON':'OFF'); btn.style.background=aligning?'#1560d0':'var(--panel-bg)'; btn.style.color=aligning?'#fff':'var(--panel-fg)'; }
+        let drag=null, altArmed=false; MapApp.labelMode=false;
         function updL(){ if(!lbl) return; lbl.textContent='Add Label: '+(MapApp.labelMode?'ON':'OFF'); lbl.style.background=MapApp.labelMode?'#1a9a4a':'var(--panel-bg)'; lbl.style.color=MapApp.labelMode?'#fff':'var(--panel-fg)'; }
-        function setAlign(on){ aligning=on;
-            if(on){ MapApp.labelMode=false; updL(); MapApp.map.dragging.disable(); }
-            else { MapApp.map.dragging.enable(); drag=null; setT(''); }
-            updA(); }
+        // Align is no longer a mode/toggle (#100): hold Alt to turn a left-drag into an
+        // alignment nudge. While Alt is held we disable Leaflet's own map panning so the
+        // drag slides the track overlay instead; releasing Alt (or the window losing
+        // focus) restores normal panning. A drag already in progress keeps panning
+        // disabled until mouseup even if Alt is released early.
+        function armAlign(on){ if(on===altArmed) return; altArmed=on;
+            if(on){ MapApp.map.dragging.disable(); MapApp.map.getContainer().style.cursor='move'; }
+            else if(!drag){ MapApp.map.dragging.enable(); MapApp.map.getContainer().style.cursor=''; } }
+        document.addEventListener('keydown', e=>{ if(e.key==='Alt') armAlign(true); });
+        document.addEventListener('keyup',   e=>{ if(e.key==='Alt') armAlign(false); });
+        window.addEventListener('blur', ()=> armAlign(false));
         function setLabel(on){ if(!MapApp.authoring) return; MapApp.labelMode=on;
-            if(on){ aligning=false; updA(); MapApp.map.dragging.enable(); drag=null; setT(''); }
-            else if(MapApp.areaCapture && MapApp.areaCapture.pending){ finalizeAreaCapture(null); }
+            if(!on && MapApp.areaCapture && MapApp.areaCapture.pending){ finalizeAreaCapture(null); }
             updL(); }
-        btn.onclick=()=> setAlign(!aligning);
         if(lbl) lbl.onclick=()=> setLabel(!MapApp.labelMode);
         // Edit-state UI hooks (#56), driven by detectBackend()/doUnlock()/relockEditing():
         //   enableAuthoringUI  - unlocked: reveal Add Label + Leave editing, allow editing.
@@ -3805,19 +3808,52 @@ ALIGN_JS = r'''
                 _hot=''; e.preventDefault(); if(MapApp.doUnlock) MapApp.doUnlock();
             }
         });
-        // align-mode drag
-        MapApp.map.on('mousedown', e=>{ if(!aligning) return;
+        // Alt + left-drag = alignment nudge (#100). Gate on Alt held (armAlign has already
+        // disabled map panning); fall back to e.altKey in case the keydown was missed
+        // (e.g. focus was elsewhere when Alt went down).
+        MapApp.map.on('mousedown', e=>{ if(!(altArmed || (e.originalEvent && e.originalEvent.altKey))) return;
+            armAlign(true);
             drag={ p:MapApp.map.mouseEventToContainerPoint(e.originalEvent), a:e.latlng, last:e.latlng }; });
-        MapApp.map.on('mousemove', e=>{ if(!aligning||!drag) return;
+        MapApp.map.on('mousemove', e=>{ if(!drag) return;
             const p=MapApp.map.mouseEventToContainerPoint(e.originalEvent);
             setT(`translate3d(${p.x-drag.p.x}px,${p.y-drag.p.y}px,0)`); drag.last=e.latlng; });
-        MapApp.map.on('mouseup', ()=>{ if(!aligning||!drag) return; const d=drag; drag=null; setT('');
+        MapApp.map.on('mouseup', ()=>{ if(!drag) return; const d=drag; drag=null; setT('');
             MapApp.align.lat += (d.last.lat - d.a.lat); MapApp.align.lon += (d.last.lng - d.a.lng);
-            rerenderAlign(); repositionAreaLabels(); setTimeout(applyTrackOpacity, 600); });
+            rerenderAlign(); repositionAreaLabels(); setTimeout(applyTrackOpacity, 600);
+            if(!altArmed){ MapApp.map.dragging.enable(); MapApp.map.getContainer().style.cursor=''; } });
         // label-mode capture: first click = position, second = angle (Esc = horizontal)
         MapApp.map.on('click', e=>{ if(!MapApp.authoring || !MapApp.labelMode) return; MapApp.map.closePopup();
             if(MapApp.areaCapture && MapApp.areaCapture.pending) finalizeAreaCapture(e.latlng);
             else startAreaCapture(e.latlng); });
+    }
+
+    // One-time hint (#100): the align-mode toggle button is gone, so the first time the
+    // user picks a real base map (anything but "None") tell them how to align - hold Alt
+    // and drag. Shown once per browser (localStorage), then never again.
+    function installAlignHint(){
+        let done=false;
+        try { done = localStorage.getItem('run8_align_hint')==='1'; } catch(e){}
+        function show(){
+            if(done) return; done=true;
+            try { localStorage.setItem('run8_align_hint','1'); } catch(e){}
+            const h=document.createElement('div');
+            h.style.cssText='position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:3200;'
+                +'max-width:380px;background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);'
+                +'border-radius:8px;box-shadow:0 3px 16px var(--shadow);padding:10px 14px 10px 14px;font:13px/1.5 Arial;'
+                +'display:flex;gap:10px;align-items:flex-start;';
+            h.innerHTML='<div><b>Tip:</b> hold '
+                +'<kbd style="background:var(--kbd-bg);border:1px solid var(--border);border-radius:3px;padding:0 5px;font:12px monospace">Alt</kbd>'
+                +' and drag the track to align it with the map; release to commit. A normal drag still pans.</div>'
+                +'<button title="Dismiss" style="border:none;background:var(--kbd-bg);color:var(--panel-fg);border-radius:4px;'
+                +'width:22px;height:22px;flex:0 0 auto;cursor:pointer;font-size:15px;line-height:20px">&times;</button>';
+            const close=()=>{ if(h.parentNode) h.parentNode.removeChild(h); };
+            h.querySelector('button').onclick=close;
+            document.body.appendChild(h);
+            setTimeout(close, 12000);
+        }
+        document.querySelectorAll('input[name="basemap"]').forEach(radio=>{
+            radio.addEventListener('change', e=>{ if(e.target.value!=='None') show(); });
+        });
     }
 
 '''

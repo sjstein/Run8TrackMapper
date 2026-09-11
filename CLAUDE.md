@@ -374,8 +374,9 @@ Default stores no color, a preset stores its name, Custom stores hex. `config_pa
 is the Python-side resolver (used for tests / any server-side rendering).
 
 Authoring (capturing new labels), in the manual-alignment viewer:
-- Toggle the **"Add Label"** button (mutually exclusive with "Align mode"; hidden
-  entirely under `--production`), then **click** to place.
+- Toggle the **"Add Label"** button (hidden entirely under `--production`), then
+  **click** to place. (Aligning is no longer a mode — it is **Alt + drag**, #100 —
+  so the two are independent; Alt+drag still aligns even while Add Label is on.)
 
 Then **click a second point along a track** to set the text angle (or press **Esc**
 to leave it horizontal). Positions are converted to world meters via
@@ -551,7 +552,7 @@ same kind of mutually-exclusive mode.
   change the authored `font_size`, just how big the labels render (`MapApp.areaFontScale`,
   applied in `updateAreaLabelSizes`; each label's scaled base still collapses toward the small
   zoomed-out floor)
-- **Align mode** *(align viewer only)*: drag the track to slide it onto the real map; releasing commits the new alignment
+- **Align (Alt + drag)** *(align viewer only, #100)*: hold **Alt** and drag the track to slide it onto the real map; releasing commits the new alignment (a plain drag still pans). This replaced the old modal "Align mode" toggle button. A one-time hint explaining the gesture appears the first time the user selects a base map other than "None" (`installAlignHint`, gated by a `run8_align_hint` localStorage flag). Implemented in `ALIGN_JS` via `armAlign` + Alt keydown/keyup listeners that disable/restore Leaflet map panning while Alt is held.
 - **Add Label** *(align viewer only, hidden under `--production`)*: click to author a new area label and generate its `[area.*]` INI block
 
 #### Visual Elements
