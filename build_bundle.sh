@@ -32,11 +32,16 @@ fi
 
 echo
 echo "Staging operator files into $DIST ..."
-cp -f "config-socal.ini"              "$DIST/config-socal.ini"
-cp -f "areas_socal.ini"               "$DIST/areas_socal.ini"
-cp -f "packaging/README-operator.txt" "$DIST/README.txt"
-cp -f "packaging/Start Map.bat"       "$DIST/Start Map.bat"
-echo "  staged: config-socal.ini, areas_socal.ini, README.txt, Start Map.bat"
+# NOTE: config-socal.ini / areas_socal.ini are NOT staged as loose files - they ride
+# inside the exe as templates (run8maphost.spec datas) and host_map seeds them beside
+# the exe on first run, so an update can't overwrite an operator's edits. Likewise the
+# operator's settings live in settings.bat (seeded by Start Map.bat from the template);
+# only the template ships.
+cp -f "packaging/README-operator.txt"  "$DIST/README.txt"
+cp -f "packaging/Start Map.bat"         "$DIST/Start Map.bat"
+cp -f "packaging/settings.default.bat"  "$DIST/settings.default.bat"
+echo "  staged: README.txt, Start Map.bat, settings.default.bat"
+echo "  (config-socal.ini / areas_socal.ini / settings.bat are seeded on first run, not shipped loose)"
 
 # --- zip the folder into the release artifact + a sha256 --------------------
 # Use Python (always present) so this works the same in Git Bash and elsewhere.
@@ -51,5 +56,5 @@ echo
 echo "Done."
 echo "  Bundle folder : $DIST"
 echo "  Release zip   : $ZIP  (+ .sha256)  <- attach to the GitHub Release (see packaging/RELEASING.md)"
-echo "Smoke-test the exe:"
-echo "  cd \"$DIST\" && ./Run8MapHost.exe config-socal.ini --host 127.0.0.1 --port 8001 --world \"<autosave path>\""
+echo "Smoke-test the exe (it seeds config-socal.ini + areas_socal.ini beside itself on first run):"
+echo "  cd \"$DIST\" && ./Run8MapHost.exe --host 127.0.0.1 --port 8001 --world \"<autosave path>\""

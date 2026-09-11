@@ -1,43 +1,27 @@
 @echo off
 REM ============================================================================
-REM  Run8 Map - start your public track map
-REM  Double-click this file to build (first run) and serve your map.
-REM  Edit the SETTINGS block below, save, then double-click.
+REM  Run8 Map - start your public track map.  Double-click this file.
+REM
+REM  Your settings live in "settings.bat" (world-save path, port, edit password).
+REM  It is created from the template on first run and is NOT overwritten by
+REM  updates - so to update, just unzip the new release over this folder.
 REM ============================================================================
 
-REM Run from this folder so the config and output\ are found next to the .exe.
+REM Run from this folder so config, output\ and settings.bat are found beside the .exe.
 cd /d "%~dp0"
 
-REM ======================== SETTINGS - EDIT THESE =============================
+REM First run: materialise your editable settings.bat from the shipped template.
+if not exist "settings.bat" (
+    copy /y "settings.default.bat" "settings.bat" >nul
+    echo.
+    echo  * First run: created "settings.bat" from the template. Open it to set your
+    echo    WORLD_SAVE / PORT (and an edit password if you want live label editing).
+    echo    Using the defaults for now. settings.bat is yours - updates won't touch it.
+    echo.
+)
 
-REM  WORLD_SAVE : full path to YOUR Run8 server's world autosave (required).
-REM               This is the server's full-world save, e.g.:
-REM               ...\Content\V3Routes\Regions\SouthernCA\AutoSaves\Auto Save World.xml
-set "WORLD_SAVE=C:\Run8Studios\Run8 Train Simulator V3\Content\V3Routes\Regions\SouthernCA\AutoSaves\Auto Save World.xml"
-
-REM  PORT       : the TCP port you forwarded on your router for the map
-REM               (a SEPARATE rule from Run8's UDP port). 8000 is fine unless
-REM               it's already in use.
-set "PORT=8000"
-
-REM  CONFIG_FILE: the map config in this folder. Most SoCal operators leave this
-REM               as-is. Only change it if your Run8 is installed in a
-REM               non-standard location (edit the paths inside config-socal.ini),
-REM               or point it at a different config if you host a different route.
-set "CONFIG_FILE=config-socal.ini"
-
-REM  RUN8_EDIT_PASSWORD (OPTIONAL): leave BLANK for a normal read-only public map.
-REM               Set a shared password to let your staff edit area labels on the
-REM               live map (on the map they type the word "edit", then enter this
-REM               password). See the "ENABLE LABEL EDITING" section of the README.
-REM               *** IMPORTANT *** The password itself is never sent over the
-REM               network, but if you expose the map on a plain http port an active
-REM               edit session can be hijacked by someone watching the traffic. An
-REM               HTTPS tunnel (Tailscale Funnel - see the README) is strongly
-REM               recommended when editing is on.
-set "RUN8_EDIT_PASSWORD="
-
-REM ===========================================================================
+REM Load your settings (defines WORLD_SAVE, PORT, CONFIG_FILE, RUN8_EDIT_PASSWORD).
+call "settings.bat"
 
 Run8MapHost.exe "%CONFIG_FILE%" --port %PORT% --world "%WORLD_SAVE%"
 

@@ -28,6 +28,11 @@ Notes
 datas = [
     ('vendor/leaflet', 'vendor/leaflet'),
     ('db_railvehicles.db', '.'),
+    # Default config + area labels shipped as TEMPLATES inside the exe (not as loose
+    # files). host_map seeds them beside the exe on first run if absent, so a later
+    # release never overwrites an operator's edited copies.
+    ('config-socal.ini', '.'),
+    ('areas_socal.ini', '.'),
 ]
 
 # Third-party libs that may sit in the venv but are NOT on the runtime path; keep

@@ -43,20 +43,24 @@ this with you, or don't run it. But none of the warnings mean the tool is unsafe
 
 1. Unzip this folder anywhere (e.g. C:\Run8Map).
 
-2. Open "Start Map.bat" in Notepad (right-click -> Edit) and set two things:
+2. Double-click "Start Map.bat" once. It creates your personal "settings.bat"
+   (from the shipped template) and then starts. Close it, then open "settings.bat"
+   in Notepad (right-click -> Edit) and set:
      - WORLD_SAVE : the full path to your server's world autosave, e.g.
          ...\Content\V3Routes\Regions\SouthernCA\AutoSaves\Auto Save World.xml
      - PORT       : the TCP port you will forward (8000 is fine).
-   Save the file.
+   Save it. (settings.bat is YOURS - a future update will not overwrite it. Same
+   goes for config-socal.ini / areas_socal.ini, which are created beside the
+   program on first run.)
 
 3. Forward that TCP port on your router to this machine.
      - This is a SEPARATE rule from Run8's UDP port. Same router page; choose
        protocol TCP, external+internal port = the PORT you set, pointed at this
        PC's local IP.
 
-4. Double-click "Start Map.bat".
-     - The FIRST run builds the map from your route files (this can take a couple
-       of minutes). Later runs skip that and start immediately.
+4. Double-click "Start Map.bat" again.
+     - The FIRST real run builds the map from your route files (this can take a
+       couple of minutes). Later runs skip that and start immediately.
      - Windows Firewall may pop up the first time - click "Allow access".
      - When it says "Serving", the map is up. Leave the window open.
 
@@ -94,7 +98,7 @@ control points, track labels...) live on the map, protected by a shared password
 
 Turn editing on:
 
-  1. Open "Start Map.bat" in Notepad and set a password on the RUN8_EDIT_PASSWORD
+  1. Open "settings.bat" in Notepad and set a password on the RUN8_EDIT_PASSWORD
      line, e.g.:
          set "RUN8_EDIT_PASSWORD=some-long-shared-passphrase"
      Pick something long; share it only with staff who should edit. Leaving it
@@ -175,8 +179,9 @@ ALTERNATIVE - Caddy (if you already own a domain name):
 - Updating: if a newer version is published you'll see a one-line notice in the
   window when the map starts. Download the new zip from the Releases page:
     https://github.com/sjstein/Run8TrackMapper/releases
-  unzip it, and copy your edited "Start Map.bat" (and config, if you changed it)
-  into the new folder.
+  and unzip it OVER this folder (overwrite when asked). Your own files are safe:
+  settings.bat, config-socal.ini and areas_socal.ini are NOT in the zip, so your
+  edits and labels are kept - only the program, README, and the templates update.
 
 
 ----------------------------------------------------------------------------

@@ -35,6 +35,7 @@ docs; a startup warning is printed for a public plain-HTTP editing bind.
 import argparse
 import json
 import os
+import shutil
 import sys
 import threading
 import urllib.request
@@ -157,6 +158,29 @@ def _default_config_path():
     return None
 
 
+def _seed_from_template(target: Path, template_name: str, kind: str) -> bool:
+    """Create `target` from the bundled template when it's missing, printing a console
+    WARNING so the operator knows a default was materialised. Returns True if it seeded.
+
+    The editable operator files (config-socal.ini, areas_socal.ini) are shipped as
+    templates *inside* the exe (see run8maphost.spec datas), NOT as loose files in the
+    zip - so a new release can never overwrite an operator's edited copies. They are
+    written out beside the program the first time they're needed, then left alone.
+    No-op (returns False) if the target already exists or no bundled template is present
+    (e.g. running from a partial source tree)."""
+    if target.exists():
+        return False
+    tmpl = bundled_asset(template_name)
+    if not tmpl.exists():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(tmpl, target)
+    print(f"\n  WARNING: no {kind} found beside the program - created a default from the")
+    print(f"           bundled template:  {target}")
+    print(f"           Edit it to match your setup. A future update will NOT overwrite it.\n")
+    return True
+
+
 def _resolve_world_save(args, config):
     """Pick the world save to watch: --world wins, else [visualization] world_save.
     May not exist yet (Run8 hasn't autosaved); serve tolerates that and picks it up
@@ -216,12 +240,29 @@ def main():
     print(f"Run8 Map self-host launcher  (bundle {__version__})")
 
     config_path = args.config or _default_config_path()
+    if not config_path:
+        # First run of the default bundle: seed config-socal.ini beside the program
+        # from the bundled template (with a warning), then use it.
+        seeded = _program_dir() / 'config-socal.ini'
+        if _seed_from_template(seeded, 'config-socal.ini', 'map config (config-socal.ini)'):
+            config_path = str(seeded)
     if not config_path or not Path(config_path).exists():
-        print("ERROR: no config file given and none found next to the program.\n"
+        print("ERROR: no config file given and none found or seedable next to the program.\n"
               "       Pass one:   Run8MapHost.exe <your-config.ini>\n"
               "       or place a config-socal.ini / config.ini beside the program.",
               file=sys.stderr)
         sys.exit(1)
+
+    # Seed any area-label file the config references but that is missing, BEFORE parsing
+    # (parse_config errors on a referenced-but-missing areas_file). Only a same-named
+    # bundled template is used, so this materialises the default areas_socal.ini; a
+    # custom config's own areas file is the operator's to provide.
+    try:
+        from config_parser import resolve_areas_files
+        for ap in resolve_areas_files(config_path):
+            _seed_from_template(ap, ap.name, f'area-label file ({ap.name})')
+    except Exception:  # noqa: BLE001 - best-effort; parse_config below reports real errors
+        pass
 
     # The operator's box HAS Run8, so source paths in the config are real - keep the
     # normal validation (unlike the droplet, which uses require_source_files=False).

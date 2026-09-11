@@ -49,7 +49,15 @@ Operators download from the repo's **Releases** page:
 - **Unsigned exe:** operators hit Windows SmartScreen + occasional AV false positives.
   Documented in `README-operator.txt` ("Run anyway"). Code signing (~$100+/yr cert)
   would remove it — only worth it if the friction proves to be a real barrier.
-- **Update preserves settings:** updating currently means the operator re-copies their
-  edited `Start Map.bat` into the new folder. A future refinement is to keep operator
-  settings in a separate file the bundle reads, so an update can replace everything else.
+- **Update preserves operator files (done):** the operator's editable files are NOT
+  shipped as loose files in the zip, so unzipping a new release over the folder can't
+  clobber them:
+  - `config-socal.ini` / `areas_socal.ini` ride inside the exe as templates
+    (`run8maphost.spec` `datas`); `host_map._seed_from_template` writes them beside the
+    exe on first run (with a console warning) if missing, then leaves them alone.
+  - Operator settings (world-save path, port, edit password) live in `settings.bat`,
+    which `Start Map.bat` seeds from the shipped `settings.default.bat` template on first
+    run. The zip ships only the template, never `settings.bat`.
+  So the staged files in the zip are just `README.txt`, `Start Map.bat`, and
+  `settings.default.bat` (plus the exe + `_internal/`).
 - **Zip step** reads the whole file into memory for the sha256 (fine at ~15 MB).
