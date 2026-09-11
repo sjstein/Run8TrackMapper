@@ -26,6 +26,16 @@ REM               non-standard location (edit the paths inside config-socal.ini)
 REM               or point it at a different config if you host a different route.
 set "CONFIG_FILE=config-socal.ini"
 
+REM  RUN8_EDIT_PASSWORD (OPTIONAL): leave BLANK for a normal read-only public map.
+REM               Set a shared password to let your staff edit area labels on the
+REM               live map (on the map they type the word "edit", then enter this
+REM               password). See the "ENABLE LABEL EDITING" section of the README.
+REM               *** IMPORTANT *** If you set a password, do NOT expose the map by
+REM               forwarding a raw port - the password would travel UNENCRYPTED over
+REM               plain http. Put the map behind a free HTTPS tunnel first
+REM               (Tailscale Funnel - see the README).
+set "RUN8_EDIT_PASSWORD="
+
 REM ===========================================================================
 
 Run8MapHost.exe "%CONFIG_FILE%" --port %PORT% --world "%WORLD_SAVE%"
