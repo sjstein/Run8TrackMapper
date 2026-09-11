@@ -174,7 +174,7 @@ def generate_javascript() -> str:
             console.log('Regions:', MapApp.manifest.regions.length);
 
             setupUI();
-            loadDefaultRegions();
+            restoreSession();
         } catch (error) {
             console.error('Failed to load manifest:', error);
         }
@@ -909,6 +909,111 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     async function loadDefaultRegions() {
         const defaultRegions = MapApp.manifest.regions.filter(r => r.enabled_by_default);
         await Promise.all(defaultRegions.map(r => loadRegion(r.id)));
+    }
+
+    // ---- Session persistence (#98) ----------------------------------------
+    // Remember the map view, base map, overlays, enabled regions, sliders,
+    // filters and (align viewer) the manual alignment across reloads, in
+    // localStorage keyed per map. Dark mode is persisted separately (run8_theme).
+    // Everything is best-effort: any read/write is wrapped so a private window or
+    // blocked storage just falls back to the config defaults. A schema version
+    // (`v`) lets a future format change invalidate cleanly.
+    function _stateKey(){
+        const n = (MapApp.manifest && MapApp.manifest.name) || 'default';
+        const slug = String(n).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'') || 'default';
+        return 'run8_state:' + slug;
+    }
+    function _loadSavedState(){
+        try { const s = localStorage.getItem(_stateKey()); return s ? JSON.parse(s) : null; }
+        catch(e){ return null; }
+    }
+    function saveState(){
+        if (MapApp._restoring || !MapApp.map || !MapApp.manifest) return;
+        try {
+            const c = MapApp.map.getCenter();
+            const st = { v:1, view:{ lat:c.lat, lng:c.lng, zoom:MapApp.map.getZoom() },
+                base: MapApp.currentBaseLayer,
+                overlays: Object.assign({}, MapApp.overlayStates),
+                regions: {}, op:{} };
+            const orm = document.getElementById('basemap-orm'); if (orm) st.orm = !!orm.checked;
+            if (MapApp.regionCheckboxes) MapApp.regionCheckboxes.forEach((cb,id)=>{ st.regions[id] = !!cb.checked; });
+            const os = document.getElementById('opacity-slider'); if (os) st.op.map = +os.value;
+            const ts = document.getElementById('track-opacity-slider'); if (ts) st.op.track = +ts.value;
+            const fs = document.getElementById('area-font-slider'); if (fs) st.op.label = +fs.value;
+            if (MapApp.trainOptions) st.trainOpts = Object.assign({}, MapApp.trainOptions);
+            if (MapApp.signalTypeVisible) st.sig = Object.assign({}, MapApp.signalTypeVisible);
+            if (MapApp.areaTypeVisible) st.area = { master: !!MapApp.overlayStates.areaLabels, types: Object.assign({}, MapApp.areaTypeVisible) };
+            if (MapApp.align) st.align = { lat: MapApp.align.lat, lon: MapApp.align.lon, scale: MapApp.align.scale };
+            localStorage.setItem(_stateKey(), JSON.stringify(st));
+        } catch(e){}
+    }
+    let _saveTimer = null;
+    function scheduleSave(){ if (_saveTimer) clearTimeout(_saveTimer); _saveTimer = setTimeout(saveState, 400); }
+    MapApp.saveState = saveState; MapApp.scheduleSave = scheduleSave;
+
+    function _applySlider(id, val){
+        if (typeof val !== 'number') return;
+        const el = document.getElementById(id); if (!el) return;
+        el.value = val; el.dispatchEvent(new Event('input', {bubbles:true}));
+    }
+    function _restoreAreaLabels(area){
+        if (MapApp.areaTypeVisible && area.types) Object.assign(MapApp.areaTypeVisible, area.types);
+        if (typeof updateAreaTypeZoomVisibility === 'function') updateAreaTypeZoomVisibility();
+        if (MapApp.areaTypeVisible) for (const id in MapApp.areaTypeVisible){ const cb = document.getElementById('overlay-areaType-'+id); if (cb) cb.checked = MapApp.areaTypeVisible[id]; }
+        if (typeof area.master === 'boolean'){
+            MapApp.overlayStates.areaLabels = area.master;
+            const cb = document.getElementById('overlay-areaLabels'); if (cb) cb.checked = area.master;
+            if (MapApp.areaLabelsLayer){
+                if (area.master){ MapApp.areaLabelsLayer.addTo(MapApp.map); if (typeof updateAreaLabelSizes==='function') updateAreaLabelSizes(); }
+                else MapApp.map.removeLayer(MapApp.areaLabelsLayer);
+            }
+        }
+    }
+    async function restoreSession(){
+        const st = _loadSavedState();
+        MapApp._saved = st;
+        MapApp._restoring = true;
+        try {
+            if (st) {
+                // Base map (dispatch its change handler to switch the layer).
+                if (st.base){ const r = document.querySelector('input[name="basemap"][value="'+st.base+'"]'); if (r && !r.checked){ r.checked = true; r.dispatchEvent(new Event('change',{bubbles:true})); } }
+                // OpenRailwayMap overlay.
+                const orm = document.getElementById('basemap-orm');
+                if (orm && typeof st.orm === 'boolean' && orm.checked !== st.orm){ orm.checked = st.orm; orm.dispatchEvent(new Event('change',{bubbles:true})); }
+                // Overlay states + checkboxes (layers attach as regions load below).
+                if (st.overlays) for (const id in MapApp.overlayStates){ if (id in st.overlays){ MapApp.overlayStates[id] = st.overlays[id]; const cb = document.getElementById('overlay-'+id); if (cb) cb.checked = st.overlays[id]; } }
+                // Manual alignment (must be set before any region is transformed).
+                if (st.align && MapApp.align){ if (typeof st.align.lat==='number') MapApp.align.lat = st.align.lat; if (typeof st.align.lon==='number') MapApp.align.lon = st.align.lon; if (typeof st.align.scale==='number') MapApp.align.scale = st.align.scale; }
+                // Sliders (set value + fire the existing input handler).
+                if (st.op){ _applySlider('opacity-slider', st.op.map); _applySlider('track-opacity-slider', st.op.track); _applySlider('area-font-slider', st.op.label); }
+                // Filter states (applied to layers after load).
+                if (st.trainOpts && MapApp.trainOptions) Object.assign(MapApp.trainOptions, st.trainOpts);
+                if (st.sig && MapApp.signalTypeVisible) Object.assign(MapApp.signalTypeVisible, st.sig);
+                // Region checkboxes (loaded just below).
+                if (st.regions && MapApp.regionCheckboxes) MapApp.regionCheckboxes.forEach((cb,id)=>{ if (id in st.regions) cb.checked = st.regions[id]; });
+            }
+            // Load regions: the saved-enabled set if present, else the config defaults.
+            if (st && st.regions){
+                const ids = MapApp.manifest.regions.filter(r => st.regions[r.id]).map(r => r.id);
+                await Promise.all(ids.map(id => loadRegion(id)));
+            } else {
+                await loadDefaultRegions();
+            }
+            // Post-load: re-apply things needing loaded layers, then the saved view.
+            if (st) {
+                if (st.trainOpts && typeof applyTrainOptions === 'function') applyTrainOptions();
+                if (st.sig && typeof rerenderSignals === 'function') rerenderSignals();
+                if (st.area) _restoreAreaLabels(st.area);
+                if (st.view && typeof st.view.lat==='number') MapApp.map.setView([st.view.lat, st.view.lng], st.view.zoom);
+            }
+        } catch(e){ console.warn('restoreSession failed', e); }
+        finally {
+            MapApp._restoring = false;
+            // Wire autosave only now, so restore's own programmatic changes don't save.
+            document.addEventListener('change', scheduleSave, true);
+            document.addEventListener('input', scheduleSave, true);
+            MapApp.map.on('moveend zoomend', scheduleSave);
+        }
     }
 
     async function loadRegion(regionId) {
@@ -3693,6 +3798,7 @@ ALIGN_JS = r'''
     function fitToRegion(regionId){
         // Enabling a region pans/zooms to it (its track can span 100+ mi; the map
         // does not otherwise move, so a newly-enabled region may be off-screen).
+        if (MapApp._restoring) return;   // don't fight a restored view during session restore (#98)
         const reg = MapApp.loadedRegions.get(regionId);
         if (!reg || !reg.data) return;
         let mnLa=90,mxLa=-90,mnLo=180,mxLo=-180, any=false;
@@ -3820,6 +3926,7 @@ ALIGN_JS = r'''
         MapApp.map.on('mouseup', ()=>{ if(!drag) return; const d=drag; drag=null; setT('');
             MapApp.align.lat += (d.last.lat - d.a.lat); MapApp.align.lon += (d.last.lng - d.a.lng);
             rerenderAlign(); repositionAreaLabels(); setTimeout(applyTrackOpacity, 600);
+            if(MapApp.scheduleSave) MapApp.scheduleSave();   // persist the new alignment (#98)
             if(!altArmed){ MapApp.map.dragging.enable(); MapApp.map.getContainer().style.cursor=''; } });
         // label-mode capture: first click = position, second = angle (Esc = horizontal)
         MapApp.map.on('click', e=>{ if(!MapApp.authoring || !MapApp.labelMode) return; MapApp.map.closePopup();
@@ -3920,8 +4027,10 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
     # patch: direct map instead of Folium lookup
     js = js.replace(_INIT_ORIG, _INIT_DIRECT)
     # patch: seed the transform (alignInit) after UI is built, before regions load
-    js = js.replace("            setupUI();\n            loadDefaultRegions();",
-                    "            setupUI();\n            alignInit();\n            loadDefaultRegions();")
+    # (restoreSession, which replaced loadDefaultRegions, then overrides the align
+    # transform + view from any saved session state, #98)
+    js = js.replace("            setupUI();\n            restoreSession();",
+                    "            setupUI();\n            alignInit();\n            restoreSession();")
     # patch: cache raw world-coord data + transform on load
     js = js.replace(_FETCH_ORIG, _FETCH_ALIGN)
     # append the align module inside the IIFE, just before the public API
