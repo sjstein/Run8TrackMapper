@@ -3661,7 +3661,7 @@ ALIGN_JS = r'''
     }
     // Repeat line editor (#95): a dashed start->end line with two draggable handles,
     // shown while editing a repeated label so the alignment line is visible and adjustable.
-    function attachAreaLineEditor(startLL, endLL){
+    function attachAreaLineEditor(startLL, endLL, onChange){
         function handle(ll, color){
             const icon = L.divIcon({ className:'area-line-handle',
                 html:'<div style="width:14px;height:14px;border-radius:50%;background:'+color+';border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.45);"></div>',
@@ -3671,7 +3671,7 @@ ALIGN_JS = r'''
         const line = L.polyline([startLL, endLL], { color:'#2f6df0', weight:2, dashArray:'6 6', interactive:false }).addTo(MapApp.map);
         const hs = handle(startLL, '#12945b').addTo(MapApp.map);
         const he = handle(endLL, '#d84a34').addTo(MapApp.map);
-        const upd = ()=> line.setLatLngs([hs.getLatLng(), he.getLatLng()]);
+        const upd = ()=>{ line.setLatLngs([hs.getLatLng(), he.getLatLng()]); if (onChange) onChange(); };
         hs.on('drag', upd); he.on('drag', upd);
         return {
             getStart:()=>hs.getLatLng(), getEnd:()=>he.getLatLng(),
@@ -3767,6 +3767,12 @@ ALIGN_JS = r'''
             if (opts.endLatLng) endLL = L2(opts.endLatLng);
             else if (tp && isRepeatArea(area)){ const w = areaEndWorld(area, tp), ll = MapApp.worldToLatLon(w[0], w[1]); endLL = L.latLng(ll[0], ll[1]); }
             let lineEd = null;
+            // Preview state (#95): the copies re-render live (client-side, no server write)
+            // while the endpoints are dragged or Copies changes; the saved state is
+            // restored if the edit is dismissed without saving.
+            const originalArea = Object.assign({}, area);
+            const previewId = area.id || '__preview_new__';
+            let previewApplied = false, savedOk = false;
             function defaultEnd(){   // a handle ~120px east of start when none exists yet
                 const p = MapApp.map.latLngToContainerPoint(startLL);
                 return MapApp.map.containerPointToLatLng(L.point(p.x + 120, p.y));
@@ -3782,15 +3788,9 @@ ALIGN_JS = r'''
                     : 'Tip: drag to move · hold the mouse button on it and scroll to rotate.';
                 if (repeat){
                     if (!endLL) endLL = defaultEnd();
-                    if (!lineEd) lineEd = attachAreaLineEditor(startLL, endLL);
+                    if (!lineEd) lineEd = attachAreaLineEditor(startLL, endLL, schedulePreview);
                 } else if (lineEd){ lineEd.destroy(); lineEd = null; }
             }
-            if (copiesEl) copiesEl.addEventListener('input', updateRepeatUI);
-            updateRepeatUI();
-            // Tear the line editor down when this popup closes (save / delete / dismiss).
-            const onPopupClose = ()=>{ if (lineEd){ lineEd.destroy(); lineEd = null; } MapApp.map.off('popupclose', onPopupClose); };
-            MapApp.map.on('popupclose', onPopupClose);
-
             const gather = ()=>{
                 const font = (document.getElementById('al-font').value || '').trim();
                 const cv = colorSel ? colorSel.value : '__default__';
@@ -3818,6 +3818,37 @@ ALIGN_JS = r'''
                 }
                 return body;
             };
+            // Re-render the copies from the in-progress edit (no server round-trip).
+            function applyPreview(){
+                if (!MapApp.hasBackend) return;
+                const b = gather();
+                const pv = Object.assign({}, originalArea, b, { id: previewId });
+                if (!(b.repeat > 1)){   // single: drop any stale end point, place at the start
+                    delete pv.end_tile_x; delete pv.end_tile_z; delete pv.end_local_x; delete pv.end_local_z;
+                    pv.repeat = 1;
+                    const s = lineEd ? lineEd.getStart() : startLL;
+                    const stl = s && latLngToTileLocal(s);
+                    if (stl){ pv.tile_x = stl.tile_x; pv.tile_z = stl.tile_z; pv.local_x = +stl.local_x.toFixed(1); pv.local_z = +stl.local_z.toFixed(1); }
+                }
+                if (!pv.label) pv.label = originalArea.label || 'Label';   // keep something visible while typing
+                replaceAreaMarker(pv);
+                previewApplied = true;
+            }
+            // Throttle with a short timer (not requestAnimationFrame, which pauses when
+            // the tab is backgrounded) so live preview coalesces rapid drags/typing.
+            let _pvT = null;
+            function schedulePreview(){ if (_pvT) clearTimeout(_pvT); _pvT = setTimeout(applyPreview, 30); }
+            if (copiesEl) copiesEl.addEventListener('input', ()=>{ updateRepeatUI(); schedulePreview(); });
+            updateRepeatUI();
+            // Tear the line editor down when this popup closes; if the edit was dismissed
+            // without saving, restore the label's saved render (undo the live preview).
+            const onPopupClose = ()=>{
+                if (lineEd){ lineEd.destroy(); lineEd = null; }
+                if (previewApplied && !savedOk){ removeAreaMarker(previewId); if (!isNew){ addAreaMarker(originalArea); updateAreaLabelSizes(); } }
+                MapApp.map.off('popupclose', onPopupClose);
+            };
+            MapApp.map.on('popupclose', onPopupClose);
+
             const save = ()=>{
                 const body = gather();
                 if (!body.label){ showErr('Label text is required.'); return; }
@@ -3834,8 +3865,11 @@ ALIGN_JS = r'''
                 }
                 saveBtn.disabled = true;
                 req.then(saved => {
-                    if (isNew){ addAreaMarker(saved); MapApp.lastLabelType = body.type; }  // remember for the next new label
-                    else replaceAreaMarker(saved);
+                    savedOk = true;
+                    removeAreaMarker(previewId);                                   // clear any preview markers
+                    if (!isNew && saved.id !== previewId) removeAreaMarker(saved.id);
+                    addAreaMarker(saved);
+                    if (isNew) MapApp.lastLabelType = body.type;                   // remember for the next new label
                     updateAreaLabelSizes(); ensureAreaOverlayVisible(); ensureAreaTypeVisible(saved.type);
                     MapApp.map.closePopup();
                 }).catch(e => { saveBtn.disabled = false; showErr(e.message); });
@@ -3847,7 +3881,7 @@ ALIGN_JS = r'''
                 delBtn.addEventListener('click', ()=>{
                     if (!confirm('Delete this label?')) return;
                     delBtn.disabled = true;
-                    apiArea('DELETE', area.id).then(()=>{ removeAreaMarker(area.id); MapApp.map.closePopup(); })
+                    apiArea('DELETE', area.id).then(()=>{ savedOk = true; removeAreaMarker(previewId); removeAreaMarker(area.id); MapApp.map.closePopup(); })
                         .catch(e => { delBtn.disabled = false; showErr(e.message); });
                 });
             }
