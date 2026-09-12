@@ -451,6 +451,28 @@ def _clean_common_fields(payload: dict, area: dict):
         else:
             area.pop('type', None)
 
+    # Repeated labels (#95): a repeat>1 with an end point becomes a multi-copy label;
+    # repeat<=1 (or a cleared end point) reverts to a single label. Endpoints may also be
+    # updated on their own (a drag of the end handle) - then repeat is taken from the
+    # existing area. Missing pieces => drop the whole repeat set so it stays consistent.
+    if 'repeat' in payload or 'end_tile_x' in payload:
+        try:
+            rep = int(payload.get('repeat', area.get('repeat', 1)) or 1)
+        except (TypeError, ValueError):
+            rep = 1
+        etx = payload.get('end_tile_x', area.get('end_tile_x'))
+        etz = payload.get('end_tile_z', area.get('end_tile_z'))
+        elx = payload.get('end_local_x', area.get('end_local_x'))
+        elz = payload.get('end_local_z', area.get('end_local_z'))
+        have_end = None not in (etx, etz, elx, elz)
+        if rep > 1 and have_end:
+            area['repeat'] = rep
+            area['end_tile_x'] = int(etx); area['end_tile_z'] = int(etz)
+            area['end_local_x'] = float(elx); area['end_local_z'] = float(elz)
+        else:
+            for k in ('repeat', 'end_tile_x', 'end_tile_z', 'end_local_x', 'end_local_z'):
+                area.pop(k, None)
+
 
 def make_handler(state: AuthoringState, authoring: bool):
 

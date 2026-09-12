@@ -3014,52 +3014,78 @@ ALIGN_JS = r'''
         const localZ = -(w.y - (tileZ - homeZ) * tp.tile_height);
         return { tile_x: tileX, tile_z: tileZ, local_x: localX, local_z: localZ };
     }
+    // Repeated labels (#95): a real repeat is repeat>1 WITH an end point.
+    function isRepeatArea(area){ return (area.repeat|0) > 1 && area.end_tile_x != null && area.end_local_x != null; }
+    function areaEndWorld(area, tp){   // end point tile+local -> world metres (matches areaToWorld)
+        const homeX = tp.home_tile[0], homeZ = tp.home_tile[1];
+        return [ (area.end_tile_x - homeX)*tp.tile_width + area.end_local_x,
+                 (area.end_tile_z - homeZ)*tp.tile_height - area.end_local_z ];
+    }
+    // World points for each drawn copy: N points anchored on both ends (t=i/(N-1)),
+    // or just the single start point for a non-repeat.
+    function areaCopyWorlds(area, tp){
+        const ws = areaToWorld(area, tp);
+        if (!isRepeatArea(area)) return [ws];
+        const we = areaEndWorld(area, tp), n = area.repeat|0, out = [];
+        for (let i=0;i<n;i++){ const t = i/(n-1); out.push([ ws[0]+t*(we[0]-ws[0]), ws[1]+t*(we[1]-ws[1]) ]); }
+        return out;
+    }
     function addAreaMarker(area){
         const tp = MapApp.manifest && MapApp.manifest.tile_params; if (!tp) return null;
-        const w = areaToWorld(area, tp);
         const editable = MapApp.authoring && MapApp.hasBackend;
-        const marker = L.marker(MapApp.worldToLatLon(w[0], w[1]),
-            { icon: createAreaLabelIcon(area), interactive: editable, draggable: editable });
-        const rec = { marker, baseFont: area.font_size || 22, world: w, area };
-        if (editable){
-            marker.on('click', (ev)=>{
-                if (MapApp._suppressLabelClick){ MapApp._suppressLabelClick = false; return; }   // trailing click after a rotate
-                if (MapApp.areaCapture && MapApp.areaCapture.pending) return;   // mid-placement of a new label
-                L.DomEvent.stopPropagation(ev);
-                openAreaEditor(Object.assign({}, rec.area), { isNew:false, latlng: marker.getLatLng() });
-            });
-            // Drag to move: PUT the new tile/local, keeping all other fields. On
-            // failure snap back to where the drag started.
-            let dragFrom = null;
-            marker.on('dragstart', ()=>{ dragFrom = marker.getLatLng(); MapApp.map.closePopup(); });
-            marker.on('dragend', ()=>{
-                const tl = latLngToTileLocal(marker.getLatLng());
-                if (!tl){ if (dragFrom) marker.setLatLng(dragFrom); return; }
-                apiArea('PUT', rec.area.id, tl).then(saved => {
-                    rec.area = saved;
-                    rec.world = areaToWorld(saved, MapApp.manifest.tile_params);
-                    marker.setLatLng(MapApp.worldToLatLon(rec.world[0], rec.world[1]));
-                    updateAreaLabelSizes();
-                }).catch(e => { if (dragFrom) marker.setLatLng(dragFrom); alert('Could not move label: ' + e.message); });
-            });
-            // Rotate: HOLD the mouse button on the label and scroll the wheel
-            // (Shift = 1 deg fine steps). Rotation only happens while the button is
-            // held, and the wheel is captured at the window level during the hold so
-            // the map never zooms. Bound to the icon element on each (re)add.
-            marker.on('add', ()=>{
-                const el = marker.getElement();
-                if (!el || el.__rotBound) return;
-                el.__rotBound = true;
-                el.addEventListener('mousedown', (ev)=> startLabelRotate(ev, rec));
-            });
-        }
-        rec.type = areaTypeOf(area);
-        // Only place the marker if its tile is inside a currently-visible region;
-        // updateAreaLabelRegionVisibility() keeps this in sync as regions toggle.
-        const lg = (MapApp.areaTypeLayers && MapApp.areaTypeLayers[rec.type]) || MapApp.areaLabelsLayer;
-        if (_areaInVisibleRegion(area, _visibleRegionTiles())) lg.addLayer(marker);
-        MapApp.areaMarkers.push(rec);
-        return rec;
+        const repeat = isRepeatArea(area);
+        const type = areaTypeOf(area);
+        const lg = (MapApp.areaTypeLayers && MapApp.areaTypeLayers[type]) || MapApp.areaLabelsLayer;
+        const inRegion = _areaInVisibleRegion(area, _visibleRegionTiles());
+        const worlds = areaCopyWorlds(area, tp);
+        let first = null;
+        worlds.forEach((w, idx) => {
+            // A repeat copy is clickable-to-edit but NOT individually draggable/rotatable
+            // (it's one entity reshaped via the line editor). The single-label case keeps
+            // drag-to-move + hold-and-wheel rotate exactly as before.
+            const dragOK = editable && !repeat;
+            const marker = L.marker(MapApp.worldToLatLon(w[0], w[1]),
+                { icon: createAreaLabelIcon(area), interactive: editable, draggable: dragOK });
+            const rec = { marker, baseFont: area.font_size || 22, world: w, area, type, copyIndex: idx, repeat };
+            if (editable){
+                marker.on('click', (ev)=>{
+                    if (MapApp._suppressLabelClick){ MapApp._suppressLabelClick = false; return; }   // trailing click after a rotate
+                    if (MapApp.areaCapture && MapApp.areaCapture.pending) return;   // mid-placement of a new label
+                    L.DomEvent.stopPropagation(ev);
+                    openAreaEditor(Object.assign({}, rec.area), { isNew:false, latlng: marker.getLatLng() });
+                });
+                if (dragOK){
+                    // Drag to move: PUT the new tile/local, keeping all other fields. On
+                    // failure snap back to where the drag started.
+                    let dragFrom = null;
+                    marker.on('dragstart', ()=>{ dragFrom = marker.getLatLng(); MapApp.map.closePopup(); });
+                    marker.on('dragend', ()=>{
+                        const tl = latLngToTileLocal(marker.getLatLng());
+                        if (!tl){ if (dragFrom) marker.setLatLng(dragFrom); return; }
+                        apiArea('PUT', rec.area.id, tl).then(saved => {
+                            rec.area = saved;
+                            rec.world = areaToWorld(saved, MapApp.manifest.tile_params);
+                            marker.setLatLng(MapApp.worldToLatLon(rec.world[0], rec.world[1]));
+                            updateAreaLabelSizes();
+                        }).catch(e => { if (dragFrom) marker.setLatLng(dragFrom); alert('Could not move label: ' + e.message); });
+                    });
+                    // Rotate: HOLD the mouse button on the label and scroll the wheel
+                    // (Shift = 1 deg fine steps). Bound to the icon element on each (re)add.
+                    marker.on('add', ()=>{
+                        const el = marker.getElement();
+                        if (!el || el.__rotBound) return;
+                        el.__rotBound = true;
+                        el.addEventListener('mousedown', (ev)=> startLabelRotate(ev, rec));
+                    });
+                }
+            }
+            // Only place the marker if its tile is inside a currently-visible region;
+            // updateAreaLabelRegionVisibility() keeps this in sync as regions toggle.
+            if (inRegion) lg.addLayer(marker);
+            MapApp.areaMarkers.push(rec);
+            if (idx === 0) first = rec;
+        });
+        return first;
     }
     function removeAreaMarker(id){
         if (!MapApp.areaMarkers) return;
@@ -3599,23 +3625,20 @@ ALIGN_JS = r'''
         if (MapApp._areaEsc){ document.removeEventListener('keydown', MapApp._areaEsc); MapApp._areaEsc = null; }
         hideAreaHint();
         let rotation = 0;
-        if (secondLatLng){
-            const p1 = MapApp.map.latLngToContainerPoint(cap.latlng);
-            const p2 = MapApp.map.latLngToContainerPoint(secondLatLng);
-            const dx = p2.x - p1.x, dy = p2.y - p1.y;   // container y is down => CSS-clockwise
-            if (dx!==0 || dy!==0){
-                let deg = Math.atan2(dy, dx) * 180 / Math.PI;
-                if (deg > 90) deg -= 180;
-                if (deg < -90) deg += 180;
-                rotation = Math.round(deg);
-            }
-        }
+        if (secondLatLng) rotation = _screenBearing(cap.latlng, secondLatLng);
         const area = { label:'', tile_x: cap.tileX, tile_z: cap.tileZ,
                        local_x: +cap.localX.toFixed(1), local_z: +cap.localZ.toFixed(1),
                        // Default to the type the last new label used, so a run of same-type
                        // labels doesn't require re-picking each time (#56 feedback).
                        rotation, type: MapApp.lastLabelType || newLabelType() };
-        openAreaEditor(area, { isNew:true, latlng: cap.latlng });
+        // Keep the second click as the candidate END point (#95): if the user sets
+        // Copies>1 in the editor, the two clicks become the start->end line.
+        if (secondLatLng){
+            const etl = latLngToTileLocal(secondLatLng);
+            if (etl){ area.end_tile_x=etl.tile_x; area.end_tile_z=etl.tile_z;
+                      area.end_local_x=+etl.local_x.toFixed(1); area.end_local_z=+etl.local_z.toFixed(1); }
+        }
+        openAreaEditor(area, { isNew:true, latlng: cap.latlng, startLatLng: cap.latlng, endLatLng: secondLatLng || null });
     }
     function showAreaHint(html){
         let el = document.getElementById('area-capture-hint');
@@ -3626,6 +3649,36 @@ ALIGN_JS = r'''
         el.innerHTML = html; el.style.display='block';
     }
     function hideAreaHint(){ const el=document.getElementById('area-capture-hint'); if (el) el.style.display='none'; }
+    // Screen (container-point) bearing from A to B, folded to [-90,90] so text stays
+    // upright, rounded to whole degrees. Shared by capture and the repeat line editor (#95).
+    function _screenBearing(llA, llB){
+        const p1 = MapApp.map.latLngToContainerPoint(llA), p2 = MapApp.map.latLngToContainerPoint(llB);
+        const dx = p2.x - p1.x, dy = p2.y - p1.y;
+        if (dx===0 && dy===0) return 0;
+        let deg = Math.atan2(dy, dx) * 180 / Math.PI;
+        if (deg > 90) deg -= 180; else if (deg < -90) deg += 180;
+        return Math.round(deg);
+    }
+    // Repeat line editor (#95): a dashed start->end line with two draggable handles,
+    // shown while editing a repeated label so the alignment line is visible and adjustable.
+    function attachAreaLineEditor(startLL, endLL, onChange){
+        function handle(ll, color){
+            const icon = L.divIcon({ className:'area-line-handle',
+                html:'<div style="width:14px;height:14px;border-radius:50%;background:'+color+';border:2px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.45);"></div>',
+                iconSize:[14,14], iconAnchor:[7,7] });
+            return L.marker(ll, { icon, draggable:true, zIndexOffset:1200, interactive:true });
+        }
+        const line = L.polyline([startLL, endLL], { color:'#2f6df0', weight:2, dashArray:'6 6', interactive:false }).addTo(MapApp.map);
+        const hs = handle(startLL, '#12945b').addTo(MapApp.map);
+        const he = handle(endLL, '#d84a34').addTo(MapApp.map);
+        const upd = ()=>{ line.setLatLngs([hs.getLatLng(), he.getLatLng()]); if (onChange) onChange(); };
+        hs.on('drag', upd); he.on('drag', upd);
+        return {
+            getStart:()=>hs.getLatLng(), getEnd:()=>he.getLatLng(),
+            setEnds:(a,b)=>{ hs.setLatLng(a); he.setLatLng(b); upd(); },
+            destroy:()=>{ [line,hs,he].forEach(l=>{ try{ MapApp.map.removeLayer(l); }catch(e){} }); }
+        };
+    }
     // Unified label editor. New labels POST; existing labels PUT / DELETE. With
     // no backend, new labels fall back to the copy-paste INI popup below.
     function openAreaEditor(area, opts){
@@ -3648,7 +3701,8 @@ ALIGN_JS = r'''
             <label style="display:block;margin:6px 0 2px;">Label text <span style="color:var(--text-muted);font-weight:normal;">(Enter = new line, Ctrl+Enter = save)</span>:</label>
             <textarea id="al-text" rows="2" placeholder="e.g. Barstow Yard" style="width:100%;box-sizing:border-box;padding:4px;resize:vertical;font:inherit;">${escapeHtml(area.label)}</textarea>
             <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
-                <label>Rotation&deg; <input id="al-rot" type="number" value="${area.rotation || 0}" style="width:60px;"></label>
+                <label id="al-rot-wrap">Rotation&deg; <input id="al-rot" type="number" value="${area.rotation || 0}" style="width:60px;"></label>
+                <span id="al-rot-auto" style="display:none;color:var(--text-muted);">Rotation: auto (follows the line)</span>
                 <label>Color <select id="al-color-sel" style="padding:2px;">${colorOpts}</select></label>
                 <span id="al-color-swatch" style="display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid rgba(0,0,0,.4);"></span>
                 <input id="al-color-custom" type="color" value="${customHex}" style="width:34px;height:22px;padding:0;display:${colorMode==='__custom__'?'inline-block':'none'};">
@@ -3658,8 +3712,12 @@ ALIGN_JS = r'''
                 <label><input id="al-box" type="checkbox" ${area.box ? 'checked' : ''}> box</label>
                 <label>Type <select id="al-type" style="padding:2px;">${areaTypeSelectOptions(area.type)}</select></label>
             </div>
+            <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
+                <label>Copies <input id="al-copies" type="number" min="1" max="50" value="${(area.repeat>1?area.repeat:1)}" style="width:56px;"></label>
+                <span id="al-copies-hint" style="color:var(--text-muted);">1 = single label</span>
+            </div>
             <div style="margin-top:6px;color:var(--text-muted);">tile ${area.tile_x},${area.tile_z} &nbsp; local ${(+area.local_x).toFixed(1)},${(+area.local_z).toFixed(1)}</div>
-            ${isNew ? '' : '<div style="margin-top:4px;color:var(--text-muted);font-style:italic;">Tip: drag to move &middot; hold the mouse button on it and scroll to rotate.</div>'}
+            ${isNew ? '' : '<div id="al-tip" style="margin-top:4px;color:var(--text-muted);font-style:italic;">Tip: drag to move &middot; hold the mouse button on it and scroll to rotate.</div>'}
             <div style="margin-top:8px;">
                 <button id="al-save" style="padding:4px 10px;cursor:pointer;">Save</button>
                 ${isNew ? '' : '<button id="al-del" style="margin-left:8px;padding:4px 10px;cursor:pointer;color:#b00;">Delete</button>'}
@@ -3692,34 +3750,126 @@ ALIGN_JS = r'''
             if (colorCustom) colorCustom.addEventListener('input', syncColorUI);
             if (typeSel) typeSel.addEventListener('change', syncColorUI);  // Default swatch tracks the category
             syncColorUI();
+
+            // ---- Repeat line editor (#95): a Copies>1 turns the label into N copies
+            // distributed along a draggable start->end line; Copies=1 is a single label. ----
+            const tp = MapApp.manifest && MapApp.manifest.tile_params;
+            const copiesEl = document.getElementById('al-copies');
+            const rotWrap = document.getElementById('al-rot-wrap');
+            const rotAuto = document.getElementById('al-rot-auto');
+            const copiesHint = document.getElementById('al-copies-hint');
+            const tipEl = document.getElementById('al-tip');
+            const L2 = (v)=> (v && v.lat !== undefined) ? v : L.latLng(v);
+            let startLL, endLL = null;
+            if (opts.startLatLng) startLL = L2(opts.startLatLng);
+            else if (tp){ const w = areaToWorld(area, tp), ll = MapApp.worldToLatLon(w[0], w[1]); startLL = L.latLng(ll[0], ll[1]); }
+            else startLL = opts.latlng;
+            if (opts.endLatLng) endLL = L2(opts.endLatLng);
+            else if (tp && isRepeatArea(area)){ const w = areaEndWorld(area, tp), ll = MapApp.worldToLatLon(w[0], w[1]); endLL = L.latLng(ll[0], ll[1]); }
+            let lineEd = null;
+            // Preview state (#95): the copies re-render live (client-side, no server write)
+            // while the endpoints are dragged or Copies changes; the saved state is
+            // restored if the edit is dismissed without saving.
+            const originalArea = Object.assign({}, area);
+            const previewId = area.id || '__preview_new__';
+            let previewApplied = false, savedOk = false;
+            function defaultEnd(){   // a handle ~120px east of start when none exists yet
+                const p = MapApp.map.latLngToContainerPoint(startLL);
+                return MapApp.map.containerPointToLatLng(L.point(p.x + 120, p.y));
+            }
+            function updateRepeatUI(){
+                const n = Math.max(1, parseInt(copiesEl.value, 10) || 1);
+                const repeat = n > 1;
+                if (rotWrap) rotWrap.style.display = repeat ? 'none' : '';
+                if (rotAuto) rotAuto.style.display = repeat ? '' : 'none';
+                if (copiesHint) copiesHint.textContent = repeat ? (n + ' copies along the line') : '1 = single label';
+                if (tipEl) tipEl.textContent = repeat
+                    ? 'Tip: drag the green (start) and red (end) handles to set the line.'
+                    : 'Tip: drag to move · hold the mouse button on it and scroll to rotate.';
+                if (repeat){
+                    if (!endLL) endLL = defaultEnd();
+                    if (!lineEd) lineEd = attachAreaLineEditor(startLL, endLL, schedulePreview);
+                } else if (lineEd){ lineEd.destroy(); lineEd = null; }
+            }
             const gather = ()=>{
                 const font = (document.getElementById('al-font').value || '').trim();
                 const cv = colorSel ? colorSel.value : '__default__';
                 const color = (cv === '__default__') ? null : (cv === '__custom__' ? colorCustom.value : cv);
-                return {
+                const n = Math.max(1, parseInt(copiesEl ? copiesEl.value : 1, 10) || 1);
+                const body = {
                     label: (textEl.value || '').trim(),
-                    rotation: Number(document.getElementById('al-rot').value) || 0,
                     color: color,
                     font_size: font ? Number(font) : null,
                     box: document.getElementById('al-box').checked,
                     type: typeSel ? typeSel.value : 'other'
                 };
+                if (n > 1 && lineEd){
+                    const s = lineEd.getStart(), e = lineEd.getEnd();
+                    const stl = latLngToTileLocal(s), etl = latLngToTileLocal(e);
+                    body.repeat = n;
+                    body.tile_x = stl.tile_x; body.tile_z = stl.tile_z;
+                    body.local_x = +stl.local_x.toFixed(1); body.local_z = +stl.local_z.toFixed(1);
+                    body.end_tile_x = etl.tile_x; body.end_tile_z = etl.tile_z;
+                    body.end_local_x = +etl.local_x.toFixed(1); body.end_local_z = +etl.local_z.toFixed(1);
+                    body.rotation = _screenBearing(s, e);   // auto, follows the line
+                } else {
+                    body.repeat = 1;   // single (the server drops any prior end point)
+                    body.rotation = Number(document.getElementById('al-rot').value) || 0;
+                }
+                return body;
             };
+            // Re-render the copies from the in-progress edit (no server round-trip).
+            function applyPreview(){
+                if (!MapApp.hasBackend) return;
+                const b = gather();
+                const pv = Object.assign({}, originalArea, b, { id: previewId });
+                if (!(b.repeat > 1)){   // single: drop any stale end point, place at the start
+                    delete pv.end_tile_x; delete pv.end_tile_z; delete pv.end_local_x; delete pv.end_local_z;
+                    pv.repeat = 1;
+                    const s = lineEd ? lineEd.getStart() : startLL;
+                    const stl = s && latLngToTileLocal(s);
+                    if (stl){ pv.tile_x = stl.tile_x; pv.tile_z = stl.tile_z; pv.local_x = +stl.local_x.toFixed(1); pv.local_z = +stl.local_z.toFixed(1); }
+                }
+                if (!pv.label) pv.label = originalArea.label || 'Label';   // keep something visible while typing
+                replaceAreaMarker(pv);
+                previewApplied = true;
+            }
+            // Throttle with a short timer (not requestAnimationFrame, which pauses when
+            // the tab is backgrounded) so live preview coalesces rapid drags/typing.
+            let _pvT = null;
+            function schedulePreview(){ if (_pvT) clearTimeout(_pvT); _pvT = setTimeout(applyPreview, 30); }
+            if (copiesEl) copiesEl.addEventListener('input', ()=>{ updateRepeatUI(); schedulePreview(); });
+            updateRepeatUI();
+            // Tear the line editor down when this popup closes; if the edit was dismissed
+            // without saving, restore the label's saved render (undo the live preview).
+            const onPopupClose = ()=>{
+                if (lineEd){ lineEd.destroy(); lineEd = null; }
+                if (previewApplied && !savedOk){ removeAreaMarker(previewId); if (!isNew){ addAreaMarker(originalArea); updateAreaLabelSizes(); } }
+                MapApp.map.off('popupclose', onPopupClose);
+            };
+            MapApp.map.on('popupclose', onPopupClose);
+
             const save = ()=>{
                 const body = gather();
                 if (!body.label){ showErr('Label text is required.'); return; }
                 let req;
                 if (isNew){
-                    Object.assign(body, { tile_x: area.tile_x, tile_z: area.tile_z,
-                                          local_x: area.local_x, local_z: area.local_z });
+                    // Start tile/local comes from the line editor for a repeat; otherwise the first click.
+                    if (body.tile_x === undefined){
+                        body.tile_x = area.tile_x; body.tile_z = area.tile_z;
+                        body.local_x = area.local_x; body.local_z = area.local_z;
+                    }
                     req = apiArea('POST', null, body);
                 } else {
                     req = apiArea('PUT', area.id, body);
                 }
                 saveBtn.disabled = true;
                 req.then(saved => {
-                    if (isNew){ addAreaMarker(saved); MapApp.lastLabelType = body.type; }  // remember for the next new label
-                    else replaceAreaMarker(saved);
+                    savedOk = true;
+                    removeAreaMarker(previewId);                                   // clear any preview markers
+                    if (!isNew && saved.id !== previewId) removeAreaMarker(saved.id);
+                    addAreaMarker(saved);
+                    if (isNew) MapApp.lastLabelType = body.type;                   // remember for the next new label
                     updateAreaLabelSizes(); ensureAreaOverlayVisible(); ensureAreaTypeVisible(saved.type);
                     MapApp.map.closePopup();
                 }).catch(e => { saveBtn.disabled = false; showErr(e.message); });
@@ -3731,7 +3881,7 @@ ALIGN_JS = r'''
                 delBtn.addEventListener('click', ()=>{
                     if (!confirm('Delete this label?')) return;
                     delBtn.disabled = true;
-                    apiArea('DELETE', area.id).then(()=>{ removeAreaMarker(area.id); MapApp.map.closePopup(); })
+                    apiArea('DELETE', area.id).then(()=>{ savedOk = true; removeAreaMarker(previewId); removeAreaMarker(area.id); MapApp.map.closePopup(); })
                         .catch(e => { delBtn.disabled = false; showErr(e.message); });
                 });
             }
