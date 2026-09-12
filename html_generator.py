@@ -3812,7 +3812,6 @@ ALIGN_JS = r'''
     function buildAlignUI(){
         const bs='position:absolute;top:10px;z-index:1500;padding:6px 10px;cursor:pointer;'+
           'background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);border-radius:6px;box-shadow:0 1px 6px var(--shadow);font:13px Arial';
-        const authoring = (typeof window.__run8_authoring === 'undefined') ? true : !!window.__run8_authoring;
         // Aligning is no longer a modal button (#100) - hold Alt and drag the track
         // (see the Alt-drag handlers below and the one-time hint on the first real base map).
         // Editing controls (#56). There is NO visible "unlock" button - typing the word
@@ -3835,6 +3834,28 @@ ALIGN_JS = r'''
         function kbd(s){ return '<kbd style="background:var(--kbd-bg);border:1px solid var(--border);border-radius:3px;padding:0 5px;font:12px monospace">'+s+'</kbd>'; }
         function hrow(t,d){ return '<dt style="font-weight:600;margin-top:10px">'+t+'</dt>'
             +'<dd style="margin:2px 0 0 0;color:var(--text-muted)">'+d+'</dd>'; }
+        // Help content is rebuilt on each open so it reflects the CURRENT mode (#94):
+        // the editing rows appear only while editing is actually unlocked, not merely
+        // because the authoring UI is compiled in. `MapApp.authoring` is false until a
+        // successful edit unlock (#56), so a read-only viewer never sees edit help.
+        function helpRows(){
+            const editing = !!MapApp.authoring;
+            let s = hrow('Pan / zoom','Drag to pan &middot; scroll wheel to zoom.')
+                + hrow(kbd('Alt')+' + drag the track','Hold Alt and drag to slide the track onto the real map; release to commit the alignment. A normal drag still pans.')
+                + hrow(kbd('Shift')+' + click a track section','Add or remove it from the selection; the panel totals length and average grade.')
+                + hrow(kbd('Ctrl')+' + click a track section','Show a detailed info popup (length, grade, type).')
+                + hrow('Right-click the map','Open that exact point in Google Maps (new tab) to cross-check imagery.')
+                + hrow('Enable a region (checkbox)','Loads the region on demand and fits the map to it.')
+                + hrow('Search button','Find a track section, signal, industry, AI location, area label, or train / rail vehicle.')
+                + hrow('Sliders (bottom-left)','Map opacity (base map + rail overlay), Track opacity, and Text Size (scales the area labels).')
+                + hrow('Your view is remembered','Zoom, position, base map, overlays, enabled regions, sliders and alignment are saved in this browser and restored next time you open this map.');
+            if (editing) s +=
+                  hrow(kbd('Add Label')+' button','Turn on, click to place a label, then click a second point to set the text angle ('+kbd('Esc')+' = horizontal).')
+                + hrow('Click a label','Edit its text, colour, font, rotation or box &mdash; or delete it.')
+                + hrow('Drag a label','Move it. Hold the mouse button on a label and scroll the wheel to rotate it ('+kbd('Shift')+' = 1&deg; steps).')
+                + hrow(kbd('Leave editing')+' button','Re-lock editing and return to the read-only view.');
+            return s;
+        }
         function toggleHelp(show){
             if(!helpEl){
                 helpEl=document.createElement('div');
@@ -3849,27 +3870,14 @@ ALIGN_JS = r'''
                     +'<h3 style="margin:0;font:600 15px Arial">Map controls &amp; tips</h3>'
                     +'<button id="help-close" title="Close" style="border:none;background:var(--kbd-bg);color:var(--panel-fg);border-radius:4px;'
                     +'width:26px;height:26px;cursor:pointer;font-size:16px">&times;</button></div>'
-                    +'<dl style="margin:0">'
-                    +hrow('Pan / zoom','Drag to pan &middot; scroll wheel to zoom.')
-                    +hrow(kbd('Shift')+' + click a track section','Add or remove it from the selection; the panel totals length and average grade.')
-                    +hrow(kbd('Ctrl')+' + click a track section','Show a detailed info popup (length, grade, type).')
-                    +hrow('Right-click the map','Open that exact point in Google Maps (new tab) to cross-check imagery.')
-                    +hrow('Enable a region (checkbox)','Loads the region on demand and fits the map to it.')
-                    +hrow('Search button','Find a track section, signal, industry, AI location, or train / rail vehicle.')
-                    +hrow(kbd('Alt')+' + drag the track','Hold Alt and drag to slide the track onto the real map; release to commit the alignment. (Normal drag still pans.)')
-                    +(authoring ?
-                        hrow('Add Label button','Turn on, click to place a label, then click a second point to set the text angle ('+kbd('Esc')+' = horizontal).')
-                       +hrow('Click a label','Edit its text, colour, font, rotation or box — or delete it.')
-                       +hrow('Drag a label','Move it. Hold the mouse button on a label and scroll the wheel to rotate it ('+kbd('Shift')+' = 1&deg; steps).')
-                      : '')
-                    +hrow('Opacity sliders (bottom-left)','Independent Map opacity (the base map) and Track opacity.')
-                    +'</dl>';
+                    +'<dl id="help-dl" style="margin:0"></dl>';
                 helpEl.appendChild(card);
                 helpEl.addEventListener('click', e=>{ if(e.target===helpEl) toggleHelp(false); });
                 card.querySelector('#help-close').onclick=()=> toggleHelp(false);
                 document.addEventListener('keydown', e=>{ if(e.key==='Escape' && helpEl.style.display!=='none') toggleHelp(false); });
                 document.body.appendChild(helpEl);
             }
+            if(show) helpEl.querySelector('#help-dl').innerHTML = helpRows();   // rebuild for current mode (#94)
             helpEl.style.display = show ? 'block' : 'none';
         }
         help.onclick=()=> toggleHelp(helpEl===null || helpEl.style.display==='none');
