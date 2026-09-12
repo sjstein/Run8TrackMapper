@@ -28,7 +28,7 @@ _AREA_HEADER_RE = re.compile(r'^\s*\[area\.([^\]]+)\]\s*$')
 _ANY_HEADER_RE = re.compile(r'^\s*\[[^\]]+\]\s*$')
 # A recognized area key assignment (used to find where a block's data ends, so
 # trailing blank lines / comments after the block are left with the file).
-_AREA_KEY_RE = re.compile(r'^\s*(label|tile|local|color|font_size|box|rotation|type)\s*=', re.I)
+_AREA_KEY_RE = re.compile(r'^\s*(label|tile|local|color|font_size|box|rotation|type|end_tile|end_local|repeat)\s*=', re.I)
 
 # Input hardening (#56): the write path is reachable over an authenticated but
 # internet-exposed API, so a crafted field must never break out of its [area.<id>]
@@ -101,6 +101,16 @@ def format_area_block(area: Dict) -> str:
         lines.append(f"rotation = {_fmt_num(area['rotation'])}")
     if area.get('type') and area['type'] != 'other':
         lines.append(f"type = {_safe_field(area['type'], 'type', MAX_FIELD_LEN)}")
+    # Repeated labels (#95): write the end point + count only for a real repeat
+    # (repeat>1 with an end point). area_store validation upstream keeps them numeric.
+    try:
+        _rep = int(area.get('repeat', 1) or 1)
+    except (TypeError, ValueError):
+        _rep = 1
+    if _rep > 1 and area.get('end_tile_x') is not None and area.get('end_local_x') is not None:
+        lines.append(f"end_tile = {_fmt_num(area['end_tile_x'])},{_fmt_num(area['end_tile_z'])}")
+        lines.append(f"end_local = {_fmt_num(area['end_local_x'])},{_fmt_num(area['end_local_z'])}")
+        lines.append(f"repeat = {_rep}")
     return "\n".join(lines) + "\n"
 
 
@@ -237,4 +247,11 @@ def _area_to_dict(area) -> Dict:
         d["rotation"] = area.rotation
     if getattr(area, "type", None):
         d["type"] = area.type
+    # Repeated labels (#95): end point + count, only when it's a real repeat.
+    if getattr(area, "repeat", 1) and area.repeat > 1 and area.end_tile is not None and area.end_local is not None:
+        d["end_tile_x"] = area.end_tile[0]
+        d["end_tile_z"] = area.end_tile[1]
+        d["end_local_x"] = area.end_local[0]
+        d["end_local_z"] = area.end_local[1]
+        d["repeat"] = area.repeat
     return d
