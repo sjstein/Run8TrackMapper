@@ -174,7 +174,7 @@ def generate_javascript() -> str:
             console.log('Regions:', MapApp.manifest.regions.length);
 
             setupUI();
-            loadDefaultRegions();
+            restoreSession();
         } catch (error) {
             console.error('Failed to load manifest:', error);
         }
@@ -909,6 +909,111 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     async function loadDefaultRegions() {
         const defaultRegions = MapApp.manifest.regions.filter(r => r.enabled_by_default);
         await Promise.all(defaultRegions.map(r => loadRegion(r.id)));
+    }
+
+    // ---- Session persistence (#98) ----------------------------------------
+    // Remember the map view, base map, overlays, enabled regions, sliders,
+    // filters and (align viewer) the manual alignment across reloads, in
+    // localStorage keyed per map. Dark mode is persisted separately (run8_theme).
+    // Everything is best-effort: any read/write is wrapped so a private window or
+    // blocked storage just falls back to the config defaults. A schema version
+    // (`v`) lets a future format change invalidate cleanly.
+    function _stateKey(){
+        const n = (MapApp.manifest && MapApp.manifest.name) || 'default';
+        const slug = String(n).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'') || 'default';
+        return 'run8_state:' + slug;
+    }
+    function _loadSavedState(){
+        try { const s = localStorage.getItem(_stateKey()); return s ? JSON.parse(s) : null; }
+        catch(e){ return null; }
+    }
+    function saveState(){
+        if (MapApp._restoring || !MapApp.map || !MapApp.manifest) return;
+        try {
+            const c = MapApp.map.getCenter();
+            const st = { v:1, view:{ lat:c.lat, lng:c.lng, zoom:MapApp.map.getZoom() },
+                base: MapApp.currentBaseLayer,
+                overlays: Object.assign({}, MapApp.overlayStates),
+                regions: {}, op:{} };
+            const orm = document.getElementById('basemap-orm'); if (orm) st.orm = !!orm.checked;
+            if (MapApp.regionCheckboxes) MapApp.regionCheckboxes.forEach((cb,id)=>{ st.regions[id] = !!cb.checked; });
+            const os = document.getElementById('opacity-slider'); if (os) st.op.map = +os.value;
+            const ts = document.getElementById('track-opacity-slider'); if (ts) st.op.track = +ts.value;
+            const fs = document.getElementById('area-font-slider'); if (fs) st.op.label = +fs.value;
+            if (MapApp.trainOptions) st.trainOpts = Object.assign({}, MapApp.trainOptions);
+            if (MapApp.signalTypeVisible) st.sig = Object.assign({}, MapApp.signalTypeVisible);
+            if (MapApp.areaTypeVisible) st.area = { master: !!MapApp.overlayStates.areaLabels, types: Object.assign({}, MapApp.areaTypeVisible) };
+            if (MapApp.align) st.align = { lat: MapApp.align.lat, lon: MapApp.align.lon, scale: MapApp.align.scale };
+            localStorage.setItem(_stateKey(), JSON.stringify(st));
+        } catch(e){}
+    }
+    let _saveTimer = null;
+    function scheduleSave(){ if (_saveTimer) clearTimeout(_saveTimer); _saveTimer = setTimeout(saveState, 400); }
+    MapApp.saveState = saveState; MapApp.scheduleSave = scheduleSave;
+
+    function _applySlider(id, val){
+        if (typeof val !== 'number') return;
+        const el = document.getElementById(id); if (!el) return;
+        el.value = val; el.dispatchEvent(new Event('input', {bubbles:true}));
+    }
+    function _restoreAreaLabels(area){
+        if (MapApp.areaTypeVisible && area.types) Object.assign(MapApp.areaTypeVisible, area.types);
+        if (typeof updateAreaTypeZoomVisibility === 'function') updateAreaTypeZoomVisibility();
+        if (MapApp.areaTypeVisible) for (const id in MapApp.areaTypeVisible){ const cb = document.getElementById('overlay-areaType-'+id); if (cb) cb.checked = MapApp.areaTypeVisible[id]; }
+        if (typeof area.master === 'boolean'){
+            MapApp.overlayStates.areaLabels = area.master;
+            const cb = document.getElementById('overlay-areaLabels'); if (cb) cb.checked = area.master;
+            if (MapApp.areaLabelsLayer){
+                if (area.master){ MapApp.areaLabelsLayer.addTo(MapApp.map); if (typeof updateAreaLabelSizes==='function') updateAreaLabelSizes(); }
+                else MapApp.map.removeLayer(MapApp.areaLabelsLayer);
+            }
+        }
+    }
+    async function restoreSession(){
+        const st = _loadSavedState();
+        MapApp._saved = st;
+        MapApp._restoring = true;
+        try {
+            if (st) {
+                // Base map (dispatch its change handler to switch the layer).
+                if (st.base){ const r = document.querySelector('input[name="basemap"][value="'+st.base+'"]'); if (r && !r.checked){ r.checked = true; r.dispatchEvent(new Event('change',{bubbles:true})); } }
+                // OpenRailwayMap overlay.
+                const orm = document.getElementById('basemap-orm');
+                if (orm && typeof st.orm === 'boolean' && orm.checked !== st.orm){ orm.checked = st.orm; orm.dispatchEvent(new Event('change',{bubbles:true})); }
+                // Overlay states + checkboxes (layers attach as regions load below).
+                if (st.overlays) for (const id in MapApp.overlayStates){ if (id in st.overlays){ MapApp.overlayStates[id] = st.overlays[id]; const cb = document.getElementById('overlay-'+id); if (cb) cb.checked = st.overlays[id]; } }
+                // Manual alignment (must be set before any region is transformed).
+                if (st.align && MapApp.align){ if (typeof st.align.lat==='number') MapApp.align.lat = st.align.lat; if (typeof st.align.lon==='number') MapApp.align.lon = st.align.lon; if (typeof st.align.scale==='number') MapApp.align.scale = st.align.scale; }
+                // Sliders (set value + fire the existing input handler).
+                if (st.op){ _applySlider('opacity-slider', st.op.map); _applySlider('track-opacity-slider', st.op.track); _applySlider('area-font-slider', st.op.label); }
+                // Filter states (applied to layers after load).
+                if (st.trainOpts && MapApp.trainOptions) Object.assign(MapApp.trainOptions, st.trainOpts);
+                if (st.sig && MapApp.signalTypeVisible) Object.assign(MapApp.signalTypeVisible, st.sig);
+                // Region checkboxes (loaded just below).
+                if (st.regions && MapApp.regionCheckboxes) MapApp.regionCheckboxes.forEach((cb,id)=>{ if (id in st.regions) cb.checked = st.regions[id]; });
+            }
+            // Load regions: the saved-enabled set if present, else the config defaults.
+            if (st && st.regions){
+                const ids = MapApp.manifest.regions.filter(r => st.regions[r.id]).map(r => r.id);
+                await Promise.all(ids.map(id => loadRegion(id)));
+            } else {
+                await loadDefaultRegions();
+            }
+            // Post-load: re-apply things needing loaded layers, then the saved view.
+            if (st) {
+                if (st.trainOpts && typeof applyTrainOptions === 'function') applyTrainOptions();
+                if (st.sig && typeof rerenderSignals === 'function') rerenderSignals();
+                if (st.area) _restoreAreaLabels(st.area);
+                if (st.view && typeof st.view.lat==='number') MapApp.map.setView([st.view.lat, st.view.lng], st.view.zoom);
+            }
+        } catch(e){ console.warn('restoreSession failed', e); }
+        finally {
+            MapApp._restoring = false;
+            // Wire autosave only now, so restore's own programmatic changes don't save.
+            document.addEventListener('change', scheduleSave, true);
+            document.addEventListener('input', scheduleSave, true);
+            MapApp.map.on('moveend zoomend', scheduleSave);
+        }
     }
 
     async function loadRegion(regionId) {
@@ -2766,6 +2871,7 @@ ALIGN_JS = r'''
         MapApp.editToken = null;
         MapApp.hasBackend = false;
         buildAlignUI();
+        installAlignHint();
         addTrackOpacitySlider();
         addAreaLabelFontSlider();
         MapApp.overlayStates.areaLabels = false;
@@ -3692,6 +3798,7 @@ ALIGN_JS = r'''
     function fitToRegion(regionId){
         // Enabling a region pans/zooms to it (its track can span 100+ mi; the map
         // does not otherwise move, so a newly-enabled region may be off-screen).
+        if (MapApp._restoring) return;   // don't fight a restored view during session restore (#98)
         const reg = MapApp.loadedRegions.get(regionId);
         if (!reg || !reg.data) return;
         let mnLa=90,mxLa=-90,mnLo=180,mxLo=-180, any=false;
@@ -3706,8 +3813,8 @@ ALIGN_JS = r'''
         const bs='position:absolute;top:10px;z-index:1500;padding:6px 10px;cursor:pointer;'+
           'background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);border-radius:6px;box-shadow:0 1px 6px var(--shadow);font:13px Arial';
         const authoring = (typeof window.__run8_authoring === 'undefined') ? true : !!window.__run8_authoring;
-        const btn=document.createElement('button'); btn.textContent='Align mode: OFF'; btn.style.cssText=bs+';left:52px';
-        document.body.appendChild(btn);
+        // Aligning is no longer a modal button (#100) - hold Alt and drag the track
+        // (see the Alt-drag handlers below and the one-time hint on the first real base map).
         // Editing controls (#56). There is NO visible "unlock" button - typing the word
         // "edit" opens the password popup (see the hidden-reveal listener below). Once
         // unlocked, the Add Label + "Leave editing" buttons appear; both start hidden.
@@ -3721,10 +3828,8 @@ ALIGN_JS = r'''
         document.body.appendChild(leaveBtn);
         // Help button + overlay: a quick reference of the map's mouse/key commands.
         const help=document.createElement('button'); help.textContent='Help';
-        // Sit Help directly under the Align-mode button (same left, second row) so it
-        // doesn't float far to the right when the Add Label button is absent
-        // (production build). bs sets top:10px; the trailing top:46px overrides it.
-        help.style.cssText=bs+';left:52px;top:46px';
+        // Help takes the top-left slot the Align-mode button used to occupy (#100).
+        help.style.cssText=bs+';left:52px';
         document.body.appendChild(help);
         let helpEl=null;
         function kbd(s){ return '<kbd style="background:var(--kbd-bg);border:1px solid var(--border);border-radius:3px;padding:0 5px;font:12px monospace">'+s+'</kbd>'; }
@@ -3751,7 +3856,7 @@ ALIGN_JS = r'''
                     +hrow('Right-click the map','Open that exact point in Google Maps (new tab) to cross-check imagery.')
                     +hrow('Enable a region (checkbox)','Loads the region on demand and fits the map to it.')
                     +hrow('Search button','Find a track section, signal, industry, AI location, or train / rail vehicle.')
-                    +hrow('Align mode button','Turn on, then drag the track to slide it onto the real map; release to commit the alignment.')
+                    +hrow(kbd('Alt')+' + drag the track','Hold Alt and drag to slide the track onto the real map; release to commit the alignment. (Normal drag still pans.)')
                     +(authoring ?
                         hrow('Add Label button','Turn on, click to place a label, then click a second point to set the text angle ('+kbd('Esc')+' = horizontal).')
                        +hrow('Click a label','Edit its text, colour, font, rotation or box — or delete it.')
@@ -3772,18 +3877,22 @@ ALIGN_JS = r'''
         function setT(t){ panes.overlayPane.style.transform=t;
             if(panes.markerPane) panes.markerPane.style.transform=t;
             if(panes.shadowPane) panes.shadowPane.style.transform=t; }
-        let aligning=false, drag=null; MapApp.labelMode=false;
-        function updA(){ btn.textContent='Align mode: '+(aligning?'ON':'OFF'); btn.style.background=aligning?'#1560d0':'var(--panel-bg)'; btn.style.color=aligning?'#fff':'var(--panel-fg)'; }
+        let drag=null, altArmed=false; MapApp.labelMode=false;
         function updL(){ if(!lbl) return; lbl.textContent='Add Label: '+(MapApp.labelMode?'ON':'OFF'); lbl.style.background=MapApp.labelMode?'#1a9a4a':'var(--panel-bg)'; lbl.style.color=MapApp.labelMode?'#fff':'var(--panel-fg)'; }
-        function setAlign(on){ aligning=on;
-            if(on){ MapApp.labelMode=false; updL(); MapApp.map.dragging.disable(); }
-            else { MapApp.map.dragging.enable(); drag=null; setT(''); }
-            updA(); }
+        // Align is no longer a mode/toggle (#100): hold Alt to turn a left-drag into an
+        // alignment nudge. While Alt is held we disable Leaflet's own map panning so the
+        // drag slides the track overlay instead; releasing Alt (or the window losing
+        // focus) restores normal panning. A drag already in progress keeps panning
+        // disabled until mouseup even if Alt is released early.
+        function armAlign(on){ if(on===altArmed) return; altArmed=on;
+            if(on){ MapApp.map.dragging.disable(); MapApp.map.getContainer().style.cursor='move'; }
+            else if(!drag){ MapApp.map.dragging.enable(); MapApp.map.getContainer().style.cursor=''; } }
+        document.addEventListener('keydown', e=>{ if(e.key==='Alt') armAlign(true); });
+        document.addEventListener('keyup',   e=>{ if(e.key==='Alt') armAlign(false); });
+        window.addEventListener('blur', ()=> armAlign(false));
         function setLabel(on){ if(!MapApp.authoring) return; MapApp.labelMode=on;
-            if(on){ aligning=false; updA(); MapApp.map.dragging.enable(); drag=null; setT(''); }
-            else if(MapApp.areaCapture && MapApp.areaCapture.pending){ finalizeAreaCapture(null); }
+            if(!on && MapApp.areaCapture && MapApp.areaCapture.pending){ finalizeAreaCapture(null); }
             updL(); }
-        btn.onclick=()=> setAlign(!aligning);
         if(lbl) lbl.onclick=()=> setLabel(!MapApp.labelMode);
         // Edit-state UI hooks (#56), driven by detectBackend()/doUnlock()/relockEditing():
         //   enableAuthoringUI  - unlocked: reveal Add Label + Leave editing, allow editing.
@@ -3805,19 +3914,53 @@ ALIGN_JS = r'''
                 _hot=''; e.preventDefault(); if(MapApp.doUnlock) MapApp.doUnlock();
             }
         });
-        // align-mode drag
-        MapApp.map.on('mousedown', e=>{ if(!aligning) return;
+        // Alt + left-drag = alignment nudge (#100). Gate on Alt held (armAlign has already
+        // disabled map panning); fall back to e.altKey in case the keydown was missed
+        // (e.g. focus was elsewhere when Alt went down).
+        MapApp.map.on('mousedown', e=>{ if(!(altArmed || (e.originalEvent && e.originalEvent.altKey))) return;
+            armAlign(true);
             drag={ p:MapApp.map.mouseEventToContainerPoint(e.originalEvent), a:e.latlng, last:e.latlng }; });
-        MapApp.map.on('mousemove', e=>{ if(!aligning||!drag) return;
+        MapApp.map.on('mousemove', e=>{ if(!drag) return;
             const p=MapApp.map.mouseEventToContainerPoint(e.originalEvent);
             setT(`translate3d(${p.x-drag.p.x}px,${p.y-drag.p.y}px,0)`); drag.last=e.latlng; });
-        MapApp.map.on('mouseup', ()=>{ if(!aligning||!drag) return; const d=drag; drag=null; setT('');
+        MapApp.map.on('mouseup', ()=>{ if(!drag) return; const d=drag; drag=null; setT('');
             MapApp.align.lat += (d.last.lat - d.a.lat); MapApp.align.lon += (d.last.lng - d.a.lng);
-            rerenderAlign(); repositionAreaLabels(); setTimeout(applyTrackOpacity, 600); });
+            rerenderAlign(); repositionAreaLabels(); setTimeout(applyTrackOpacity, 600);
+            if(MapApp.scheduleSave) MapApp.scheduleSave();   // persist the new alignment (#98)
+            if(!altArmed){ MapApp.map.dragging.enable(); MapApp.map.getContainer().style.cursor=''; } });
         // label-mode capture: first click = position, second = angle (Esc = horizontal)
         MapApp.map.on('click', e=>{ if(!MapApp.authoring || !MapApp.labelMode) return; MapApp.map.closePopup();
             if(MapApp.areaCapture && MapApp.areaCapture.pending) finalizeAreaCapture(e.latlng);
             else startAreaCapture(e.latlng); });
+    }
+
+    // One-time hint (#100): the align-mode toggle button is gone, so the first time the
+    // user picks a real base map (anything but "None") tell them how to align - hold Alt
+    // and drag. Shown once per browser (localStorage), then never again.
+    function installAlignHint(){
+        let done=false;
+        try { done = localStorage.getItem('run8_align_hint')==='1'; } catch(e){}
+        function show(){
+            if(done) return; done=true;
+            try { localStorage.setItem('run8_align_hint','1'); } catch(e){}
+            const h=document.createElement('div');
+            h.style.cssText='position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:3200;'
+                +'max-width:380px;background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);'
+                +'border-radius:8px;box-shadow:0 3px 16px var(--shadow);padding:10px 14px 10px 14px;font:13px/1.5 Arial;'
+                +'display:flex;gap:10px;align-items:flex-start;';
+            h.innerHTML='<div><b>Tip:</b> hold '
+                +'<kbd style="background:var(--kbd-bg);border:1px solid var(--border);border-radius:3px;padding:0 5px;font:12px monospace">Alt</kbd>'
+                +' and drag the track to align it with the map; release to commit. A normal drag still pans.</div>'
+                +'<button title="Dismiss" style="border:none;background:var(--kbd-bg);color:var(--panel-fg);border-radius:4px;'
+                +'width:22px;height:22px;flex:0 0 auto;cursor:pointer;font-size:15px;line-height:20px">&times;</button>';
+            const close=()=>{ if(h.parentNode) h.parentNode.removeChild(h); };
+            h.querySelector('button').onclick=close;
+            document.body.appendChild(h);
+            setTimeout(close, 12000);
+        }
+        document.querySelectorAll('input[name="basemap"]').forEach(radio=>{
+            radio.addEventListener('change', e=>{ if(e.target.value!=='None') show(); });
+        });
     }
 
 '''
@@ -3884,8 +4027,10 @@ def generate_align_html(config: VisualizationConfig, output_path: Path, authorin
     # patch: direct map instead of Folium lookup
     js = js.replace(_INIT_ORIG, _INIT_DIRECT)
     # patch: seed the transform (alignInit) after UI is built, before regions load
-    js = js.replace("            setupUI();\n            loadDefaultRegions();",
-                    "            setupUI();\n            alignInit();\n            loadDefaultRegions();")
+    # (restoreSession, which replaced loadDefaultRegions, then overrides the align
+    # transform + view from any saved session state, #98)
+    js = js.replace("            setupUI();\n            restoreSession();",
+                    "            setupUI();\n            alignInit();\n            restoreSession();")
     # patch: cache raw world-coord data + transform on load
     js = js.replace(_FETCH_ORIG, _FETCH_ALIGN)
     # append the align module inside the IIFE, just before the public API

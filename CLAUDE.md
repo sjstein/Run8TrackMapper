@@ -374,8 +374,9 @@ Default stores no color, a preset stores its name, Custom stores hex. `config_pa
 is the Python-side resolver (used for tests / any server-side rendering).
 
 Authoring (capturing new labels), in the manual-alignment viewer:
-- Toggle the **"Add Label"** button (mutually exclusive with "Align mode"; hidden
-  entirely under `--production`), then **click** to place.
+- Toggle the **"Add Label"** button (hidden entirely under `--production`), then
+  **click** to place. (Aligning is no longer a mode — it is **Alt + drag**, #100 —
+  so the two are independent; Alt+drag still aligns even while Add Label is on.)
 
 Then **click a second point along a track** to set the text angle (or press **Esc**
 to leave it horizontal). Positions are converted to world meters via
@@ -551,8 +552,33 @@ same kind of mutually-exclusive mode.
   change the authored `font_size`, just how big the labels render (`MapApp.areaFontScale`,
   applied in `updateAreaLabelSizes`; each label's scaled base still collapses toward the small
   zoomed-out floor)
-- **Align mode** *(align viewer only)*: drag the track to slide it onto the real map; releasing commits the new alignment
+- **Align (Alt + drag)** *(align viewer only, #100)*: hold **Alt** and drag the track to slide it onto the real map; releasing commits the new alignment (a plain drag still pans). This replaced the old modal "Align mode" toggle button. A one-time hint explaining the gesture appears the first time the user selects a base map other than "None" (`installAlignHint`, gated by a `run8_align_hint` localStorage flag). Implemented in `ALIGN_JS` via `armAlign` + Alt keydown/keyup listeners that disable/restore Leaflet map panning while Alt is held.
 - **Add Label** *(align viewer only, hidden under `--production`)*: click to author a new area label and generate its `[area.*]` INI block
+
+#### Session persistence (#98)
+The viewer remembers its UI state across reloads in **`localStorage`, keyed per map**
+(`run8_state:<slug of manifest.name>`, so two maps at one origin don't clobber each
+other). Saved: map **view** (center + zoom), **base map** + OpenRailwayMap overlay,
+every **overlay** toggle, which **regions** are enabled (a disabled region isn't even
+fetched on the next load), the **Map / Track / Text-Size sliders**, the **train Options**,
+the **signal abs/int filter**, the **Area Labels** master + per-category filters, and —
+align viewer — the **manual alignment** (Alt+drag) so a hand-aligned map comes back
+aligned. Dark mode stays in its own `run8_theme` key (unchanged). First load with nothing
+saved uses the config defaults exactly as before.
+
+Implementation (`generate_javascript`): a debounced `saveState()`/`scheduleSave()` writes
+one JSON blob (with a schema `v`); it's wired to document-level `change`/`input` (which
+catches every panel and popover control) plus map `moveend`/`zoomend`, and an explicit
+call on the align commit (a re-render, not a map move). `restoreSession()` **replaces the
+`loadDefaultRegions()` call** in `loadManifest`: it applies base map / overlays / sliders /
+alignment **before** loading the saved-enabled region set, then re-applies the post-load
+bits (train options, signal filter, area labels) and finally `setView`s the saved view, so
+nothing fights it. A `MapApp._restoring` guard suppresses autosave and `fitToRegion` during
+restore; autosave listeners are wired only once restore finishes. All reads/writes are
+`try/catch`-wrapped (a private window / blocked storage just falls back to defaults), and
+every align-only call is `typeof`-guarded so the base build is unaffected. In the align
+viewer `alignInit()` still runs before `restoreSession()` (so the transform exists to be
+overridden).
 
 #### Visual Elements
 - **Track Sections**: Configurable color, switches shown in different color
