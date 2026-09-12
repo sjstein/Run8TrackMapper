@@ -23,15 +23,28 @@ the route paths already match and you do not need to touch config-socal.ini.
 
 This program is not code-signed (signing certificates cost money and this is a
 free hobby tool), so Windows will warn about it the first time. This is normal
-and safe - the warning just means "we don't recognize the publisher", not that
-anything is wrong.
+and safe - the warnings just mean "we don't recognize the publisher", not that
+anything is wrong. On the very first run you will see up to THREE prompts, in
+this order - you must click through ALL of them or the map won't start:
 
-  - "Windows protected your PC" (blue box) when you first run it:
-        Click "More info", then "Run anyway".
+  1. "Open File - Security Warning" (grey box) when you double-click
+     "Start Map.bat":
+        Click "Run".  (If you tick "Always ask before opening this file" off,
+        you won't see it again.)
 
-  - Your antivirus flags or quarantines Run8MapHost.exe:
-        This is a known false positive with this kind of packaged Python program.
-        Allow it / restore it / add an exception for the Run8Map folder.
+  2. "Windows protected your PC" (blue box) - this is SmartScreen, shown when the
+     launcher starts Run8MapHost.exe:
+        Click "More info", then "Run anyway".  (The default button is
+        "Don't run" - if you click that, the exe never runs and no map is built.)
+
+  3. "Windows Security Alert" / Windows Firewall - asks whether to allow network
+     access:
+        Click "Allow access".  This is REQUIRED - without it, no one (not even
+        you) can reach the map in a browser.
+
+  Also: your antivirus may flag or quarantine Run8MapHost.exe. This is a known
+  false positive with this kind of packaged Python program - allow it / restore
+  it / add an exception for the Run8Map folder.
 
 If you'd rather not, you don't have to take our word for it - ask whoever shared
 this with you, or don't run it. But none of the warnings mean the tool is unsafe.
@@ -61,7 +74,8 @@ this with you, or don't run it. But none of the warnings mean the tool is unsafe
 4. Double-click "Start Map.bat" again.
      - The FIRST real run builds the map from your route files (this can take a
        couple of minutes). Later runs skip that and start immediately.
-     - Windows Firewall may pop up the first time - click "Allow access".
+     - Windows Firewall pops up the first time - click "Allow access" (required;
+       see WINDOWS SECURITY WARNINGS above).
      - When it says "Serving", the map is up. Leave the window open.
 
 5. (Recommended) Get a free dynamic-DNS hostname so people have a stable web

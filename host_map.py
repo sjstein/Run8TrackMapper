@@ -239,13 +239,18 @@ def main():
 
     print(f"Run8 Map self-host launcher  (bundle {__version__})")
 
-    config_path = args.config or _default_config_path()
-    if not config_path:
-        # First run of the default bundle: seed config-socal.ini beside the program
-        # from the bundled template (with a warning), then use it.
-        seeded = _program_dir() / 'config-socal.ini'
-        if _seed_from_template(seeded, 'config-socal.ini', 'map config (config-socal.ini)'):
-            config_path = str(seeded)
+    # No config arg (a bare double-click): default to config-socal.ini beside the program.
+    config_path = args.config or _default_config_path() or str(_program_dir() / 'config-socal.ini')
+    # First-run seeding: if the chosen config doesn't exist yet but a bundled template of
+    # the same name does, materialise it beside the program (with a warning), then use it.
+    # This must fire whether the config was DEFAULTED or passed EXPLICITLY - Start Map.bat
+    # runs `Run8MapHost.exe config-socal.ini ...`, so the name is always given; the old
+    # "only seed when no arg" check skipped seeding there and errored on first run.
+    if not Path(config_path).exists():
+        cfg = Path(config_path)
+        target = cfg if cfg.is_absolute() else (_program_dir() / cfg.name)
+        if _seed_from_template(target, cfg.name, f'map config ({cfg.name})'):
+            config_path = str(target)
     if not config_path or not Path(config_path).exists():
         print("ERROR: no config file given and none found or seedable next to the program.\n"
               "       Pass one:   Run8MapHost.exe <your-config.ini>\n"
