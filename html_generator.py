@@ -3058,7 +3058,7 @@ ALIGN_JS = r'''
                     // Drag to move: PUT the new tile/local, keeping all other fields. On
                     // failure snap back to where the drag started.
                     let dragFrom = null;
-                    marker.on('dragstart', ()=>{ dragFrom = marker.getLatLng(); MapApp.map.closePopup(); });
+                    marker.on('dragstart', ()=>{ dragFrom = marker.getLatLng(); closeAreaEditor(); });
                     marker.on('dragend', ()=>{
                         const tl = latLngToTileLocal(marker.getLatLng());
                         if (!tl){ if (dragFrom) marker.setLatLng(dragFrom); return; }
@@ -3679,11 +3679,44 @@ ALIGN_JS = r'''
             destroy:()=>{ [line,hs,he].forEach(l=>{ try{ MapApp.map.removeLayer(l); }catch(e){} }); }
         };
     }
+    // Docked side panel for the label editor (#95 review): a fixed inspector on the
+    // left rather than a popup over the label, so the label + its alignment line stay
+    // visible while editing. Created once, shown/hidden per edit.
+    function ensureAreaEditorPanel(){
+        let p = document.getElementById('area-editor-panel');
+        if (p) return p;
+        p = document.createElement('div');
+        p.id = 'area-editor-panel';
+        p.style.cssText = 'position:absolute;top:46px;left:52px;width:300px;max-height:calc(100vh - 66px);'
+            + 'overflow:auto;z-index:2000;background:var(--panel-bg);color:var(--panel-fg);'
+            + 'border:1px solid var(--border-strong);border-radius:8px;box-shadow:0 3px 16px var(--shadow);'
+            + 'padding:14px 16px;font:12px Arial;line-height:1.5;display:none;';
+        document.body.appendChild(p);
+        return p;
+    }
+    // Close the editor: run its teardown (destroy the line editor; if the edit was
+    // dismissed without saving, undo the live preview) and hide the panel.
+    function closeAreaEditor(){
+        if (MapApp._areaEditorCleanup){ const c = MapApp._areaEditorCleanup; MapApp._areaEditorCleanup = null; c(); }
+        const p = document.getElementById('area-editor-panel'); if (p) p.style.display = 'none';
+    }
+    // Ease the edited label into the open area beside the panel when the panel would
+    // cover it (or it's off-screen); leave the view alone when it's already clear.
+    function _panLabelIntoView(latlng){
+        if (!latlng) return;
+        const size = MapApp.map.getSize();
+        const clearLeft = 52 + 300 + 20;   // panel left + width + margin
+        const cp = MapApp.map.latLngToContainerPoint(latlng);
+        if (cp.x > clearLeft && cp.x < size.x - 20 && cp.y > 20 && cp.y < size.y - 20) return;
+        const target = L.point(clearLeft + (size.x - clearLeft) / 2, size.y / 2);
+        MapApp.map.panBy(cp.subtract(target), { animate: true });
+    }
     // Unified label editor. New labels POST; existing labels PUT / DELETE. With
     // no backend, new labels fall back to the copy-paste INI popup below.
     function openAreaEditor(area, opts){
         const isNew = !!opts.isNew;
         if (isNew && !MapApp.hasBackend){ openAreaIniPopup(area, opts.latlng); return; }
+        closeAreaEditor();   // close any editor already open (runs its teardown first)
         // Color control: Default (category color) / named presets / Custom (RGB).
         // A preset stores its NAME; Custom stores hex; Default stores nothing.
         const presets = areaColorPresets();
@@ -3696,9 +3729,12 @@ ALIGN_JS = r'''
             .concat(presetNames.map(n => `<option value="${n}"${colorMode===n?' selected':''}>${n.toUpperCase()}</option>`))
             .concat([`<option value="__custom__"${colorMode==='__custom__'?' selected':''}>Custom…</option>`])
             .join('');
-        const html = `<div style="min-width:250px;font:12px Arial;">
-            <b>${isNew ? 'New' : 'Edit'} Area Label</b>
-            <label style="display:block;margin:6px 0 2px;">Label text <span style="color:var(--text-muted);font-weight:normal;">(Enter = new line, Ctrl+Enter = save)</span>:</label>
+        const html = `
+            <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);padding-bottom:6px;margin-bottom:8px;">
+                <b style="font-size:13px;">${isNew ? 'New' : 'Edit'} Area Label</b>
+                <button id="al-close" title="Close (Esc)" style="border:none;background:var(--kbd-bg,#eee);color:inherit;border-radius:4px;width:24px;height:24px;cursor:pointer;font-size:15px;line-height:1;">&times;</button>
+            </div>
+            <label style="display:block;margin:2px 0 2px;">Label text <span style="color:var(--text-muted);font-weight:normal;">(Enter = new line, Ctrl+Enter = save)</span>:</label>
             <textarea id="al-text" rows="2" placeholder="e.g. Barstow Yard" style="width:100%;box-sizing:border-box;padding:4px;resize:vertical;font:inherit;">${escapeHtml(area.label)}</textarea>
             <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap;">
                 <label id="al-rot-wrap">Rotation&deg; <input id="al-rot" type="number" value="${area.rotation || 0}" style="width:60px;"></label>
@@ -3722,15 +3758,20 @@ ALIGN_JS = r'''
                 <button id="al-save" style="padding:4px 10px;cursor:pointer;">Save</button>
                 ${isNew ? '' : '<button id="al-del" style="margin-left:8px;padding:4px 10px;cursor:pointer;color:#b00;">Delete</button>'}
             </div>
-            <div id="al-err" style="color:#b00;margin-top:6px;display:none;"></div></div>`;
-        L.popup({ maxWidth: 360 }).setLatLng(opts.latlng).setContent(html).openOn(MapApp.map);
+            <div id="al-err" style="color:#b00;margin-top:6px;display:none;"></div>`;
+        const panel = ensureAreaEditorPanel();
+        panel.innerHTML = html;
+        panel.style.display = 'block';
+        _panLabelIntoView(opts.latlng);
         setTimeout(()=>{
             const textEl = document.getElementById('al-text');
             const saveBtn = document.getElementById('al-save');
             const delBtn = document.getElementById('al-del');
+            const closeBtn = document.getElementById('al-close');
             const errEl = document.getElementById('al-err');
             if (!textEl || !saveBtn) return;
             textEl.focus();
+            if (closeBtn) closeBtn.addEventListener('click', closeAreaEditor);
             const showErr = (m)=>{ if (errEl){ errEl.textContent = m; errEl.style.display = 'block'; } };
             const colorSel = document.getElementById('al-color-sel');
             const colorCustom = document.getElementById('al-color-custom');
@@ -3845,14 +3886,16 @@ ALIGN_JS = r'''
             function schedulePreview(){ if (_pvT) clearTimeout(_pvT); _pvT = setTimeout(applyPreview, 30); }
             if (copiesEl) copiesEl.addEventListener('input', ()=>{ updateRepeatUI(); schedulePreview(); });
             updateRepeatUI();
-            // Tear the line editor down when this popup closes; if the edit was dismissed
-            // without saving, restore the label's saved render (undo the live preview).
-            const onPopupClose = ()=>{
+            // Teardown, run by closeAreaEditor(): destroy the line editor, and if the
+            // edit was dismissed without saving, restore the label's saved render (undo
+            // the live preview). Also drop the Esc listener.
+            const escHandler = (ev)=>{ if (ev.key === 'Escape'){ ev.preventDefault(); closeAreaEditor(); } };
+            document.addEventListener('keydown', escHandler);
+            MapApp._areaEditorCleanup = ()=>{
+                document.removeEventListener('keydown', escHandler);
                 if (lineEd){ lineEd.destroy(); lineEd = null; }
                 if (previewApplied && !savedOk){ removeAreaMarker(previewId); if (!isNew){ addAreaMarker(originalArea); updateAreaLabelSizes(); } }
-                MapApp.map.off('popupclose', onPopupClose);
             };
-            MapApp.map.on('popupclose', onPopupClose);
 
             const save = ()=>{
                 const body = gather();
@@ -3876,7 +3919,7 @@ ALIGN_JS = r'''
                     addAreaMarker(saved);
                     if (isNew) MapApp.lastLabelType = body.type;                   // remember for the next new label
                     updateAreaLabelSizes(); ensureAreaOverlayVisible(); ensureAreaTypeVisible(saved.type);
-                    MapApp.map.closePopup();
+                    closeAreaEditor();
                 }).catch(e => { saveBtn.disabled = false; showErr(e.message); });
             };
             saveBtn.addEventListener('click', save);
@@ -3886,7 +3929,7 @@ ALIGN_JS = r'''
                 delBtn.addEventListener('click', ()=>{
                     if (!confirm('Delete this label?')) return;
                     delBtn.disabled = true;
-                    apiArea('DELETE', area.id).then(()=>{ savedOk = true; removeAreaMarker(previewId); removeAreaMarker(area.id); MapApp.map.closePopup(); })
+                    apiArea('DELETE', area.id).then(()=>{ savedOk = true; removeAreaMarker(previewId); removeAreaMarker(area.id); closeAreaEditor(); })
                         .catch(e => { delBtn.disabled = false; showErr(e.message); });
                 });
             }

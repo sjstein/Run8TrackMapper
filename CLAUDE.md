@@ -340,13 +340,23 @@ moving/editing/deleting acts on the whole set (no config clutter). Parsed in
 `output_generator.area_to_dict` / `area_store._area_to_dict` and written by
 `area_store.format_area_block` only when it's a real repeat. The viewer renders the copies
 in `addAreaMarker` (`isRepeatArea` / `areaCopyWorlds`); each copy is clickable-to-edit but
-**not** individually draggable (the single-label drag + wheel-rotate is unchanged). In the
-authoring/edit popup a **Copies** field turns a label into a repeat, and while it is >1 a
-draggable **start→end line** is shown (`attachAreaLineEditor`: green start + red end handles
-+ dashed line) so the alignment line is visible and adjustable; `serve.py` accepts the
-`repeat`/`end_*` fields (POST/PUT via `_clean_common_fields`). Note: `_AREA_KEY_RE` in
-`area_store` must list `end_tile|end_local|repeat` so block splicing covers them (else
-update/delete leave duplicate keys behind).
+**not** individually draggable (the single-label drag + wheel-rotate is unchanged).
+
+The label editor is a **docked side panel** (`#area-editor-panel`, `ensureAreaEditorPanel` /
+`openAreaEditor` / `closeAreaEditor`), not a popup over the label, so the label and its line
+stay visible while editing; it opens on the left, eases the label into the clear area beside
+it (`_panLabelIntoView`) when the panel would cover it, and closes via its **×** button, **Esc**,
+selecting another label, or Save. A **Copies** field turns a label into a repeat, and while it
+is >1 a draggable **start→end line** is shown (`attachAreaLineEditor`: green start + red end
+handles + dashed line) so the alignment line is visible and adjustable. The copies **re-render
+live** as the handles are dragged or Copies changes — a client-side preview (`applyPreview` via
+`replaceAreaMarker`, no server write, throttled by `schedulePreview`); Save persists, and
+dismissing without saving restores the saved render. When turning a saved *single* label into a
+repeat, the synthesized default end (`defaultEnd`) is offset **along the label's saved rotation**
+so the orientation carries over. `serve.py` accepts the `repeat`/`end_*` fields (POST/PUT via
+`_clean_common_fields`). Note: `_AREA_KEY_RE` in `area_store` must list
+`end_tile|end_local|repeat` so block splicing covers them (else update/delete leave duplicate
+keys behind).
 
 **Categories (`type`) — config-defined.** Categories come from the config's
 `[label_types]` section (`id = Display Name, #color[, max_scale_m]`, ordered), parsed into
