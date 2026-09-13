@@ -3773,9 +3773,14 @@ ALIGN_JS = r'''
             const originalArea = Object.assign({}, area);
             const previewId = area.id || '__preview_new__';
             let previewApplied = false, savedOk = false;
-            function defaultEnd(){   // a handle ~120px east of start when none exists yet
+            function defaultEnd(){
+                // Synthesize an end handle ~120px from the start when none exists yet
+                // (e.g. turning a saved single label into a repeat). Offset ALONG the
+                // label's saved rotation so the line matches the text's angle and the
+                // user need not re-set the orientation (#95 review); rotation 0 => due east.
                 const p = MapApp.map.latLngToContainerPoint(startLL);
-                return MapApp.map.containerPointToLatLng(L.point(p.x + 120, p.y));
+                const rad = ((typeof area.rotation === 'number' ? area.rotation : 0)) * Math.PI / 180;
+                return MapApp.map.containerPointToLatLng(L.point(p.x + 120 * Math.cos(rad), p.y + 120 * Math.sin(rad)));
             }
             function updateRepeatUI(){
                 const n = Math.max(1, parseInt(copiesEl.value, 10) || 1);
