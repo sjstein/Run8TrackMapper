@@ -162,6 +162,12 @@ class AreaLabel:
     box: bool = False                # draw a background box behind the text
     rotation: float = 0.0            # rotate text in degrees (clockwise), e.g. to align to a track
     type: str = AREA_TYPE_DEFAULT    # category id (must match a [label_types] entry, else rendered white)
+    # Repeated labels (#95): a single label entity drawn as `repeat` copies evenly along
+    # the line from (tile, local) to (end_tile, end_local), all sharing the line's bearing.
+    # repeat<=1 (or a missing end point) is an ordinary single label at (tile, local).
+    end_tile: Optional[Tuple[int, int]] = None       # (tile_x, tile_z) of the line's end point
+    end_local: Optional[Tuple[float, float]] = None  # (local_x, local_z) of the line's end point
+    repeat: int = 1                                   # number of copies distributed start->end
 
 
 @dataclass
@@ -306,6 +312,34 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
         # Any type string is accepted; ones not defined in [label_types] render white.
         area_type = area.get('type', '').strip().lower() or AREA_TYPE_DEFAULT
 
+        # Repeated labels (#95): optional end point + repeat count.
+        end_tile = None
+        end_tile_str = area.get('end_tile', '').strip()
+        if end_tile_str:
+            try:
+                ep = end_tile_str.split(',')
+                end_tile = (int(ep[0].strip()), int(ep[1].strip()))
+            except (ValueError, IndexError):
+                errors.append(f"[{section_name}] end_tile must be format 'x,z' ({source})")
+        end_local = None
+        end_local_str = area.get('end_local', '').strip()
+        if end_local_str:
+            try:
+                elp = end_local_str.split(',')
+                end_local = (float(elp[0].strip()), float(elp[1].strip()))
+            except (ValueError, IndexError):
+                errors.append(f"[{section_name}] end_local must be format 'x,z' ({source})")
+        repeat = 1
+        repeat_str = area.get('repeat', '').strip()
+        if repeat_str:
+            try:
+                repeat = max(1, int(repeat_str))
+            except ValueError:
+                errors.append(f"[{section_name}] repeat must be an integer ({source})")
+        # A repeat>1 needs an end point to distribute along; without one it's a single label.
+        if repeat > 1 and (end_tile is None or end_local is None):
+            errors.append(f"[{section_name}] repeat>1 requires end_tile and end_local ({source})")
+
         if label and tile is not None and local is not None:
             result.append(AreaLabel(
                 id=area_id,
@@ -316,7 +350,10 @@ def _parse_area_sections(parser: configparser.ConfigParser, source: str, errors:
                 font_size=font_size,
                 box=box,
                 rotation=rotation,
-                type=area_type
+                type=area_type,
+                end_tile=end_tile,
+                end_local=end_local,
+                repeat=repeat
             ))
     return result
 

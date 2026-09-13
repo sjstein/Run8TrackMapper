@@ -114,6 +114,13 @@ def area_to_dict(area) -> dict:
         result["rotation"] = area.rotation
     if getattr(area, "type", None):
         result["type"] = area.type
+    # Repeated labels (#95): only emit the end point + count when it's actually a repeat.
+    if getattr(area, "repeat", 1) and area.repeat > 1 and area.end_tile is not None and area.end_local is not None:
+        result["end_tile_x"] = area.end_tile[0]
+        result["end_tile_z"] = area.end_tile[1]
+        result["end_local_x"] = area.end_local[0]
+        result["end_local_z"] = area.end_local[1]
+        result["repeat"] = area.repeat
     return result
 
 

@@ -319,11 +319,44 @@ font_size = 16           ; optional (size at <=50 m scale; default 22)
 box = true               ; optional, background box behind the text (default: no box)
 rotation = -30           ; optional, rotate text in degrees clockwise (align to track/yard)
 type = yard              ; optional category: a [label_types] id (undefined -> white)
+end_tile = 210,-10       ; optional (#95) end-point tile for a repeated label
+end_local = 130.0,-505.2 ; optional (#95) end-point local; with repeat>1 the label is
+repeat = 6               ; drawn as N copies evenly along (tile,local)->(end_tile,end_local)
 ```
 Labels scale with the map: full `font_size` at the 50 m scale-bar level, shrinking to
 a small floor by ~15 km (tunable in `updateAreaLabelSizes` in html_generator.py).
 Labels are emitted into `manifest.json` (`areas`) and rendered as a toggleable
 "Area Labels" overlay in the manual-alignment viewer.
+
+**Repeated labels (`repeat` + `end_tile`/`end_local`, #95).** For a long yard track it
+helps to repeat the same name a few times along the track. A single `[area.*]` entity gains
+an **end point** (`end_tile`/`end_local`) and a **repeat** count; the viewer draws `repeat`
+copies distributed **evenly, anchored on both ends** (t = i/(N-1)) from the start point
+`(tile, local)` to the end point, all sharing the line's bearing (rotation is baked as the
+screen bearing at author/edit time, kept upright). `repeat <= 1`, or a missing end point, is
+an ordinary single label at `(tile, local)` — unchanged from before. It's ONE entity, so
+moving/editing/deleting acts on the whole set (no config clutter). Parsed in
+`config_parser` (`AreaLabel.end_tile`/`end_local`/`repeat`), emitted by
+`output_generator.area_to_dict` / `area_store._area_to_dict` and written by
+`area_store.format_area_block` only when it's a real repeat. The viewer renders the copies
+in `addAreaMarker` (`isRepeatArea` / `areaCopyWorlds`); each copy is clickable-to-edit but
+**not** individually draggable (the single-label drag + wheel-rotate is unchanged).
+
+The label editor is a **docked side panel** (`#area-editor-panel`, `ensureAreaEditorPanel` /
+`openAreaEditor` / `closeAreaEditor`), not a popup over the label, so the label and its line
+stay visible while editing; it opens on the left, eases the label into the clear area beside
+it (`_panLabelIntoView`) when the panel would cover it, and closes via its **×** button, **Esc**,
+selecting another label, or Save. A **Copies** field turns a label into a repeat, and while it
+is >1 a draggable **start→end line** is shown (`attachAreaLineEditor`: green start + red end
+handles + dashed line) so the alignment line is visible and adjustable. The copies **re-render
+live** as the handles are dragged or Copies changes — a client-side preview (`applyPreview` via
+`replaceAreaMarker`, no server write, throttled by `schedulePreview`); Save persists, and
+dismissing without saving restores the saved render. When turning a saved *single* label into a
+repeat, the synthesized default end (`defaultEnd`) is offset **along the label's saved rotation**
+so the orientation carries over. `serve.py` accepts the `repeat`/`end_*` fields (POST/PUT via
+`_clean_common_fields`). Note: `_AREA_KEY_RE` in `area_store` must list
+`end_tile|end_local|repeat` so block splicing covers them (else update/delete leave duplicate
+keys behind).
 
 **Categories (`type`) — config-defined.** Categories come from the config's
 `[label_types]` section (`id = Display Name, #color[, max_scale_m]`, ordered), parsed into
@@ -377,6 +410,11 @@ Authoring (capturing new labels), in the manual-alignment viewer:
 - Toggle the **"Add Label"** button (hidden entirely under `--production`), then
   **click** to place. (Aligning is no longer a mode — it is **Alt + drag**, #100 —
   so the two are independent; Alt+drag still aligns even while Add Label is on.)
+- Shortcut (#95): in edit mode, **Ctrl+Shift+click** the map (or a track) drops a new
+  label there without toggling Add Label — it starts the same two-click capture. Handled
+  before the Shift/Ctrl section select/info branches; a pending capture finalizes on the
+  next click even when it lands on a track. During placement `doubleClickZoom` is
+  suspended so a quick, close second click isn't swallowed as a zoom.
 
 Then **click a second point along a track** to set the text angle (or press **Esc**
 to leave it horizontal). Positions are converted to world meters via
