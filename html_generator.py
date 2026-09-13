@@ -3614,6 +3614,13 @@ ALIGN_JS = r'''
         MapApp.map.on('mousemove', MapApp._areaGuideMove);
         MapApp._areaEsc = (ev)=>{ if (ev.key==='Escape' && MapApp.areaCapture && MapApp.areaCapture.pending){ ev.preventDefault(); finalizeAreaCapture(null); } };
         document.addEventListener('keydown', MapApp._areaEsc);
+        // Suspend double-click-zoom during placement: otherwise a quick second click
+        // near the first is caught as a double-click (zoom) and hijacks the placement,
+        // which forces the user to move the second click far away. Also accept a
+        // double-click itself as the second point so a fast double never does nothing.
+        MapApp.map.doubleClickZoom.disable();
+        MapApp._areaDbl = (ev)=>{ if (MapApp.areaCapture && MapApp.areaCapture.pending){ if (ev.originalEvent) L.DomEvent.stop(ev.originalEvent); finalizeAreaCapture(ev.latlng); } };
+        MapApp.map.on('dblclick', MapApp._areaDbl);
         showAreaHint('Click a second point along the track to set the text angle &nbsp;&middot;&nbsp; Esc = horizontal');
     }
     function finalizeAreaCapture(secondLatLng){
@@ -3623,6 +3630,8 @@ ALIGN_JS = r'''
         if (MapApp.areaGuide){ MapApp.map.removeLayer(MapApp.areaGuide); MapApp.areaGuide = null; }
         if (MapApp._areaGuideMove){ MapApp.map.off('mousemove', MapApp._areaGuideMove); MapApp._areaGuideMove = null; }
         if (MapApp._areaEsc){ document.removeEventListener('keydown', MapApp._areaEsc); MapApp._areaEsc = null; }
+        if (MapApp._areaDbl){ MapApp.map.off('dblclick', MapApp._areaDbl); MapApp._areaDbl = null; }
+        MapApp.map.doubleClickZoom.enable();   // restore normal double-click-zoom
         hideAreaHint();
         let rotation = 0;
         if (secondLatLng) rotation = _screenBearing(cap.latlng, secondLatLng);
