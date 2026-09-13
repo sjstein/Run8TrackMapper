@@ -359,9 +359,9 @@ so the orientation carries over. `serve.py` accepts the `repeat`/`end_*` fields 
 keys behind).
 
 **Categories (`type`) — config-defined.** Categories come from the config's
-`[label_types]` section (`id = Display Name, #color[, max_scale_m]`, ordered), parsed into
-`VisualizationConfig.label_types` (a list of `LabelType`) and emitted to
-`manifest.label_types` (`[{id,name,color,max_scale_m}]`). A label's `type` is a category id; a type
+`[label_types]` section (`id = Display Name, #color[, max_scale_m[, min_scale_m]]`, ordered),
+parsed into `VisualizationConfig.label_types` (a list of `LabelType`) and emitted to
+`manifest.label_types` (`[{id,name,color,max_scale_m,min_scale_m}]`). A label's `type` is a category id; a type
 **not** present in `[label_types]` (or a missing type) renders in `UNDEFINED_TYPE_COLOR`
 (white) and groups under the viewer's `AREA_UNDEFINED` (`__other__`) bucket. There is no
 hardcoded category list — `AREA_TYPES`/`AREA_TYPE_LABELS` were removed; the viewer builds
