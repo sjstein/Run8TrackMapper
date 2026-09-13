@@ -1098,6 +1098,20 @@ html[data-theme="dark"] .leaflet-control-scale-line{
 
                     // Click handler for selection and industry popups
                     polyline.on('click', (e) => {
+                        // A label placement in progress finalizes on the next click, even
+                        // when it lands on a track (so the 2nd/angle click is never eaten).
+                        if (MapApp.areaCapture && MapApp.areaCapture.pending) {
+                            e.originalEvent.stopPropagation();
+                            finalizeAreaCapture(e.latlng);
+                            return;
+                        }
+                        // Ctrl+Shift+click (edit mode) drops a new label right here (#95),
+                        // even on a track - checked before the Shift/Ctrl select/info branches.
+                        if (MapApp.authoring && e.originalEvent.ctrlKey && e.originalEvent.shiftKey) {
+                            e.originalEvent.stopPropagation();
+                            startAreaCapture(e.latlng);
+                            return;
+                        }
                         if (e.originalEvent.shiftKey) {
                             // Shift+click for multi-section selection
                             e.originalEvent.stopPropagation();
@@ -4058,6 +4072,7 @@ ALIGN_JS = r'''
                 + hrow('Your view is remembered','Zoom, position, base map, overlays, enabled regions, sliders and alignment are saved in this browser and restored next time you open this map.');
             if (editing) s +=
                   hrow(kbd('Add Label')+' button','Turn on, click to place a label, then click a second point to set the text angle ('+kbd('Esc')+' = horizontal).')
+                + hrow(kbd('Ctrl')+'+'+kbd('Shift')+'+ click the map','Drop a new label right there without toggling Add Label; then click a second point for the angle.')
                 + hrow('Click a label','Edit its text, colour, font, rotation or box &mdash; or delete it.')
                 + hrow('Drag a label','Move it. Hold the mouse button on a label and scroll the wheel to rotate it ('+kbd('Shift')+' = 1&deg; steps).')
                 + hrow(kbd('Leave editing')+' button','Re-lock editing and return to the read-only view.');
@@ -4143,10 +4158,18 @@ ALIGN_JS = r'''
             rerenderAlign(); repositionAreaLabels(); setTimeout(applyTrackOpacity, 600);
             if(MapApp.scheduleSave) MapApp.scheduleSave();   // persist the new alignment (#98)
             if(!altArmed){ MapApp.map.dragging.enable(); MapApp.map.getContainer().style.cursor=''; } });
-        // label-mode capture: first click = position, second = angle (Esc = horizontal)
-        MapApp.map.on('click', e=>{ if(!MapApp.authoring || !MapApp.labelMode) return; MapApp.map.closePopup();
-            if(MapApp.areaCapture && MapApp.areaCapture.pending) finalizeAreaCapture(e.latlng);
-            else startAreaCapture(e.latlng); });
+        // Label capture: first click = position, second = angle (Esc = horizontal).
+        // Started by the Add-Label button (labelMode) OR by Ctrl+Shift+click in edit
+        // mode (#95). A pending capture finalizes on the next click regardless of mode.
+        MapApp.map.on('click', e=>{
+            if (MapApp.areaCapture && MapApp.areaCapture.pending){ finalizeAreaCapture(e.latlng); return; }
+            if (!MapApp.authoring) return;
+            const oe = e.originalEvent;
+            const shortcut = oe && oe.ctrlKey && oe.shiftKey;   // Ctrl+Shift+click = add a label here
+            if (!MapApp.labelMode && !shortcut) return;
+            MapApp.map.closePopup();
+            startAreaCapture(e.latlng);
+        });
     }
 
     // One-time hint (#100): the align-mode toggle button is gone, so the first time the

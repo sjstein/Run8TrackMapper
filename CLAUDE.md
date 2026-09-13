@@ -410,6 +410,11 @@ Authoring (capturing new labels), in the manual-alignment viewer:
 - Toggle the **"Add Label"** button (hidden entirely under `--production`), then
   **click** to place. (Aligning is no longer a mode — it is **Alt + drag**, #100 —
   so the two are independent; Alt+drag still aligns even while Add Label is on.)
+- Shortcut (#95): in edit mode, **Ctrl+Shift+click** the map (or a track) drops a new
+  label there without toggling Add Label — it starts the same two-click capture. Handled
+  before the Shift/Ctrl section select/info branches; a pending capture finalizes on the
+  next click even when it lands on a track. During placement `doubleClickZoom` is
+  suspended so a quick, close second click isn't swallowed as a zoom.
 
 Then **click a second point along a track** to set the text angle (or press **Esc**
 to leave it horizontal). Positions are converted to world meters via
