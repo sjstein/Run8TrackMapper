@@ -3139,9 +3139,20 @@ ALIGN_JS = r'''
         const m = t && t.max_scale_m;
         return (typeof m === 'number' && m > 0) ? m : 0;
     }
+    // Inverse gate (#106): show only when the scale bar is >= this many metres (zoomed
+    // OUT past it); 0/absent = no lower gate. Lets yard labels hide once zoomed in.
+    function areaTypeMinScaleM(type){
+        const t = labelTypes().find(x => x.id === String(type||'').toLowerCase());
+        const m = t && t.min_scale_m;
+        return (typeof m === 'number' && m > 0) ? m : 0;
+    }
     function zoomOkForAreaType(type){
-        const maxM = areaTypeMaxScaleM(type);
-        return maxM <= 0 || _scaleBarMeters() <= maxM;
+        // max gate: show at scale <= max (zoomed in). min gate: show at scale > min
+        // (strictly; zoomed out). Strict > so a type's min set equal to another type's
+        // max hands off with no overlap (e.g. track max=20, yard min=20 => <=20 track, >20 yard).
+        const s = _scaleBarMeters();
+        const maxM = areaTypeMaxScaleM(type), minM = areaTypeMinScaleM(type);
+        return (maxM <= 0 || s <= maxM) && (minM <= 0 || s > minM);
     }
     // Smallest map zoom at which a gated type's gate passes at latitude `lat` (0 = not
     // gated). Leaflet's scale bar is <= 100*mpp, so 100*mpp <= maxM guarantees the gate;
@@ -3521,9 +3532,10 @@ ALIGN_JS = r'''
         for (const [id,label,color] of rows){
             const row = document.createElement('label');
             row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:2px 0;cursor:pointer;';
-            // Hint that a zoom-gated type (#58) only appears when zoomed in far enough.
-            const gated = areaTypeMaxScaleM(id) > 0
-                ? ' <span style="color:var(--muted,#888);font-size:10px;">(zoom-in)</span>' : '';
+            // Hint that a zoom-gated type only appears zoomed in (#58, max) or zoomed out (#106, min).
+            const gateTxt = areaTypeMaxScaleM(id) > 0 ? '(zoom-in)' : (areaTypeMinScaleM(id) > 0 ? '(zoom-out)' : '');
+            const gated = gateTxt
+                ? ' <span style="color:var(--muted,#888);font-size:10px;">'+gateTxt+'</span>' : '';
             row.innerHTML = '<input type="checkbox" id="overlay-areaType-'+id+'"'+(MapApp.areaTypeVisible[id]?' checked':'')+'>'
                 + '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+(color||'#ffffff')+';border:1px solid rgba(0,0,0,.4);"></span>'
                 + label + gated;

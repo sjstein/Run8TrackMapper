@@ -359,30 +359,39 @@ so the orientation carries over. `serve.py` accepts the `repeat`/`end_*` fields 
 keys behind).
 
 **Categories (`type`) — config-defined.** Categories come from the config's
-`[label_types]` section (`id = Display Name, #color[, max_scale_m]`, ordered), parsed into
-`VisualizationConfig.label_types` (a list of `LabelType`) and emitted to
-`manifest.label_types` (`[{id,name,color,max_scale_m}]`). A label's `type` is a category id; a type
+`[label_types]` section (`id = Display Name, #color[, max_scale_m[, min_scale_m]]`, ordered),
+parsed into `VisualizationConfig.label_types` (a list of `LabelType`) and emitted to
+`manifest.label_types` (`[{id,name,color,max_scale_m,min_scale_m}]`). A label's `type` is a category id; a type
 **not** present in `[label_types]` (or a missing type) renders in `UNDEFINED_TYPE_COLOR`
 (white) and groups under the viewer's `AREA_UNDEFINED` (`__other__`) bucket. There is no
 hardcoded category list — `AREA_TYPES`/`AREA_TYPE_LABELS` were removed; the viewer builds
 everything from `manifest.label_types` (`labelTypes`/`labelTypeColor`/`areaTypeOf` in
 `ALIGN_JS`).
 
-**Per-type zoom gate (`max_scale_m`, #58).** The optional trailing number on a
-`[label_types]` entry is a **zoom gate in scale-bar metres**: labels of that type render
-only when the scale bar is **≤ `max_scale_m`** (i.e. zoomed in that far); `0`/absent =
-always show. This lets a dense category — e.g. individual yard-track labels (`track =
-Track, #6fbf4a, 20`) authored like any other area label — appear only when zoomed in,
-without cluttering the map when zoomed out. The parse peels the trailing field only when
-it parses as a number, so a `Display Name, #color` with no gate (and even a display name
-containing commas) is unchanged. In the viewer each type's per-category layer group is
-added to the master overlay only when **(its Filter checkbox is on) AND (the zoom gate
-passes)** — `areaTypeMaxScaleM` / `zoomOkForAreaType` / `applyAreaTypeLayer` /
-`updateAreaTypeZoomVisibility` in `ALIGN_JS`, re-evaluated on `zoomend` from
-`updateAreaLabelSizes` (against the same `_scaleBarMeters()` the train tags use). The
-Filter popover marks a gated type `(zoom-in)`, and an **Area Label search** hit on a gated
-label zooms in enough to clear its gate (`zoomToRevealAreaType`) before flashing it, so it
-is never left invisible. The gate is per **type** (config), not per label — authoring a
+**Per-type zoom gates (`max_scale_m` #58, `min_scale_m` #106).** The optional trailing
+number(s) on a `[label_types]` entry are **zoom gates in scale-bar metres**, in the form
+`Display Name, #color[, max_scale_m[, min_scale_m]]`:
+- **`max_scale_m`** (#58) — labels render only when the scale bar is **≤ `max_scale_m`**
+  (i.e. zoomed in that far); `0`/absent = no upper gate. Lets a dense category — e.g.
+  individual yard-track labels (`track = Track, #6fbf4a, 20`) — appear only when zoomed in.
+- **`min_scale_m`** (#106) — the **inverse**: labels render only when the scale bar is
+  **> `min_scale_m`** (strictly; i.e. zoomed out past it); `0`/absent = no lower gate.
+  Setting a type's `min_scale_m` equal to another type's `max_scale_m` makes them **hand
+  off with no overlap** — the shipped SoCal config uses `yard = Yard, #ffd11a, 0, 20`
+  against `track = …, 20`, so **≤20 m shows the per-track labels and hides Yard labels,
+  >20 m shows Yard labels** (#106; the second idea there — varying the repeat count by
+  zoom — was intentionally left out as redundant with this gate).
+
+The parse peels up to two trailing fields and only when each parses as a number, so a
+`Display Name, #color` with no gate (and even a display name containing commas) is
+unchanged; a single trailing number is still `max_scale_m` (back-compat). In the viewer
+each type's per-category layer group is added to the master overlay only when **(its Filter
+checkbox is on) AND (both zoom gates pass)** — `areaTypeMaxScaleM` / `areaTypeMinScaleM` /
+`zoomOkForAreaType` / `applyAreaTypeLayer` / `updateAreaTypeZoomVisibility` in `ALIGN_JS`,
+re-evaluated on `zoomend` from `updateAreaLabelSizes` (against the same `_scaleBarMeters()`
+the train tags use). The Filter popover marks a gated type `(zoom-in)` (max) or
+`(zoom-out)` (min), and an **Area Label search** hit on a max-gated label zooms in enough
+to clear its gate (`zoomToRevealAreaType`) before flashing it, so it is never left invisible. The gate is per **type** (config), not per label — authoring a
 label needs no new field. In the **align viewer** the "Area Labels" overlay is a master checkbox with a
 **Filter** button beside it; the button opens a popover (`toggleAreaFilterPopover`) of
 per-category checkboxes (colour-swatched, with All / None), **plus an auto "Other" row**

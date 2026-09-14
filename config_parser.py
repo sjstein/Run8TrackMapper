@@ -115,6 +115,11 @@ class LabelType:
     max_scale_m: float = 0.0  # optional zoom gate: show labels of this type only when the
                               # scale bar is <= this many metres (0 = always show). Lets a
                               # dense category (e.g. yard-track labels) appear only zoomed in.
+    min_scale_m: float = 0.0  # optional inverse zoom gate (#106): show labels of this type
+                              # only when the scale bar is > this many metres (strictly; i.e.
+                              # zoomed out past it; 0 = no lower gate). Lets a category (e.g.
+                              # yard labels) hide once zoomed in; set it equal to a track
+                              # type's max_scale_m and the two hand off with no overlap.
 
 
 @dataclass
@@ -721,34 +726,44 @@ def parse_config(config_path: str, require_source_files: bool = True) -> Visuali
                     c = '#' + c
                 loco_company_colors[mark.strip().lower()] = c
 
-    # Parse [label_types] section (optional): `id = Display Name, #color[, max_scale_m]`
+    # Parse [label_types] section (optional):
+    #   `id = Display Name, #color[, max_scale_m[, min_scale_m]]`
     # per line, in order. The id is the value stored in a label's `type =`; the display
     # name shows in the filter/editor; the color is the category default (a label's own
-    # color= still wins). An optional trailing NUMBER is the zoom gate in scale-bar metres:
-    # labels of this type render only when the scale bar is <= that many metres (0/absent =
-    # always). Missing color -> undefined/white; missing name -> id.
+    # color= still wins). Optional trailing NUMBERS are zoom gates in scale-bar metres:
+    # the first is max_scale_m (show only when the scale bar is <= it, i.e. zoomed in;
+    # 0/absent = no upper gate); the second is min_scale_m (#106: show only when the scale
+    # bar is > it strictly, i.e. zoomed out; 0/absent = no lower gate). Missing color ->
+    # undefined/white; missing name -> id.
     label_types = []
     if 'label_types' in parser:
         for tid, raw in parser['label_types'].items():
             rest = raw
-            max_scale_m = 0.0
-            # Peel an optional trailing numeric field (the zoom gate). Only consume it when
-            # it actually parses as a number, so `Name, #color` (no gate) is untouched and a
-            # display name may still contain commas.
-            head, sep, tail = rest.rpartition(',')
-            if sep:
+            # Peel up to two trailing numeric fields (max, then min - right to left). Only
+            # consume a field when it parses as a number, so `Name, #color` (no gates) is
+            # untouched and a display name may still contain commas.
+            nums = []
+            while len(nums) < 2:
+                head, sep, tail = rest.rpartition(',')
+                if not sep:
+                    break
                 try:
-                    max_scale_m = float(tail.strip())
-                    rest = head
+                    v = float(tail.strip())
                 except ValueError:
-                    pass
+                    break
+                nums.append(v)   # collected right-to-left
+                rest = head
+            nums.reverse()       # -> left-to-right: [] | [max] | [max, min]
+            max_scale_m = nums[0] if len(nums) >= 1 else 0.0
+            min_scale_m = nums[1] if len(nums) >= 2 else 0.0
             t_name, t_color = rest, ''
             if ',' in rest:
                 t_name, t_color = rest.rsplit(',', 1)
             t_name = t_name.strip() or tid.strip()
             t_color = t_color.strip() or UNDEFINED_TYPE_COLOR
-            label_types.append(LabelType(id=tid.strip().lower(), name=t_name,
-                                         color=t_color, max_scale_m=max(0.0, max_scale_m)))
+            label_types.append(LabelType(id=tid.strip().lower(), name=t_name, color=t_color,
+                                         max_scale_m=max(0.0, max_scale_m),
+                                         min_scale_m=max(0.0, min_scale_m)))
 
     # Parse [color_presets] section (optional): name = hex, merged over the built-ins.
     color_presets = dict(DEFAULT_COLOR_PRESETS)
