@@ -514,6 +514,14 @@ the whole map is read-only, and the authoring UI is always compiled into the HTM
 - **Self-host bundle.** `host_map.py` (`Run8MapHost.exe`) honours the same
   `RUN8_EDIT_PASSWORD`; with none it stays read-only, and it warns at startup when editing is
   enabled on a public (`0.0.0.0`) bind over plain HTTP.
+- **Bundle is local-only by default (#108).** `packaging/Start Map.bat` passes
+  `--host %HOST%` from `settings.bat`; the shipped template sets `HOST=127.0.0.1`, so a
+  single-player owner just views their route at `http://localhost:8000/` (no LAN exposure, no
+  firewall prompt) and sharing is the opt-in (`HOST=0.0.0.0`; tunnel users stay on
+  `127.0.0.1`). An **older `settings.bat` with no `HOST` line falls back to `0.0.0.0`** in
+  `Start Map.bat`, so an already-public map isn't taken offline by an update. `WORLD_SAVE` is
+  optional there (blank = no `--world`, track map only). `host_map.py`'s own `--host` default
+  is unchanged (`0.0.0.0`); on a loopback bind its banner prints a `Sharing : off` line.
 - **Exposure.** The password is never sent (challenge-response), but the session **token**
   travels in cleartext over plain HTTP, so an unlocked edit session can be hijacked — hence the
   operator docs steer editing hosts to a **TLS tunnel** — **Tailscale Funnel** (primary), or **Caddy** for domain owners —
