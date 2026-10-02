@@ -21,6 +21,9 @@ What it does, in order:
   3. Serve that output, bound to 0.0.0.0 so a forwarded TCP port reaches it, watching
      the world save for live train updates. Editing is READ-ONLY unless an edit
      password is set (RUN8_EDIT_PASSWORD / --edit-password, #56); no upload endpoint.
+     (The bundle's Start Map.bat passes --host from settings.bat, where HOST defaults
+     to 127.0.0.1: a single-player owner just views their route locally, and sharing
+     is the opt-in, #108.)
   4. In the background, check whether a newer bundle has been published and, if so,
      print a one-line notice (never blocks or fails startup).
 
@@ -54,6 +57,9 @@ from version import __version__
 # is needed. Overridable via the RUN8MAP_UPDATE_URL env var; a missing/unreachable
 # endpoint (offline box, no releases yet -> 404) is a silent no-op.
 DEFAULT_UPDATE_URL = "https://api.github.com/repos/sjstein/Run8TrackMapper/releases/latest"
+
+# --host values that keep the map on this PC only (#108: the Start Map.bat default).
+_LOOPBACK_HOSTS = ('127.0.0.1', 'localhost', '::1')
 
 
 def _bundle_root() -> Path:
@@ -205,7 +211,9 @@ def main():
                              'on your router - a DIFFERENT port from Run8\'s UDP port.')
     parser.add_argument('--host', default='0.0.0.0',
                         help='Interface to bind (default 0.0.0.0 = all, so a forwarded port '
-                             'reaches it). Use 127.0.0.1 to keep it local-only for testing.')
+                             'reaches it). Use 127.0.0.1 to keep it local-only: just this PC, '
+                             'no firewall prompt. Start Map.bat passes HOST from settings.bat, '
+                             'which defaults to 127.0.0.1 (#108).')
     parser.add_argument('--world', metavar='FILE',
                         help='Run8 world autosave (.xml) to watch for live trains '
                              '(overrides [visualization] world_save in the config). Point this at '
@@ -342,7 +350,7 @@ def main():
                          daemon=True).start()
 
     # ---- banner --------------------------------------------------------------
-    shown_host = 'localhost' if args.host in ('0.0.0.0', '127.0.0.1') else args.host
+    shown_host = 'localhost' if args.host == '0.0.0.0' or args.host in _LOOPBACK_HOSTS else args.host
     print(f"\n  Serving : {output_dir}  ({'editing enabled (password-gated)' if authoring else 'read-only'})")
     if authoring:
         print(f"  Editing : staff type \"edit\" in the map, then unlock with the password.")
@@ -350,9 +358,13 @@ def main():
         exists = "" if world_save.exists() else "  (not found yet - will pick it up when Run8 saves)"
         print(f"  World   : {world_save}{exists}")
     else:
-        print("  World   : none configured (no live trains). Pass --world or set "
-              "[visualization] world_save.")
+        print("  World   : none configured (track map only, no trains). Set WORLD_SAVE in "
+              "settings.bat,\n            or pass --world / set [visualization] world_save.")
     print(f"  Local   : http://{shown_host}:{args.port}/")
+    if args.host in _LOOPBACK_HOSTS:
+        print("  Sharing : off - only this PC can open the map. To let other people see it, "
+              "set\n            HOST=0.0.0.0 in settings.bat (README: \"SHARING YOUR MAP "
+              "PUBLICLY\").")
     if args.host == '0.0.0.0':
         print(f"  Public  : forward TCP port {args.port} on your router and allow it through "
               f"Windows Firewall,\n            then share http://<your-address>:{args.port}/ "

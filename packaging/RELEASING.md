@@ -55,9 +55,15 @@ Operators download from the repo's **Releases** page:
   - `config-socal.ini` / `areas_socal.ini` ride inside the exe as templates
     (`run8maphost.spec` `datas`); `host_map._seed_from_template` writes them beside the
     exe on first run (with a console warning) if missing, then leaves them alone.
-  - Operator settings (world-save path, port, edit password) live in `settings.bat`,
-    which `Start Map.bat` seeds from the shipped `settings.default.bat` template on first
-    run. The zip ships only the template, never `settings.bat`.
+  - Operator settings (bind host, world-save path, port, edit password) live in
+    `settings.bat`, which `Start Map.bat` seeds from the shipped `settings.default.bat`
+    template on first run. The zip ships only the template, never `settings.bat`.
+  - **A new setting must tolerate an old `settings.bat` that lacks it** (the operator's
+    copy is never refreshed). `Start Map.bat` supplies the fallback, and the fallback is
+    the *pre-existing* behaviour, not the new template default: e.g. `HOST` (#108) is
+    `127.0.0.1` (local-only) in the template for new installs, but an old `settings.bat`
+    with no `HOST` line falls back to `0.0.0.0` so an already-public map isn't taken
+    offline by an update.
   So the staged files in the zip are just `README.txt`, `Start Map.bat`, and
   `settings.default.bat` (plus the exe + `_internal/`).
 - **Zip step** reads the whole file into memory for the sha256 (fine at ~15 MB).
