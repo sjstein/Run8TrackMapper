@@ -19,7 +19,8 @@ API:
     POST   /api/world             -> {ok, trains, vehicles, bytes, version}
                                      push a (gzip-optional) world save into the slot;
                                      enabled by --accept-uploads, gated by --upload-token
-    GET    /api/trains            -> {version, trains:{regionId:[...]}}  (re-plots on change)
+    GET    /api/trains            -> {version, trains:{regionId:[...]}, switches:{regionId:[...]}}
+                                     (re-plots on change; switches = reversed SwitchIndex)
     GET    /api/areas             -> {areas: [...]}          (merged: all sources)
     POST   /api/areas             -> created area dict       (writes writable file)
     PUT    /api/areas/<id>        -> updated area dict
@@ -49,7 +50,7 @@ from config_parser import (parse_config, collect_areas, resolve_areas_files,
 from area_store import AreaStore, AreaStoreError, slugify, _area_to_dict
 from region_extractor import (SectionData, extract_trains, build_section_placer,
                               _is_loco_type)
-from world_parser import parse_world_save, parse_sim_time
+from world_parser import parse_world_save, parse_sim_time, parse_switch_states
 from output_generator import train_to_dict
 from rv_length_db import load_rv_lengths
 
@@ -280,9 +281,15 @@ class AuthoringState:
                 d['has_loco'] = tid in has_loco
         moving_count = sum(1 for v in moving.values() if v)
 
+        # Switch positions from the same save: {regionId: [reversed SwitchIndex]}. A
+        # region absent here has no known state (the viewer then draws both legs).
+        switch_states = parse_switch_states(str(self.world_save)) or {}
+        switches = {region_id: switch_states[prefix]
+                    for region_id, prefix in self.region_prefix.items() if prefix in switch_states}
+
         payload = {'version': mtime, 'trains': trains_by_region, 'totals': totals,
                    'sim_time': parse_sim_time(str(self.world_save)),
-                   'moving_count': moving_count}
+                   'moving_count': moving_count, 'switches': switches}
         self._trains_cache = {'mtime': mtime, 'payload': payload}
         return payload
 

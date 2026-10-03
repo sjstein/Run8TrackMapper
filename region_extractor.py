@@ -70,6 +70,12 @@ class SectionData:
     elevation_start_m: float = 0.0
     elevation_end_m: float = 0.0
     grade_pct: float = 0.0        # track grade %, precomputed by grade.compute_section_grades (#57)
+    # Switch sections only. switch_index = this section's position among the region's
+    # switch sections in TrackDatabase.r8 FILE order, which is the world save's
+    # <switches> SwitchIndex (NOT ordered by section id). path_legs runs parallel to
+    # `paths`: 0 = the normal leg, 1 = the reverse (diverging) leg.
+    switch_index: Optional[int] = None
+    path_legs: Optional[List[int]] = None
 
 
 @dataclass
@@ -916,9 +922,26 @@ def extract_sections(db: TrackDatabase,
                 f = 1.0 - i / (n - 1)
                 path[i] = (path[i][0] + dx * f, path[i][1] + dy * f)
 
+    switch_ordinal = 0   # running count of switch sections, in file order (= save SwitchIndex)
     for section in db.sections:
         # Select which nodes to plot
         nodes_to_plot = select_nodes_to_plot(section)
+
+        # Switch legs: a switch section's 4 nodes pair up as (0,1) and (2,3), one leg
+        # per pair, and the pair holding the is_reverse_path node is the reverse leg.
+        # (Which node carries the switch / reverse flag varies between switches, so
+        # the pairing is the reliable rule - not fixed node numbers.)
+        switch_index, reverse_pair = None, None
+        if any(n.is_switch_node for n in section.nodes):
+            switch_index = switch_ordinal
+            switch_ordinal += 1
+            rev = next((k for k, n in enumerate(section.nodes) if n.is_reverse_path), None)
+            reverse_pair = None if rev is None else rev // 2
+        node_pos = {id(n): k for k, n in enumerate(section.nodes)}
+        path_legs = []   # parallel to all_paths
+
+        def _leg(node):
+            return 1 if reverse_pair is not None and node_pos[id(node)] // 2 == reverse_pair else 0
 
         # For 2-node sections with num_segments pattern (1, 0), find partner positions
         # When one node has num_segments=1 and the other has num_segments=0,
@@ -967,6 +990,7 @@ def extract_sections(db: TrackDatabase,
                 if path_points and len(path_points) >= 2:
                     total_length_m += arc_len
                     all_paths.append(path_points)
+                    path_legs.append(_leg(node))
                 continue
 
             if use_tile_coords:
@@ -1072,6 +1096,7 @@ def extract_sections(db: TrackDatabase,
                     )
                     if seg_length > 0.1:  # 0.1 meters threshold
                         all_paths.append(path_points)
+                        path_legs.append(_leg(node))
 
             else:
                 # Geographic coordinate mode (original behavior)
@@ -1126,6 +1151,7 @@ def extract_sections(db: TrackDatabase,
                     # Only add if segment length is meaningful (> ~1 meter in degrees)
                     if seg_length > 0.00001:
                         all_paths.append(path_points)
+                        path_legs.append(_leg(node))
 
         # Close joints: snap any endpoint that lands on a rebuilt switch far point.
         if point_fix_world:
@@ -1145,7 +1171,10 @@ def extract_sections(db: TrackDatabase,
                 track_type=section.track_type,
                 retarder_mph=section.retarder_mph,
                 elevation_start_m=round(elevation_start_m, 2),
-                elevation_end_m=round(elevation_end_m, 2)
+                elevation_end_m=round(elevation_end_m, 2),
+                # Only a switch with a known reverse leg can show its lined route.
+                switch_index=switch_index if reverse_pair is not None else None,
+                path_legs=path_legs if reverse_pair is not None else None,
             ))
 
     return sections
