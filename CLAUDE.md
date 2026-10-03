@@ -298,7 +298,19 @@ the removed tile-based *viewer*; it's the coordinate system the align viewer is 
   (shorter ones hidden to de-clutter).
 - `lod_color` (`#5f6368`) — colour of a collapsed (zoomed-out) train line.
 - `moving_hysteresis` (2) — keep a train flagged "moving" this many stationary save-cycles after
-  its last real movement, so brief holds don't flicker the highlight. `0` = strict per-cycle.
+  its last real movement, so brief holds don't drop it from **Show only moving**. `0` = strict
+  per-cycle. It does **not** apply to the player highlight (below).
+
+**Player-train highlight (#112).** The world save has no crew/speed field, and `TrainWasAI` is
+false for ~95% of trains (every parked cut and tied-down consist), so it can only rule AI trains
+*out*. The **Highlight player trains** filter (`_isPlayerTrain` in `generate_javascript`) is
+therefore `was_ai === false && has_loco && moved`: `moved` = the train moved in the **latest**
+save interval (strict, no hold — the highlight drops at the first save after the train stops),
+and `has_loco` = the *whole* world-save train contains a locomotive (so a cut of cars a player
+just set out isn't highlighted, and a region-straddling train's loco-less half still is). Both
+are set per train by `serve.py` `trains_payload` next to the held `moving` flag; they're
+live-only, so static output never highlights. Accepted cost of no hold: a player train stopped
+for a full save interval loses the highlight until it moves again.
 
 **Per-region `[region.*] terrain_tile_dir`** — optional override of that region's terrain-tile
 (`.tr4`) directory; when omitted the tiles come from `[visualization] region_dir`'s `TerrainTiles`.
