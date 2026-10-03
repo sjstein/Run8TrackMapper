@@ -255,6 +255,8 @@ ALTERNATIVE - Caddy (if you already own a domain name):
   and unzip it OVER this folder (overwrite when asked). Your own files are safe:
   settings.bat, config-socal.ini and areas_socal.ini are NOT in the zip, so your
   edits and labels are kept - only the program, README, and the templates update.
+  The first start after an update rebuilds the map (a couple of minutes, like the
+  very first run) so you get the new version's map page; later starts are quick.
 
 - Updating from an older version: your existing settings.bat has no HOST line.
   The map then stays SHARED (0.0.0.0), exactly as it behaved before, so a public

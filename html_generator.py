@@ -130,7 +130,7 @@ def generate_javascript() -> str:
             coloredCars: false,     // false = paint every non-loco car the box-car colour
             showCuts: false,        // false = only consists led by a loco; true = also loose cuts
             showOnlyMoving: false,  // true = only plot trains moving between saves (live only)
-            highlightPlayers: false // true = highlight player trains (moving && not AI) with a bright spine
+            highlightPlayers: false // true = highlight player trains (moved this save && not AI && has a loco) with a bright spine
         },
 
         // Base map layers
@@ -1306,12 +1306,18 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const lead = train && train.vehicles && train.vehicles[0];
         return !!(lead && _isLocoType(lead.unit_type));
     }
-    // A "player" train (heuristic): MOVING and NOT AI-crewed (TrainWasAI false). The
-    // world save has no crew field, so this is the best proxy - a moving non-AI train
-    // is almost certainly under a player. `moving` is computed server-side by diffing
-    // consecutive saves (serve.py); absent (static output) => never a player here.
+    // A "player" train (heuristic): NOT AI-crewed (TrainWasAI false), HAS A LOCOMOTIVE,
+    // and MOVED in the latest save interval. The world save has no crew field, and
+    // TrainWasAI is false for ~95% of trains (every parked cut and tied-down consist),
+    // so it only rules AI trains out; movement is the evidence of someone driving.
+    // `moved` is the strict per-save flag, NOT `moving` (which holds for [trains]
+    // moving_hysteresis saves so "Show only moving" doesn't flicker): with the hold, a
+    // train a player had left stayed highlighted for many saves (#112). `has_loco`
+    // drops a cut of cars a player just set out - it moved, but nobody can be crewing
+    // it. Both come from serve.py (diffing consecutive saves, whole-train loco check);
+    // absent (static output) => never a player here.
     function _isPlayerTrain(train) {
-        return !!(train.moving && train.was_ai === false);
+        return !!(train.moved && train.has_loco && train.was_ai === false);
     }
     function carTypeColor(t) {
         const m = (MapApp.manifest && MapApp.manifest.car_type_colors) || {};
@@ -3595,7 +3601,7 @@ ALIGN_JS = r'''
             ['coloredCars', 'Show colored cars', 'Colour non-loco cars by type. Off: all cars use the box-car colour.'],
             ['showCuts', 'Show cuts of cars', 'Also plot loose cuts of cars (rail vehicles not led by a locomotive).'],
             ['showOnlyMoving', 'Show only moving', 'Only plot trains that moved since the last world save (live only).'],
-            ['highlightPlayers', 'Highlight player trains', 'Highlight trains that are moving and not AI-crewed (likely player-driven) with a bright spine (live only).']
+            ['highlightPlayers', 'Highlight player trains', 'Highlight trains that have a locomotive, are not AI-crewed, and moved since the last world save (likely player-driven) with a bright spine. The highlight drops at the first save after the train stops (live only).']
         ];
         const pop = document.createElement('div'); pop.id = 'train-options-popover';
         pop.style.cssText = 'position:fixed;z-index:3000;background:var(--panel-bg);color:var(--panel-fg);border:1px solid var(--border-strong);border-radius:6px;'

@@ -16,7 +16,8 @@ on the same Windows box that runs the operator's r8server.
 What it does, in order:
   1. Parse the operator's config (the same INI `output_generator.py` uses).
   2. Generate the map (align viewer; the authoring UI is compiled in but inert until
-     editing is unlocked) if the output is missing, or always with --regenerate.
+     editing is unlocked) if the output is missing, was built by a different bundle
+     version (so an update delivers its viewer fixes), or always with --regenerate.
      Skipped with --no-generate.
   3. Serve that output, bound to 0.0.0.0 so a forwarded TCP port reaches it, watching
      the world save for live train updates. Editing is READ-ONLY unless an edit
@@ -187,6 +188,30 @@ def _seed_from_template(target: Path, template_name: str, kind: str) -> bool:
     return True
 
 
+# Records which bundle version built output/<name>/, so an updated bundle knows to
+# rebuild. A sidecar file rather than a manifest field: serve.py rewrites
+# manifest.json when labels are edited, and only this launcher cares about it.
+BUILD_STAMP_NAME = '.bundle_version'
+
+
+def _read_build_stamp(output_dir: Path):
+    """Bundle version that built `output_dir`, or None when unknown (no stamp: a map
+    built before stamping existed, or by output_generator.py run directly)."""
+    try:
+        return (output_dir / BUILD_STAMP_NAME).read_text(encoding='utf-8').strip() or None
+    except OSError:
+        return None
+
+
+def _write_build_stamp(output_dir: Path):
+    """Best-effort: a failed write only means the next start rebuilds again."""
+    try:
+        (output_dir / BUILD_STAMP_NAME).write_text(__version__ + '\n', encoding='utf-8')
+    except OSError as e:
+        print(f"  Note: could not record the map's build version ({e}); "
+              f"the next start will rebuild it again.")
+
+
 def _resolve_world_save(args, config):
     """Pick the world save to watch: --world wins, else [visualization] world_save.
     May not exist yet (Run8 hasn't autosaved); serve tolerates that and picks it up
@@ -291,7 +316,20 @@ def main():
     config.world_save = None   # never let generation fall back to a (maybe-missing) config path
 
     # ---- 1) generate the production map if needed ---------------------------
-    need_generate = args.regenerate or not index_html.exists()
+    # Also rebuild when the map was made by a different bundle version: the viewer
+    # page, region JSON and manifest are all generated, so an operator who unzips a
+    # new release would otherwise keep serving the old build and never get its fixes.
+    built_by = _read_build_stamp(output_dir)
+    if args.regenerate:
+        why = "forced by --regenerate"
+    elif not index_html.exists():
+        why = "no existing output"
+    elif built_by != __version__:
+        why = (f"built by bundle {built_by}, this is {__version__}" if built_by
+               else f"built by an older bundle, this is {__version__}")
+    else:
+        why = None
+    need_generate = why is not None
     if args.no_generate:
         if not index_html.exists():
             print(f"ERROR: --no-generate given but no map found at {index_html}.\n"
@@ -299,15 +337,15 @@ def main():
             sys.exit(1)
         need_generate = False
     if need_generate:
-        why = "forced by --regenerate" if args.regenerate else "no existing output"
-        print(f"\nGenerating map ({why}) - this can take a couple of minutes on the "
-              f"first run; the map will start serving when it finishes...")
+        print(f"\nGenerating map ({why}) - this can take a couple of minutes; "
+              f"the map will start serving when it finishes...")
         # Bake the current save only if it's actually there; otherwise build an
         # empty-of-trains map and let the live poll fill it in within seconds.
         bake = str(world_save) if (world_save and world_save.exists()) else None
         # Always include the authoring UI; it stays inert until an edit password is set
         # and a staffer unlocks (#56). Editing itself is gated at serve time, below.
         generate_output(config, world_save=bake)
+        _write_build_stamp(output_dir)   # only after a complete build; a failed one retries
         print("Map generated.")
     else:
         print(f"\nUsing existing map at {output_dir} (pass --regenerate to rebuild).")

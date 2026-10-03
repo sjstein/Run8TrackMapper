@@ -47,7 +47,8 @@ from urllib.parse import urlsplit, unquote
 from config_parser import (parse_config, collect_areas, resolve_areas_files,
                             AREA_TYPE_DEFAULT)
 from area_store import AreaStore, AreaStoreError, slugify, _area_to_dict
-from region_extractor import SectionData, extract_trains, build_section_placer
+from region_extractor import (SectionData, extract_trains, build_section_placer,
+                              _is_loco_type)
 from world_parser import parse_world_save, parse_sim_time
 from output_generator import train_to_dict
 from rv_length_db import load_rv_lengths
@@ -246,8 +247,9 @@ class AuthoringState:
         # Movement: a train whose representative position changed since the previous
         # save moved this cycle. Hysteresis (H = self.move_hysteresis save-cycles) keeps
         # a train flagged "moving" for H further STATIONARY cycles after its last real
-        # movement, so a brief hold (e.g. at a signal) doesn't flicker the highlight off
-        # (H = 0 -> strict per-cycle). Live-only (needs two saves; first save = baseline).
+        # movement, so a brief hold (e.g. at a signal) doesn't drop it from "Show only
+        # moving" (H = 0 -> strict per-cycle). Live-only (needs two saves; first save =
+        # baseline). The player highlight does NOT use this held flag - see `moved` below.
         H = self.move_hysteresis
         still_since, moving = {}, {}
         for tid, pos in cur_pos.items():
@@ -262,9 +264,20 @@ class AuthoringState:
                 moving[tid] = s <= H           # within the trailing hysteresis window
         self._prev_positions = cur_pos
         self._still_since = still_since
+        # Player-highlight inputs (#112). `moving` carries the hysteresis hold (right
+        # for "Show only moving"), but a held flag keeps a train a player has left
+        # highlighted for H more saves, so the highlight uses `moved` = moved in THIS
+        # save interval, no hold. `has_loco` is judged on the WHOLE world-save train
+        # (a region-straddling train's far half may hold no engine): a cut of cars a
+        # player just set out did move, but nobody can be crewing it.
+        has_loco = {tr.train_id for tr in parsed
+                    if any(_is_loco_type(v.unit_type) for v in tr.vehicles)}
         for dicts in trains_by_region.values():
             for d in dicts:
-                d['moving'] = bool(moving.get(d['train_id'], False))
+                tid = d['train_id']
+                d['moving'] = bool(moving.get(tid, False))
+                d['moved'] = still_since.get(tid) == 0
+                d['has_loco'] = tid in has_loco
         moving_count = sum(1 for v in moving.values() if v)
 
         payload = {'version': mtime, 'trains': trains_by_region, 'totals': totals,
