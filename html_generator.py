@@ -1421,15 +1421,21 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         }
 
         // Zoom LOD: when zoomed out past the threshold (scale bar >= lodScaleM,
-        // default 300 m), drop singles / short trains and draw each longer train
-        // (> lodMinCars cars, default 3) as ONE solid line in its lead car's colour
-        // that just shows the train's length. Thresholds live in TRAIN_STYLE (moved
-        // to config after review; fall back to 300 / 3 here).
+        // default 300 m), draw each train as ONE solid line that just shows its
+        // length. To de-clutter, short LOOSE CUTS (no locomotive, <= lodMinCars
+        // vehicles, default 3) are dropped - but never a train with a locomotive
+        // (light power / a short move would otherwise vanish, #111) and never a
+        // highlighted player train. `has_loco` (serve.py) covers the whole world-save
+        // train, so a region-straddling train's loco-less half isn't dropped; static
+        // output lacks it, so fall back to this piece's own vehicles. Thresholds live
+        // in TRAIN_STYLE (moved to config after review; fall back to 300 / 3 here).
         MapApp._trainLOD = _trainCollapsed() ? 'collapsed' : 'detailed';
         if (MapApp._trainLOD === 'collapsed') {
             const minCars = (window.TRAIN_STYLE && TRAIN_STYLE.lodMinCars) || 3;
             for (const {train, cars, highlight} of drawn) {
-                if (cars.length > minCars) drawCollapsedTrain(regionId, train, cars, layers.trains, highlight);
+                const hasLoco = train.has_loco || cars.some(c => c.isLoco);
+                if (highlight || hasLoco || cars.length > minCars)
+                    drawCollapsedTrain(regionId, train, cars, layers.trains, highlight);
             }
             return;
         }
@@ -1566,7 +1572,10 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const lead = cars[0];
         const railColor = rvBodyColor(lead.v, lead.isLoco);   // railroad leader colour
 
-        const line = L.polyline([frontEnd, ...cen, rearEnd], {
+        // A lone vehicle (a single light engine, #111) has no neighbour to pick its
+        // outer ends from, so trace its own body instead of end -> centre -> end.
+        const linePts = cars.length === 1 ? ob[0] : [frontEnd, ...cen, rearEnd];
+        const line = L.polyline(linePts, {
             color: highlight ? PLAYER_HL_COLOR : COLLAPSED_BODY_COLOR,
             weight: rvBodyWeightPx(),
             opacity: 0.95,
@@ -1585,16 +1594,27 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         // cars shown via "Show cuts of cars" has no lead loco and gets no arrow.
         const lb = lead.v.body;
         if (lead.isLoco && lb && lb.length >= 2) {
-            const nb = cars.length > 1 ? _midpoint(cars[1].v.body) : _midpoint(cen);
             const e0 = lb[0], eN = lb[lb.length - 1];
-            const tip = _distLL(e0, nb) >= _distLL(eN, nb) ? e0 : eN;   // end away from the train
+            let tip, refs;
+            if (cars.length > 1) {
+                const nb = _midpoint(cars[1].v.body);
+                tip = _distLL(e0, nb) >= _distLL(eN, nb) ? e0 : eN;   // end away from the train
+                refs = centers;
+            } else {
+                // Lone loco: no train to point away from, so point the way it faces
+                // (same front0 resolution as the zoomed-in loco arrow), heading taken
+                // from its back end.
+                const frontAt0 = (lead.v.front0 !== false) !== LOCO_FACING_FLIP;
+                tip = frontAt0 ? e0 : eN;
+                refs = [frontAt0 ? eN : e0];
+            }
             const arrowColor = highlight ? PLAYER_HL_COLOR : railColor;
-            const arrow = L.polygon(_arrowLatLngs(tip, centers), {
+            const arrow = L.polygon(_arrowLatLngs(tip, refs), {
                 color: arrowColor, fillColor: arrowColor, fillOpacity: 1,
                 weight: 1, opacity: 1, interactive: false
             });
             arrow._rvArrow = true;
-            arrow._headTip = tip; arrow._headRefs = centers;
+            arrow._headTip = tip; arrow._headRefs = refs;
             arrow.addTo(layerGroup);
         }
     }
