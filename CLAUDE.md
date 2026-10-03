@@ -294,8 +294,9 @@ the removed tile-based *viewer*; it's the coordinate system the align viewer is 
 - `deoverlap` (true) — lay each consist's cars end-to-end so coupled cars don't overlap
   (`false` = raw per-truck placement).
 - `lod_scale_m` (300) — at/above this scale-bar reading (m), long trains collapse to a single line.
-- `lod_min_cars` (3) — while collapsed, only trains with **more than** this many cars are drawn
-  (shorter ones hidden to de-clutter).
+- `lod_min_cars` (3) — while collapsed, **loose cuts** (no locomotive) with this many vehicles or
+  fewer are hidden to de-clutter. A train with a locomotive (incl. a lone light engine, drawn as a
+  short line + facing arrow) and a highlighted player train are always drawn (#111).
 - `lod_color` (`#5f6368`) — colour of a collapsed (zoomed-out) train line.
 - `moving_hysteresis` (2) — keep a train flagged "moving" this many stationary save-cycles after
   its last real movement, so brief holds don't drop it from **Show only moving**. `0` = strict
