@@ -28,7 +28,7 @@ how Run8 itself round-trips these saves.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 import xml.etree.ElementTree as ET
 
 
@@ -181,6 +181,32 @@ def parse_sim_time(path: str) -> Optional[str]:
         return None
     text = root.findtext("date")
     return text.strip() if text and text.strip() else None
+
+
+def parse_switch_states(path: str) -> Optional[Dict[int, List[int]]]:
+    """Return which switches are thrown reverse, per region, from the save's
+    ``<switches>`` section: ``{route_prefix: sorted [SwitchIndex, ...]}``.
+
+    Every region that appears in the section gets an entry (an empty list = all its
+    switches lined normal), so a missing key means "no state known", not "all
+    normal". ``SwitchIndex`` is the switch's position among that region's switch
+    sections in TrackDatabase.r8 file order (see ``SectionData.switch_index``).
+    Returns ``None`` if the save can't be read or has no ``<switches>`` section.
+    """
+    try:
+        root = ET.parse(path).getroot()
+    except Exception:  # noqa: BLE001 - a torn/missing save just has no switch states
+        return None
+    section = root.find("switches")
+    if section is None:
+        return None
+    states: Dict[int, List[int]] = {}
+    for sw in section.findall("SavedSwitchState"):
+        prefix = _to_int(sw.findtext("RoutePrefix"))
+        reverse = states.setdefault(prefix, [])
+        if _to_bool(sw.findtext("IsThrownReverse")):
+            reverse.append(_to_int(sw.findtext("SwitchIndex")))
+    return {p: sorted(v) for p, v in states.items()}
 
 
 if __name__ == "__main__":

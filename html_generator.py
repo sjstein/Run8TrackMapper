@@ -78,6 +78,36 @@ def generate_javascript() -> str:
         if (!section.is_switch) return regionTrackColor;
         return section.is_ctc_switch ? COLORS.switchCtc : COLORS.switch;
     }
+    // Switch positions: each switch path carries its leg (0 normal / 1 reverse) and the
+    // switch's save index. While the overlay is on and the region's switch states are
+    // known, the leg the switch is NOT lined for is drawn at a fraction of the track
+    // opacity, so the set route reads at a glance. Every track-opacity write goes
+    // through trackLineOpacity so the Track Opacity slider and the dimming compose.
+    const SWITCH_UNLINED_OPACITY = 0.2;   // unlined leg, as a fraction of the track opacity
+    function _trackOpacityFor(regionId, leg, switchIndex) {
+        const base = (MapApp.trackOpacity != null) ? MapApp.trackOpacity : 0.8;
+        if (leg == null || switchIndex == null || !MapApp.overlayStates.switchPositions) return base;
+        const rev = MapApp.switchReverse.get(regionId);
+        if (!rev) return base;                       // no known state: draw both legs
+        const lined = rev.has(switchIndex) ? 1 : 0;
+        return leg === lined ? base : base * SWITCH_UNLINED_OPACITY;
+    }
+    function trackLineOpacity(regionId, pl) {
+        return _trackOpacityFor(regionId, pl._leg, pl._switchIndex);
+    }
+    // Re-apply opacity to every switch path (after a state change or overlay toggle).
+    function refreshSwitchLegs() {
+        MapApp.loadedRegions.forEach((region, regionId) => {
+            if (!region.layers || !region.layers.sections) return;
+            region.layers.sections.eachLayer(group => {
+                if (!group.eachLayer) return;
+                group.eachLayer(pl => {
+                    if (pl._trackLine && pl._leg != null && pl.setStyle)
+                        pl.setStyle({ opacity: trackLineOpacity(regionId, pl) });
+                });
+            });
+        });
+    }
     // Re-weight all (non-selected) track sections for the current zoom.
     function updateTrackWidths() {
         const w = trackWeightPx();
@@ -123,8 +153,13 @@ def generate_javascript() -> str:
             aiLocations: false,
             tileBoundaries: false,
             trains: false,
-            grade: false            // Grade heat-map colour mode (#57)
+            grade: false,           // Grade heat-map colour mode (#57)
+            switchPositions: true   // dim the leg each switch is NOT lined for (world save)
         },
+        // regionId -> Set of SwitchIndex thrown reverse, from the world save (baked into
+        // the region JSON, then kept current by the live /api/trains poll). A region with
+        // no entry has no known state, so both legs of its switches draw normally.
+        switchReverse: new Map(),
         // Train display options (the "Options" button next to the Trains overlay).
         trainOptions: {
             coloredCars: false,     // false = paint every non-loco car the box-car colour
@@ -571,7 +606,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             {id: 'industries', label: 'Industries'},
             {id: 'signals', label: 'Signals'},
             {id: 'tileBoundaries', label: 'Tile Boundaries'},
-            {id: 'trains', label: 'Trains'}
+            {id: 'trains', label: 'Trains'},
+            {id: 'switchPositions', label: 'Switch positions',
+             title: 'Dim the leg each switch is not lined for (needs a world save)'}
         ];
         // Grade heat-map colour mode (#57): a track-colouring toggle, shown only when the
         // build carries grade config. Its default-on state comes from [grade] show_by_default.
@@ -587,6 +624,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 <input type="checkbox" id="overlay-${overlay.id}" ${checked}>
                 <label for="overlay-${overlay.id}">${overlay.label}</label>
             `;
+            if (overlay.title) item.title = overlay.title;
             overlayList.appendChild(item);
 
             const checkbox = item.querySelector('input');
@@ -1037,6 +1075,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             const data = await response.json();
 
             console.log(`Loaded region ${regionId}: ${data.sections.length} sections`);
+            // Switch positions baked from the save (live polling replaces them).
+            if (Array.isArray(data.switches_reverse) && !MapApp.switchReverse.has(regionId))
+                MapApp.switchReverse.set(regionId, new Set(data.switches_reverse));
 
             // Create layer groups
             const layers = {
@@ -1059,14 +1100,17 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 // Each section may have multiple paths (especially switches)
                 const sectionGroup = L.featureGroup();
 
-                for (const path of section.paths) {
+                section.paths.forEach((path, pathIdx) => {
                     const trackColor = switchColor(section, regionTrackColor);
+                    const leg = section.legs ? section.legs[pathIdx] : null;   // switch paths only
                     const polyline = L.polyline(path, {
                         color: trackColor,
                         weight: trackWeightPx(),   // zoom-scaled (updateTrackWidths on zoomend)
-                        opacity: 0.8
+                        opacity: _trackOpacityFor(regionId, leg, section.switch_index)
                     });
                     polyline._trackLine = true;
+                    polyline._leg = leg;                          // 0 normal / 1 reverse leg
+                    polyline._switchIndex = section.switch_index; // world-save SwitchIndex
                     polyline._sectionId = section.id;
                     polyline._origColor = trackColor;   // per-polyline normal colour (region/switch aware)
                     polyline._gradePct = section.grade_pct || 0;   // for the Grade colour mode (#57)
@@ -1144,7 +1188,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     });
 
                     sectionGroup.addLayer(polyline);
-                }
+                });
 
                 layers.sections.addLayer(sectionGroup);
                 const originalColor = switchColor(section, regionTrackColor);
@@ -2151,6 +2195,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         // Trains overlay also gates the zoom-based destination labels.
         if (overlayId === 'trains') updateTrainLabelVisibility();
 
+        // Switch positions: not a layer group - re-dim (or restore) the switch legs.
+        if (overlayId === 'switchPositions') refreshSwitchLegs();
+
         // When toggling industries: colour the industry tracks green (or restore on
         // off), then, if a Local Filter is active, recolour the labels (red matched /
         // grey others). Tracks stay green regardless of the filter.
@@ -2831,7 +2878,7 @@ ALIGN_JS = r'''
         for (const [id, reg] of MapApp.loadedRegions){
             if (reg.layers && reg.layers.sections){
                 reg.layers.sections.eachLayer(sg => {
-                    if (sg.eachLayer) sg.eachLayer(pl => { if (pl.setStyle) pl.setStyle({opacity: op}); });
+                    if (sg.eachLayer) sg.eachLayer(pl => { if (pl.setStyle) pl.setStyle({opacity: pl._trackLine ? trackLineOpacity(id, pl) : op}); });
                     else if (sg.setStyle) sg.setStyle({opacity: op});
                 });
             }
@@ -3461,6 +3508,12 @@ ALIGN_JS = r'''
         if (j.version === MapApp.trainsVersion && regionsKey === MapApp._trainsRegionsKey) return;
         MapApp.trainsVersion = j.version;
         MapApp._trainsRegionsKey = regionsKey;
+        // Live switch positions from the same save (regions absent keep what they had).
+        if (j.switches) {
+            for (const regionId of MapApp.loadedRegions.keys())
+                if (j.switches[regionId]) MapApp.switchReverse.set(regionId, new Set(j.switches[regionId]));
+            refreshSwitchLegs();
+        }
         const T = MapApp.worldToLatLon;
         for (const [regionId, region] of MapApp.loadedRegions){
             const fresh = j.trains[regionId] || [];

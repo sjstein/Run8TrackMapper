@@ -183,6 +183,34 @@ the Area Labels overlay + the label's category visible, pans to the marker, and 
 flashes it (`flashAreaMarker`, a CSS `filter` glow - never `transform`, which Leaflet owns for
 positioning/rotation). Guarded with `typeof` checks so the base build degrades gracefully.
 
+##### Switch positions (world save `<switches>`)
+The save's `<switches>` section has one `SavedSwitchState` per switch (`RoutePrefix`,
+`SwitchIndex`, `IsThrownReverse`, `IsUnlockedCTCSwitch`). A **Switch positions** overlay (on by
+default) dims the leg each switch is **not** lined for, so the set route reads at a glance.
+- **Index mapping:** `SwitchIndex` is the section's position among the region's switch sections
+  (any `is_switch_node`) in **TrackDatabase.r8 file order** - not ordered by `section.index`
+  (that ordering agrees only at chance level). Verified against trucks sitting on switches in
+  three saves (99%+ agreement). Counts match the save exactly in all 11 SoCal regions.
+- **Legs:** a switch section's 4 nodes pair up as (0,1) and (2,3), one leg each; the pair holding
+  the `is_reverse_path` node is the reverse leg. Which node carries the switch / reverse flag
+  varies, and `next_section[k]` is not reliably node k's neighbour (often only 3 entries), so the
+  pairing is the rule. On a switch a truck's `startNodeIndex` is 0-3 and `// 2` is its leg.
+- **Data:** `extract_sections` sets `SectionData.switch_index` and `path_legs` (parallel to
+  `paths`, 0 normal / 1 reverse), emitted as `switch_index` / `legs`.
+  `world_parser.parse_switch_states` -> `{prefix: [reversed SwitchIndex]}` (every region in the
+  save gets an entry; missing = unknown). Baked into region JSON as `switches_reverse`; live via
+  `serve.py` `/api/trains` -> `switches: {regionId: [...]}`.
+- **Viewer:** each switch path gets `_leg` / `_switchIndex`; all track opacity goes through
+  `trackLineOpacity` (`_trackOpacityFor`) so the Track Opacity slider and the dimming compose
+  (`SWITCH_UNLINED_OPACITY` = 0.2 of the track opacity). `MapApp.switchReverse` (regionId -> Set)
+  is seeded from the baked data and replaced by each live poll; `refreshSwitchLegs` re-applies.
+  No known state for a region = both legs drawn. Only the switch section's own leg is dimmed
+  (~20-40 m), so it reads when zoomed in; the track beyond the switch is unchanged.
+- **#109 (stand-type flag colours) is deferred:** `switch_stand_type` is 0-4 on switch sections
+  (all CTC switches are 0); Run8's executable names New Century red/green and yellow/green and
+  Star SP-yellow / SP-red / red/green targets, but which number is which must be confirmed in the
+  sim before colouring by it.
+
 ##### Live world-save watching (`serve.py --world`)
 ```bash
 python serve.py <config.ini> --world <world_save.xml> [--no-authoring]

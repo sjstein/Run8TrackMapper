@@ -36,7 +36,9 @@ def section_to_dict(section: SectionData) -> dict:
         "retarder_mph": section.retarder_mph,
         "elevation_start_m": section.elevation_start_m,
         "elevation_end_m": section.elevation_end_m,
-        "grade_pct": section.grade_pct
+        "grade_pct": section.grade_pct,
+        **({"switch_index": section.switch_index, "legs": section.path_legs}
+           if section.switch_index is not None else {}),
     }
 
 
@@ -395,15 +397,17 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
     world_trains = None
     world_totals = None
     world_sim_time = None
+    switch_states = None
     world_save_path = world_save or (str(config.world_save) if config.world_save else None)
     if world_save_path:
-        from world_parser import parse_world_save, parse_sim_time
+        from world_parser import parse_world_save, parse_sim_time, parse_switch_states
         print(f"\nLoading world save: {world_save_path}")
         world_trains = parse_world_save(world_save_path)
         n_veh = sum(len(t.vehicles) for t in world_trains)
         # Whole-save totals for the viewer status line (region-independent).
         world_totals = {"trains": len(world_trains), "vehicles": n_veh}
         world_sim_time = parse_sim_time(world_save_path)   # sim clock (<date> tag)
+        switch_states = parse_switch_states(world_save_path)   # {prefix: [reversed SwitchIndex]}
         print(f"  Parsed {len(world_trains)} train(s), {n_veh} rail vehicle(s)")
 
     # Load the optional rail-vehicle length DB (draws true car length over trucks).
@@ -465,6 +469,10 @@ def generate_output(config: VisualizationConfig, tile_dir: str = None, generate_
         print(f"\nWriting region file: {region_file}")
 
         region_dict = region_to_dict(region_data)
+        # Switch positions from the baked save (live ones come from serve.py's
+        # /api/trains). Present only when the save lists this region's switches.
+        if switch_states is not None and region_config.route_prefix in switch_states:
+            region_dict["switches_reverse"] = switch_states[region_config.route_prefix]
         with open(region_file, 'w', encoding='utf-8') as f:
             json.dump(region_dict, f, indent=2)
 
