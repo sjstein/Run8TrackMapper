@@ -534,6 +534,12 @@ the whole map is read-only, and the authoring UI is always compiled into the HTM
   `Start Map.bat`, so an already-public map isn't taken offline by an update. `WORLD_SAVE` is
   optional there (blank = no `--world`, track map only). `host_map.py`'s own `--host` default
   is unchanged (`0.0.0.0`); on a loopback bind its banner prints a `Sharing : off` line.
+- **Updates rebuild the map once.** The viewer page, region JSON and manifest are all generated,
+  so an updated bundle serving an existing output would keep the old build. `host_map.py`
+  stamps `output/<name>/.bundle_version` (`BUILD_STAMP_NAME`, a sidecar rather than a manifest
+  field because `serve.py` rewrites `manifest.json` on label edits) after a successful
+  generation, and regenerates fully on startup when the stamp differs from `__version__` or is
+  missing. Labels survive (the areas file is the source of truth); `--no-generate` still skips.
 - **Exposure.** The password is never sent (challenge-response), but the session **token**
   travels in cleartext over plain HTTP, so an unlocked edit session can be hijacked — hence the
   operator docs steer editing hosts to a **TLS tunnel** — **Tailscale Funnel** (primary), or **Caddy** for domain owners —

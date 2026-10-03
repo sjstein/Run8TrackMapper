@@ -66,4 +66,10 @@ Operators download from the repo's **Releases** page:
     offline by an update.
   So the staged files in the zip are just `README.txt`, `Start Map.bat`, and
   `settings.default.bat` (plus the exe + `_internal/`).
+- **An update rebuilds the operator's map once.** `host_map.py` writes the bundle version
+  to `output/<name>/.bundle_version` after each successful generation and regenerates on
+  startup when it differs from `version.py` (or is missing, e.g. a map built before
+  stamping). So shipping viewer / output changes only needs a version bump - but **every**
+  version bump costs each operator one full regeneration (a couple of minutes) on their
+  first start after updating, even for a launcher-only change.
 - **Zip step** reads the whole file into memory for the sha256 (fine at ~15 MB).
