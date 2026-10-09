@@ -477,6 +477,13 @@ def interpolate_curve(start_pos, end_pos, radius, arc_length, curve_sign, num_se
         points.append((x2, z2))
         return points
 
+    # Run8 reverses the stored sign for arcs greater than 180 degrees.  Keep the
+    # original sign for the semicircle path above: near-180-degree records use
+    # that sign to select their bulge side and must not be flipped twice.
+    effective_sign = curve_sign
+    if curve_degrees is not None and abs(curve_degrees) > 180.0:
+        effective_sign = -effective_sign
+
     # Standard arc calculation for non-semicircle curves
     # Perpendicular to chord (rotated 90 degrees)
     perp_x = -dz / chord_len
@@ -488,8 +495,8 @@ def interpolate_curve(start_pos, end_pos, radius, arc_length, curve_sign, num_se
         return [(x1, z1), (x2, z2)]
     h = math.sqrt(h_squared)
 
-    center_x = mid_x + h * perp_x * curve_sign
-    center_z = mid_z + h * perp_z * curve_sign
+    center_x = mid_x + h * perp_x * effective_sign
+    center_z = mid_z + h * perp_z * effective_sign
 
     # Calculate angles for start and end points relative to center
     angle_start = math.atan2(z1 - center_z, x1 - center_x)
@@ -552,10 +559,6 @@ def interpolate_curve_geographic(start_latlon, end_latlon, radius, arc_length, c
 
     origin_lat = start_lat
     origin_lon = start_lon
-
-    # Flip curve sign for angles > 180
-    if abs(curve_degrees) > 180:
-        curve_sign = -curve_sign
 
     def latlon_to_local_meters(lat, lon):
         meters_north = (lat - origin_lat) * METERS_PER_DEGREE_LAT
@@ -1032,19 +1035,13 @@ def extract_sections(db: TrackDatabase,
                         # Z increases going North, but local z is negative going North
                         end_pos_z -= tile_diff_z * tile_based_config.tile_height
 
-                    # Determine curve sign for interpolation
-                    # Flip for curves > 180 degrees (same as geographic mode)
-                    curve_sign = node.curve_sign
-                    if abs(node.curve_deg) > 180:
-                        curve_sign = -curve_sign
-
                     # Interpolate curve in local coordinates directly
                     curve_points_local = interpolate_curve(
                         (node.position[0], node.position[1], node.position[2]),
                         (end_pos_x, end_pos_y, end_pos_z),
                         abs(node.radius_meters),
                         node.arcLen_meters,
-                        curve_sign,
+                        node.curve_sign,
                         max(50, int(node.num_segments / 4)),
                         node.curve_deg
                     )
