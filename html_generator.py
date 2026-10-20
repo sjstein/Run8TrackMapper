@@ -978,6 +978,14 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             const os = document.getElementById('opacity-slider'); if (os) st.op.map = +os.value;
             const ts = document.getElementById('track-opacity-slider'); if (ts) st.op.track = +ts.value;
             const fs = document.getElementById('area-font-slider'); if (fs) st.op.label = +fs.value;
+            const searchInput = document.getElementById('search-input');
+            const searchType = document.getElementById('search-type');
+            const searchField = document.querySelector('input[name="train-field"]:checked');
+            if (searchInput && searchType) st.search = {
+                query: searchInput.value,
+                type: searchType.value,
+                trainField: searchField ? searchField.value : 'all'
+            };
             if (MapApp.trainOptions) st.trainOpts = Object.assign({}, MapApp.trainOptions);
             if (MapApp.signalTypeVisible) st.sig = Object.assign({}, MapApp.signalTypeVisible);
             if (MapApp.areaTypeVisible) st.area = { master: !!MapApp.overlayStates.areaLabels, types: Object.assign({}, MapApp.areaTypeVisible) };
@@ -1024,6 +1032,18 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 if (st.align && MapApp.align){ if (typeof st.align.lat==='number') MapApp.align.lat = st.align.lat; if (typeof st.align.lon==='number') MapApp.align.lon = st.align.lon; if (typeof st.align.scale==='number') MapApp.align.scale = st.align.scale; }
                 // Sliders (set value + fire the existing input handler).
                 if (st.op){ _applySlider('opacity-slider', st.op.map); _applySlider('track-opacity-slider', st.op.track); _applySlider('area-font-slider', st.op.label); }
+                // Last search: keep the user's previous value ready for the next open.
+                if (st.search) {
+                    const input = document.getElementById('search-input');
+                    const type = document.getElementById('search-type');
+                    const field = document.querySelector('input[name="train-field"][value="'+st.search.trainField+'"]');
+                    if (input && typeof st.search.query === 'string') input.value = st.search.query;
+                    if (field) field.checked = true;
+                    if (type && st.search.type) {
+                        type.value = st.search.type;
+                        type.dispatchEvent(new Event('change', {bubbles:true}));
+                    }
+                }
                 // Filter states (applied to layers after load).
                 if (st.trainOpts && MapApp.trainOptions) Object.assign(MapApp.trainOptions, st.trainOpts);
                 if (st.sig && MapApp.signalTypeVisible) Object.assign(MapApp.signalTypeVisible, st.sig);
@@ -1339,6 +1359,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     // [car_type_colors] (keyed by INDUSTRY_CONFIG_CAR_TYPE), falling back to
     // [colors] train.
     const PLAYER_HL_COLOR = '#00e5ff';   // bright cyan spine for player-crewed trains
+    const FOLLOW_COLOR = '#ffd400';      // followed train: every vehicle and spine
     const COLLAPSED_BODY_COLOR = (window.TRAIN_STYLE && TRAIN_STYLE.lodColor) || '#5f6368';  // collapsed train line colour ([trains] lod_color)
                                              // (the head arrow carries the railroad colour)
     function _isLocoType(unitType) {
@@ -1461,7 +1482,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             }
             if (!cars.length) continue;
             const highlight = !!(opts.highlightPlayers && _isPlayerTrain(train));
-            drawn.push({train, cars, highlight});
+            const followed = train.train_id === MapApp.followTrainId;
+            drawn.push({train, cars, highlight, followed});
         }
 
         // Zoom LOD: when zoomed out past the threshold (scale bar >= lodScaleM,
@@ -1476,10 +1498,10 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         MapApp._trainLOD = _trainCollapsed() ? 'collapsed' : 'detailed';
         if (MapApp._trainLOD === 'collapsed') {
             const minCars = (window.TRAIN_STYLE && TRAIN_STYLE.lodMinCars) || 3;
-            for (const {train, cars, highlight} of drawn) {
+            for (const {train, cars, highlight, followed} of drawn) {
                 const hasLoco = train.has_loco || cars.some(c => c.isLoco);
-                if (highlight || hasLoco || cars.length > minCars)
-                    drawCollapsedTrain(regionId, train, cars, layers.trains, highlight);
+                if (followed || highlight || hasLoco || cars.length > minCars)
+                    drawCollapsedTrain(regionId, train, cars, layers.trains, highlight, followed);
             }
             return;
         }
@@ -1487,16 +1509,17 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         // Pass 1: every train's connecting spine FIRST, so the RV bodies drawn in
         // pass 2 sit ON TOP of it (the spine reads as a thin backbone behind the
         // cars instead of a line painted across them). Player trains get a bright spine.
-        for (const {cars, highlight} of drawn) drawTrainOutline(cars.map(c => c.v.body), layers.trains, highlight);
+        for (const {cars, highlight, followed} of drawn)
+            drawTrainOutline(cars.map(c => c.v.body), layers.trains, highlight, followed);
 
         // Pass 2: RV bodies + destination tags, above the spines. A locomotive is one
         // arrow polygon (nose = facing); a car is a plain blunt body line.
-        for (const {train, cars} of drawn) {
+        for (const {train, cars, followed} of drawn) {
             for (const {v, isLoco} of cars) {
                 let layer;
                 if (isLoco) {
                     const frontAt0 = (v.front0 !== false) !== LOCO_FACING_FLIP;   // default front0=true
-                    const color = rvBodyColor(v, true);
+                    const color = followed ? FOLLOW_COLOR : rvBodyColor(v, true);
                     layer = L.polygon(locoArrowLatLngs(v.body, frontAt0), {
                         color: color, fillColor: color, fillOpacity: 0.95,
                         weight: 1, opacity: 0.95
@@ -1504,7 +1527,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     layer._locoArrow = true; layer._body = v.body; layer._front0 = frontAt0;  // rebuilt on zoom
                 } else {
                     layer = L.polyline(v.body, {
-                        color: rvBodyColor(v, false),
+                        color: followed ? FOLLOW_COLOR : rvBodyColor(v, false),
                         weight: rvBodyWeightPx(),
                         opacity: 0.95,
                         lineCap: 'butt'
@@ -1605,7 +1628,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     // arrow in the railroad's colour pointing in the direction of travel. (A
     // highlighted player train stays fully cyan.) One trainIndex entry (lead vehicle)
     // keeps search / follow working while collapsed.
-    function drawCollapsedTrain(regionId, train, cars, layerGroup, highlight) {
+    function drawCollapsedTrain(regionId, train, cars, layerGroup, highlight, followed) {
         const bodies = cars.map(c => c.v.body);
         const centers = bodies.map(_midpoint);
         const order = _chainOrder(centers);
@@ -1620,7 +1643,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         // outer ends from, so trace its own body instead of end -> centre -> end.
         const linePts = cars.length === 1 ? ob[0] : [frontEnd, ...cen, rearEnd];
         const line = L.polyline(linePts, {
-            color: highlight ? PLAYER_HL_COLOR : COLLAPSED_BODY_COLOR,
+            color: followed ? FOLLOW_COLOR : (highlight ? PLAYER_HL_COLOR : COLLAPSED_BODY_COLOR),
             weight: rvBodyWeightPx(),
             opacity: 0.95,
             lineCap: 'round'
@@ -1652,7 +1675,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 tip = frontAt0 ? e0 : eN;
                 refs = [frontAt0 ? eN : e0];
             }
-            const arrowColor = highlight ? PLAYER_HL_COLOR : railColor;
+            const arrowColor = followed ? FOLLOW_COLOR : (highlight ? PLAYER_HL_COLOR : railColor);
             const arrow = L.polygon(_arrowLatLngs(tip, refs), {
                 color: arrowColor, fillColor: arrowColor, fillOpacity: 1,
                 weight: 1, opacity: 1, interactive: false
@@ -1943,7 +1966,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         return (!neighbour || _distLL(e0, neighbour) >= _distLL(eL, neighbour)) ? e0 : eL;
     }
 
-    function drawTrainOutline(carBodies, layerGroup, highlight) {
+    function drawTrainOutline(carBodies, layerGroup, highlight, followed) {
         // A single-vehicle train has no consist to connect, so draw no spine
         // (otherwise the end->centre->end line shows as a stub through the one car).
         if (carBodies.length < 2) return;
@@ -1958,10 +1981,11 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         // Spine: one end -> each car centre -> the other end. A player-crewed train
         // gets a bright, wider spine (a coloured casing) so it stands out; others get
         // the thin dark backbone.
-        const line = L.polyline([frontEnd, ...cen, rearEnd], highlight
-            ? { color: PLAYER_HL_COLOR, weight: _highlightWeight(rvBodyWeightPx()), opacity: 0.95 }
+        const emphasized = followed || highlight;
+        const line = L.polyline([frontEnd, ...cen, rearEnd], emphasized
+            ? { color: followed ? FOLLOW_COLOR : PLAYER_HL_COLOR, weight: _highlightWeight(rvBodyWeightPx()), opacity: 0.95 }
             : { color: COLORS.trainOutline, weight: TRAIN_STYLE.spine, opacity: 0.9 });
-        if (highlight) line._rvHighlight = true;   // rescales with zoom in updateTrainWidths
+        if (emphasized) line._rvHighlight = true;   // rescales with zoom in updateTrainWidths
         line.addTo(layerGroup);
     }
 
@@ -2088,11 +2112,13 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         if (MapApp.map.closePopup) MapApp.map.closePopup();
         // Following implies the Trains overlay should be on and visible.
         if (!MapApp.overlayStates.trains && typeof toggleOverlay === 'function') toggleOverlay('trains', true);
+        if (typeof applyTrainOptions === 'function') applyTrainOptions();
         updateFollowBanner();
         centerOnFollowed(true);
     };
     MapApp.stopFollow = function () {
         MapApp.followTrainId = null;
+        if (typeof applyTrainOptions === 'function') applyTrainOptions();
         updateFollowBanner();
     };
 
@@ -2515,13 +2541,15 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     function openSearch() {
         document.getElementById('search-dialog').classList.add('visible');
         document.getElementById('search-overlay').classList.add('visible');
-        document.getElementById('search-input').focus();
+        const input = document.getElementById('search-input');
+        input.focus();
+        input.select();
+        if (input.value) performSearch();
     }
 
     function closeSearch() {
         document.getElementById('search-dialog').classList.remove('visible');
         document.getElementById('search-overlay').classList.remove('visible');
-        document.getElementById('search-input').value = '';
         document.getElementById('search-results').innerHTML = '';
     }
 
