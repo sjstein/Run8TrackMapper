@@ -79,7 +79,9 @@ def industry_to_dict(ind: IndustryData) -> dict:
         "local_name": ind.local_name,
         "lat": ind.lat,
         "lon": ind.lon,
-        "track_sections": ind.track_sections
+        "track_sections": ind.track_sections,
+        "track_length_ft": ind.track_length_ft,
+        "track_length_m": ind.track_length_m
     }
 
 

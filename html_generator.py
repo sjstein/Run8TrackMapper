@@ -1170,6 +1170,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                                     if (popupContent) popupContent += '<hr>';
                                     popupContent += `<b>${ind.name}</b><br>`;
                                     popupContent += `Tag: ${ind.tag}<br>`;
+                                     popupContent += `Local: ${ind.local_name || 'N/A'}<br>`;
+                                     popupContent += `Track Length: ${(ind.track_length_ft || 0).toFixed(1)} ft (${(ind.track_length_m || 0).toFixed(1)} m)<br>`;
                                     if (ind.track_sections && ind.track_sections.length > 0) {
                                         popupContent += `Track Sections: ${ind.track_sections.join(', ')}`;
                                     }
@@ -1205,6 +1207,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 let industryPopup = `<b>${industry.name}</b><br>`;
                 industryPopup += `Tag: ${industry.tag}<br>`;
                 industryPopup += `Local: ${industry.local_name || 'N/A'}<br>`;
+                industryPopup += `Track Length: ${(industry.track_length_ft || 0).toFixed(1)} ft (${(industry.track_length_m || 0).toFixed(1)} m)<br>`;
                 if (industry.track_sections && industry.track_sections.length > 0) {
                     industryPopup += `Track Sections: ${industry.track_sections.join(', ')}`;
                 }

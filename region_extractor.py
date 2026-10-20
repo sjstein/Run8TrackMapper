@@ -126,6 +126,8 @@ class IndustryData:
     lat: float
     lon: float
     track_sections: List[int] = field(default_factory=list)  # List of section IDs this industry occupies
+    track_length_ft: float = 0.0
+    track_length_m: float = 0.0
 
 
 @dataclass
@@ -1437,7 +1439,8 @@ def extract_industries(industry_db_path: str,
                        route_prefix: int,
                        section_map: Dict[int, TrackSection],
                        tile_geo_bounds: Dict[Tuple[int, int], Tuple[float, float, float, float]] = None,
-                       tile_based_config: Optional[TileBasedConfig] = None) -> List[IndustryData]:
+                       tile_based_config: Optional[TileBasedConfig] = None,
+                       section_lengths: Optional[Dict[int, Tuple[float, float]]] = None) -> List[IndustryData]:
     """Extract industries for a specific route prefix
 
     Args:
@@ -1446,6 +1449,7 @@ def extract_industries(industry_db_path: str,
         section_map: Map of section IDs to TrackSection objects
         tile_geo_bounds: Geographic bounds for tiles (required for geographic mode)
         tile_based_config: Configuration for tile-based coordinates (if provided, uses tile coords)
+        section_lengths: Extracted section lengths keyed by section ID as (feet, metres)
     """
     industries = []
     use_tile_coords = tile_based_config is not None
@@ -1551,13 +1555,20 @@ def extract_industries(industry_db_path: str,
             lat = (start_lat + end_lat) / 2
             lon = (start_lon + end_lon) / 2
 
+        length_pairs = [section_lengths[sid] for sid in track_section_ids
+                        if section_lengths and sid in section_lengths]
+        track_length_ft = sum(pair[0] for pair in length_pairs)
+        track_length_m = sum(pair[1] for pair in length_pairs)
+
         industries.append(IndustryData(
             tag=industry.trk_sym,
             name=industry.name,
             local_name=industry.local_name,
             lat=lat,
             lon=lon,
-            track_sections=track_section_ids
+            track_sections=track_section_ids,
+            track_length_ft=round(track_length_ft, 1),
+            track_length_m=round(track_length_m, 1)
         ))
 
     return industries
@@ -2388,7 +2399,8 @@ def extract_region(region_config: RegionConfig,
         region_config.route_prefix,
         section_map,
         tile_geo_bounds,
-        tile_based_config
+        tile_based_config,
+        {section.id: (section.length_ft, section.length_m) for section in sections}
     )
     print(f"  Extracted {len(industries)} industries")
 
