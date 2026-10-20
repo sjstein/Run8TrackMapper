@@ -167,6 +167,7 @@ def generate_javascript() -> str:
             showOnlyMoving: false,  // true = only plot trains moving between saves (live only)
             highlightPlayers: false // true = highlight player trains (moved this save && not AI && has a loco) with a bright spine
         },
+        showTrainSummary: true,
 
         // Base map layers
         baseLayers: {},  // {name: layer}
@@ -479,6 +480,22 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     cursor: pointer;
                 }
                 #control-toggle:hover { background: #ddd; }
+                #display-settings label {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    margin: 5px 0;
+                }
+                #display-settings .oc-lbl { flex: 0 0 84px; white-space: nowrap; }
+                #display-settings input[type=range] { width: 110px; margin: 0; }
+                .leaflet-control-zoom a,
+                .leaflet-control-zoom a:first-child,
+                .leaflet-control-zoom a:last-child {
+                    width: 15px;
+                    height: 15px;
+                    line-height: 15px;
+                    font-size: 12px;
+                }
             </style>
             <h3 id="control-title"><span>${MapApp.manifest.name}</span><button id="control-toggle" title="Show/hide controls" aria-label="Show/hide controls">&minus;</button></h3>
             <div id="control-body">
@@ -509,6 +526,13 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             <div id="region-list"></div>
             <h4>Overlays</h4>
             <div id="overlay-list"></div>
+            <h4>Display</h4>
+            <div id="display-settings">
+                <div class="overlay-item">
+                    <input type="checkbox" id="show-train-summary" checked>
+                    <label for="show-train-summary">Show train summary</label>
+                </div>
+            </div>
             <h4>Local Filter</h4>
             <select id="local-symbol-select" style="width:100%;padding:6px;margin-bottom:10px;border:1px solid #ddd;border-radius:4px;">
                 <option value="">-- All Industries --</option>
@@ -651,6 +675,11 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 }
                 zoomToLocal(MapApp.currentLocalFilter);
             }
+        });
+
+        document.getElementById('show-train-summary').addEventListener('change', (e) => {
+            MapApp.showTrainSummary = e.target.checked;
+            updateTrainCount();
         });
 
         // Zoom-scale the track line width (thinner when zoomed out).
@@ -819,48 +848,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const mapOpacity = (MapApp.manifest && MapApp.manifest.initial_map_opacity != null)
             ? MapApp.manifest.initial_map_opacity : 0.2;
         control.innerHTML = `
-            <style>
-                #opacity-control {
-                    position: absolute;
-                    bottom: 60px;
-                    left: 10px;
-                    /* Size the panel to its widest row so the background always
-                       encloses the sliders (an absolutely-positioned shrink-to-fit
-                       box otherwise under-sizes flex rows in some browsers, letting
-                       the sliders overrun the right edge). */
-                    width: max-content;
-                    background: white;
-                    padding: 10px;
-                    border-radius: 4px;
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
-                    z-index: 1000;
-                    font-size: 12px;
-                }
-                /* Each row: fixed-width text column + equal-length slider, vertically
-                   centered, so all sliders line up in one column. */
-                #opacity-control label {
-                    display: flex;
-                    align-items: center;
-                    gap: 8px;
-                    margin-top: 4px;
-                    /* Explicit row width (= label 84 + gap 8 + slider 110) so the
-                       panel's content width is deterministic. Firefox ignores a
-                       range input's flex-basis when measuring max-content, which
-                       otherwise sizes the panel to the text alone and lets the
-                       slider overrun the right edge. */
-                    width: 202px;
-                }
-                #opacity-control label:first-of-type { margin-top: 0; }
-                #opacity-control .oc-lbl { flex: 0 0 84px; white-space: nowrap; }
-                #opacity-control input[type=range] {
-                    width: 110px;
-                    flex: 0 0 110px;
-                    margin: 0;
-                }
-            </style>
             <label><span class="oc-lbl">Map Opacity:</span><input type="range" id="opacity-slider" min="0" max="100" value="${Math.round(mapOpacity * 100)}"></label>
         `;
-        document.body.appendChild(control);
+        document.getElementById('display-settings').prepend(control);
 
         // Apply the configured initial opacity to the current base layer.
         if (MapApp.baseLayers[MapApp.currentBaseLayer]) {
@@ -986,6 +976,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 type: searchType.value,
                 trainField: searchField ? searchField.value : 'all'
             };
+            const sum = document.getElementById('show-train-summary'); if (sum) st.trainSummary = !!sum.checked;
             if (MapApp.trainOptions) st.trainOpts = Object.assign({}, MapApp.trainOptions);
             if (MapApp.signalTypeVisible) st.sig = Object.assign({}, MapApp.signalTypeVisible);
             if (MapApp.areaTypeVisible) st.area = { master: !!MapApp.overlayStates.areaLabels, types: Object.assign({}, MapApp.areaTypeVisible) };
@@ -1043,6 +1034,11 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                         type.value = st.search.type;
                         type.dispatchEvent(new Event('change', {bubbles:true}));
                     }
+                }
+                if (typeof st.trainSummary === 'boolean') {
+                    MapApp.showTrainSummary = st.trainSummary;
+                    const sum = document.getElementById('show-train-summary');
+                    if (sum) sum.checked = st.trainSummary;
                 }
                 // Filter states (applied to layers after load).
                 if (st.trainOpts && MapApp.trainOptions) Object.assign(MapApp.trainOptions, st.trainOpts);
@@ -1194,6 +1190,8 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                                     if (popupContent) popupContent += '<hr>';
                                     popupContent += `<b>${ind.name}</b><br>`;
                                     popupContent += `Tag: ${ind.tag}<br>`;
+                                     popupContent += `Local: ${ind.local_name || 'N/A'}<br>`;
+                                     popupContent += `Track Length: ${(ind.track_length_ft || 0).toFixed(1)} ft (${(ind.track_length_m || 0).toFixed(1)} m)<br>`;
                                     if (ind.track_sections && ind.track_sections.length > 0) {
                                         popupContent += `Track Sections: ${ind.track_sections.join(', ')}`;
                                     }
@@ -1229,6 +1227,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                 let industryPopup = `<b>${industry.name}</b><br>`;
                 industryPopup += `Tag: ${industry.tag}<br>`;
                 industryPopup += `Local: ${industry.local_name || 'N/A'}<br>`;
+                industryPopup += `Track Length: ${(industry.track_length_ft || 0).toFixed(1)} ft (${(industry.track_length_m || 0).toFixed(1)} m)<br>`;
                 if (industry.track_sections && industry.track_sections.length > 0) {
                     industryPopup += `Track Sections: ${industry.track_sections.join(', ')}`;
                 }
@@ -1904,7 +1903,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const el = document.getElementById('train-count');
         if (!el) return;
         const wt = MapApp._liveTotals || (MapApp.manifest && MapApp.manifest.world_totals);
-        if (!MapApp.overlayStates.trains || !wt) { el.style.display = 'none'; return; }
+        if (!MapApp.showTrainSummary || !MapApp.overlayStates.trains || !wt) { el.style.display = 'none'; return; }
         let txt = `Trains: ${wt.trains}  ·  Rail vehicles: ${wt.vehicles}`;
         if (MapApp._movingCount != null) txt += `  ·  Moving: ${MapApp._movingCount}`;
         el.textContent = txt;
@@ -4166,9 +4165,10 @@ ALIGN_JS = r'''
         leaveBtn.onclick=()=>{ if(MapApp.relockEditing) MapApp.relockEditing(); };
         document.body.appendChild(leaveBtn);
         // Help button + overlay: a quick reference of the map's mouse/key commands.
-        const help=document.createElement('button'); help.textContent='Help';
+        const help=document.createElement('button'); help.textContent='?';
+        help.title='Map controls and tips'; help.setAttribute('aria-label', 'Map controls and tips');
         // Help takes the top-left slot the Align-mode button used to occupy (#100).
-        help.style.cssText=bs+';left:52px';
+        help.style.cssText=bs+';left:35px;width:17px;height:17px;padding:0;line-height:15px;font-size:12px;border-radius:2px';
         document.body.appendChild(help);
         let helpEl=null;
         function kbd(s){ return '<kbd style="background:var(--kbd-bg);border:1px solid var(--border);border-radius:3px;padding:0 5px;font:12px monospace">'+s+'</kbd>'; }
