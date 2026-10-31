@@ -3484,6 +3484,7 @@ ALIGN_JS = r'''
                 if (MapApp.editMode !== 'locked' && MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();
                 // Seed the areas poll version and start it so all viewers see live label edits.
                 MapApp.areasVersion = (typeof j.areas_version === 'number') ? j.areas_version : null;
+                MapApp.trainPollMs = Math.max(500, Number(j.train_poll_ms) || 3000);
                 startAreasPolling();
                 // If the server is watching a world save, poll it so rail-vehicle
                 // positions refresh live when the save file is re-written.
@@ -3504,7 +3505,7 @@ ALIGN_JS = r'''
     function startTrainsPolling(){
         if (MapApp._trainsPoll) return;
         pollTrainsOnce();
-        MapApp._trainsPoll = setInterval(pollTrainsOnce, 3000);
+        MapApp._trainsPoll = setInterval(pollTrainsOnce, MapApp.trainPollMs || 3000);
         // Recover from background-timer throttling / machine sleep: when the tab
         // becomes visible again, browsers may have stalled the 3s interval, leaving
         // the map frozen on stale positions. Force an immediate refresh (and revive
@@ -3515,7 +3516,8 @@ ALIGN_JS = r'''
             document.addEventListener('visibilitychange', () => {
                 if (document.visibilityState !== 'visible') return;
                 MapApp.trainsVersion = null;
-                if (!MapApp._trainsPoll) MapApp._trainsPoll = setInterval(pollTrainsOnce, 3000);
+                if (!MapApp._trainsPoll) MapApp._trainsPoll = setInterval(
+                    pollTrainsOnce, MapApp.trainPollMs || 3000);
                 pollTrainsOnce();
             });
         }

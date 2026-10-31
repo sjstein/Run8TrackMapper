@@ -99,6 +99,25 @@ python serve.py <config.ini> [--port 8000] [--host 127.0.0.1] [--areas-file FILE
 > after which you re-run `output_generator.py`. Existing labels are not editable in
 > that mode.
 
+### Near-real-time train telemetry
+
+`serve.py` can consume the Run8 telemetry bridge instead of waiting for the
+world autosave cadence:
+
+```bash
+RUN8_TELEMETRY_URL=http://127.0.0.1:40872 \
+RUN8_TELEMETRY_TOKEN_FILE=/run/secrets/run8_telemetry_token \
+python serve.py config-se.ini --world ".../Auto Save World.xml"
+```
+
+The mapper fetches `/v1/snapshot`, maintains it with cursor-based `/v1/changes`
+responses, and re-snapshots when the bridge requires a reset. Telemetry schema
+2 supplies train positions, simulation time, and switch positions at the live
+poll cadence. The world save remains the cold-start and schema-1 context
+fallback. A transient bridge failure retains the last good live render and
+reports `stale: true` from `/api/trains`; it does not replace live positions
+with an older autosave.
+
 ### Area label categories
 
 Each label has a `type` — one of the categories your config defines (see

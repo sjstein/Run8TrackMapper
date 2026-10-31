@@ -53,6 +53,7 @@ from region_extractor import (SectionData, extract_trains, build_section_placer,
 from world_parser import parse_world_save, parse_sim_time, parse_switch_states
 from output_generator import train_to_dict
 from rv_length_db import load_rv_lengths
+from telemetry_client import TelemetryClient, TelemetryUnavailable
 
 
 # Upload guards for POST /api/world (world saves are ~1.7 MB; caps are generous
@@ -124,7 +125,7 @@ class AuthoringState:
     def __init__(self, config_path: Path, output_dir: Path, areas_file: Path,
                  config=None, world_save: Path = None,
                  accept_uploads: bool = False, upload_token: str = None,
-                 edit_password: str = None):
+                 edit_password: str = None, telemetry_client: TelemetryClient = None):
         self.config_path = config_path
         self.output_dir = output_dir
         self.manifest_path = output_dir / "manifest.json"
@@ -142,6 +143,7 @@ class AuthoringState:
         # ---- world-save train plotting (optional, with live mtime watch) ----
         self.config = config
         self.world_save = world_save
+        self.telemetry_client = telemetry_client
         # When accept_uploads is set, POST /api/world writes the pushed save into
         # `world_save` (a server-owned "slot"); the /api/trains mtime-watch then
         # re-plots it exactly as if Run8 had written the file locally. An optional
@@ -151,7 +153,10 @@ class AuthoringState:
         # regionId -> route_prefix (for filtering vehicles to each region)
         self.region_prefix = {r.id: r.route_prefix for r in (config.regions if config else [])}
         self._sections_cache = {}   # regionId -> [SectionData] (rebuilt from region JSON)
-        self._trains_cache = {'mtime': None, 'payload': {'version': 0, 'trains': {}}}
+        self._trains_cache = {'mtime': None, 'context_mtime': None,
+                              'source': None, 'payload': {'version': 0, 'trains': {}}}
+        self._world_context_cache = {'mtime': None, 'sim_time': None, 'switches': {}}
+        self._last_telemetry_warning = 0.0
         self._prev_positions = {}   # train_id -> (x, y) from the previous save, for movement
         self._still_since = {}      # train_id -> consecutive stationary save-cycles (hysteresis)
         # Keep a train flagged "moving" this many stationary cycles after its last move.
@@ -196,21 +201,90 @@ class AuthoringState:
         return secs
 
     def trains_payload(self):
-        """Return {version, trains:{regionId:[train dicts]}}, re-placing vehicles
-        only when the world save file's mtime has changed since the last call."""
+        """Return live train placement, preferring telemetry over the world save.
+
+        A transient telemetry failure keeps the last good live render.  Before the
+        first telemetry snapshot, the existing world-save path remains the cold-
+        start fallback.
+        """
+        if self.telemetry_client:
+            try:
+                changed = self.telemetry_client.refresh()
+                if self.telemetry_client.context_available:
+                    context_mtime = ('telemetry', self.telemetry_client.model_sequence)
+                    sim_time = self.telemetry_client.simulation_time
+                    live_switches = self.telemetry_client.switch_states
+                    switches = {region_id: live_switches[prefix]
+                                for region_id, prefix in self.region_prefix.items()
+                                if prefix in live_switches}
+                else:
+                    context_mtime, sim_time, switches = self._world_context()
+                if (changed or self._trains_cache['source'] != 'telemetry' or
+                        context_mtime != self._trains_cache['context_mtime']):
+                    return self._place_trains(
+                        self.telemetry_client.world_trains(),
+                        self.telemetry_client.version,
+                        'telemetry',
+                        context_mtime=context_mtime,
+                        sim_time=sim_time,
+                        switches=switches,
+                        speed_by_id=self.telemetry_client.train_speeds,
+                    )
+                self._trains_cache['payload']['stale'] = False
+                self._trains_cache['payload'].pop('telemetry_error', None)
+                return self._trains_cache['payload']
+            except TelemetryUnavailable as exc:
+                now = time.monotonic()
+                if now - self._last_telemetry_warning >= 30.0:
+                    print(f"  Telemetry unavailable; retaining last live state or using world fallback: {exc}")
+                    self._last_telemetry_warning = now
+                if self._trains_cache['source'] == 'telemetry':
+                    self._trains_cache['payload']['stale'] = True
+                    self._trains_cache['payload']['telemetry_error'] = str(exc)
+                    return self._trains_cache['payload']
+
         if not self.world_save or not self.world_save.exists():
-            return {'version': 0, 'trains': {}}
+            return self._trains_cache['payload']
         mtime = self.world_save.stat().st_mtime
-        if mtime == self._trains_cache['mtime']:
+        if mtime == self._trains_cache['mtime'] and self._trains_cache['source'] == 'world_save':
             return self._trains_cache['payload']
 
         try:
             parsed = parse_world_save(str(self.world_save))
         except Exception:  # noqa: BLE001
             # Torn / partial read while Run8 is rewriting the save (~every 2 min).
-            # Serve the last good payload and retry on the next poll (the cache mtime
-            # is left unchanged, so the next poll re-parses once the write completes).
             return self._trains_cache['payload']
+        context_mtime, sim_time, switches = self._world_context()
+        return self._place_trains(parsed, mtime, 'world_save', mtime=mtime,
+                                  context_mtime=context_mtime,
+                                  sim_time=sim_time, switches=switches)
+
+    def _world_context(self):
+        """Return cached (mtime, simulation time, switch states by region)."""
+        if not self.world_save or not self.world_save.exists():
+            return None, None, {}
+        try:
+            mtime = self.world_save.stat().st_mtime
+            if mtime == self._world_context_cache['mtime']:
+                cached = self._world_context_cache
+                return mtime, cached['sim_time'], cached['switches']
+            switch_states = parse_switch_states(str(self.world_save)) or {}
+            switches = {region_id: switch_states[prefix]
+                        for region_id, prefix in self.region_prefix.items()
+                        if prefix in switch_states}
+            sim_time = parse_sim_time(str(self.world_save))
+            self._world_context_cache = {
+                'mtime': mtime, 'sim_time': sim_time, 'switches': switches,
+            }
+            return mtime, sim_time, switches
+        except Exception:  # noqa: BLE001 - retain context during a torn save write
+            cached = self._world_context_cache
+            return cached['mtime'], cached['sim_time'], cached['switches']
+
+    def _place_trains(self, parsed, version, source, *, mtime=None,
+                      context_mtime=None, sim_time=None, switches=None,
+                      speed_by_id=None):
+        """Place either world-save or telemetry records through the shared renderer."""
         # Whole-save totals (region-independent) for the viewer status line.
         totals = {'trains': len(parsed),
                   'vehicles': sum(len(tr.vehicles) for tr in parsed)}
@@ -245,17 +319,17 @@ class AuthoringState:
                 dicts.append(d)
             trains_by_region[region_id] = dicts
 
-        # Movement: a train whose representative position changed since the previous
-        # save moved this cycle. Hysteresis (H = self.move_hysteresis save-cycles) keeps
-        # a train flagged "moving" for H further STATIONARY cycles after its last real
-        # movement, so a brief hold (e.g. at a signal) doesn't drop it from "Show only
-        # moving" (H = 0 -> strict per-cycle). Live-only (needs two saves; first save =
-        # baseline). The player highlight does NOT use this held flag - see `moved` below.
+        # World saves infer movement from displacement. Telemetry has authoritative
+        # lead-unit speed, which also detects slow trains that move less than the
+        # world-save-oriented 5 m displacement threshold during a one-second poll.
         H = self.move_hysteresis
         still_since, moving = {}, {}
         for tid, pos in cur_pos.items():
             prev = self._prev_positions.get(tid)
-            if prev is not None and _pos_dist(prev, pos) > MOVE_THRESHOLD_M:
+            moved_now = (abs(float(speed_by_id.get(tid, 0.0))) > 0.05
+                         if speed_by_id is not None
+                         else prev is not None and _pos_dist(prev, pos) > MOVE_THRESHOLD_M)
+            if moved_now:
                 still_since[tid] = 0            # moved this cycle
                 moving[tid] = True
             else:
@@ -281,16 +355,11 @@ class AuthoringState:
                 d['has_loco'] = tid in has_loco
         moving_count = sum(1 for v in moving.values() if v)
 
-        # Switch positions from the same save: {regionId: [reversed SwitchIndex]}. A
-        # region absent here has no known state (the viewer then draws both legs).
-        switch_states = parse_switch_states(str(self.world_save)) or {}
-        switches = {region_id: switch_states[prefix]
-                    for region_id, prefix in self.region_prefix.items() if prefix in switch_states}
-
-        payload = {'version': mtime, 'trains': trains_by_region, 'totals': totals,
-                   'sim_time': parse_sim_time(str(self.world_save)),
-                   'moving_count': moving_count, 'switches': switches}
-        self._trains_cache = {'mtime': mtime, 'payload': payload}
+        payload = {'version': version, 'trains': trains_by_region, 'totals': totals,
+                   'sim_time': sim_time, 'moving_count': moving_count,
+                   'switches': switches or {}, 'source': source, 'stale': False}
+        self._trains_cache = {'mtime': mtime, 'context_mtime': context_mtime,
+                              'source': source, 'payload': payload}
         return payload
 
     # ---- world-save upload (call under self.lock) ----------------------
@@ -574,10 +643,11 @@ def make_handler(state: AuthoringState, authoring: bool):
                                  'edit_mode': 'locked' if authoring else 'disabled',
                                  'areas_version': state.areas_version,
                                  'uploads': state.accept_uploads,
+                                 'train_poll_ms': 1000 if state.telemetry_client else 3000,
                                  # Report a world as present when uploads are enabled even
                                  # before the first push, so the viewer starts polling
                                  # /api/trains right away and picks up trains on arrival.
-                                 'world': bool(state.accept_uploads
+                                 'world': bool(state.telemetry_client or state.accept_uploads
                                                or (state.world_save and state.world_save.exists()))})
                 return
             if path == '/api/unlock':
@@ -890,12 +960,37 @@ def main():
                              'recommended for any non-localhost host. May also be supplied '
                              'via the RUN8_UPLOAD_TOKEN environment variable (preferred for '
                              'systemd, so the secret is not in the process argv / `ps`).')
+    parser.add_argument('--telemetry-url', dest='telemetry_url', metavar='URL',
+                        help='Run8 telemetry bridge base URL. May also be supplied via '
+                             'RUN8_TELEMETRY_URL. When configured, live telemetry is preferred '
+                             'and the world save remains the cold-start/context fallback.')
+    parser.add_argument('--telemetry-token-file', dest='telemetry_token_file', metavar='FILE',
+                        help='File containing the bridge bearer token. May also be supplied via '
+                             'RUN8_TELEMETRY_TOKEN_FILE; keeps the token out of argv/environment.')
     args = parser.parse_args()
 
     # Token resolution: --upload-token wins, else the RUN8_UPLOAD_TOKEN env var. Using
     # the env var keeps the secret out of the command line (visible in `ps` and
     # `systemctl status`); the systemd unit sets it from an EnvironmentFile.
     upload_token = args.upload_token or os.environ.get('RUN8_UPLOAD_TOKEN') or None
+
+    telemetry_url = args.telemetry_url or os.environ.get('RUN8_TELEMETRY_URL') or None
+    telemetry_token_path = (args.telemetry_token_file or
+                            os.environ.get('RUN8_TELEMETRY_TOKEN_FILE') or None)
+    telemetry_token = None
+    if telemetry_token_path:
+        try:
+            telemetry_token = Path(telemetry_token_path).read_text(encoding='utf-8').strip()
+        except OSError as e:
+            print(f"ERROR: cannot read telemetry token file {telemetry_token_path}: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+        if not telemetry_token:
+            print(f"ERROR: telemetry token file is empty: {telemetry_token_path}",
+                  file=sys.stderr)
+            sys.exit(1)
+    telemetry_client = (TelemetryClient(telemetry_url, telemetry_token)
+                        if telemetry_url else None)
 
     # Edit password (#56): --edit-password wins, else RUN8_EDIT_PASSWORD (preferred, so
     # the secret isn't in argv / `ps`). Its PRESENCE is the switch: no password -> the
@@ -939,7 +1034,8 @@ def main():
                            config=config, world_save=world_save,
                            accept_uploads=args.accept_uploads,
                            upload_token=upload_token,
-                           edit_password=edit_password)
+                           edit_password=edit_password,
+                           telemetry_client=telemetry_client)
     if authoring:
         # Make sure the served manifest matches the areas files on disk at startup.
         try:
@@ -972,6 +1068,9 @@ def main():
         exists = " (not found yet)" if not world_save.exists() else ""
         role = "upload slot" if args.accept_uploads else "live-watched"
         print(f"  World   : {world_save}{exists}  [{role}]")
+    if telemetry_client:
+        auth = "bearer token" if telemetry_token else "no bearer token"
+        print(f"  Live    : {telemetry_client.base_url}  [{auth}; world-save fallback]")
     if args.accept_uploads:
         tok = "token required" if upload_token else "NO TOKEN (localhost only!)"
         print(f"  Uploads : POST /api/world enabled  [{tok}]")
