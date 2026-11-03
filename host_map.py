@@ -10,6 +10,8 @@ on the same Windows box that runs the operator's r8server.
 
     python host_map.py <config.ini> [--port 8000] [--host 0.0.0.0]
                         [--world "...\\AutoSaves\\Auto Save World.xml"]
+                        [--telemetry-url http://127.0.0.1:40872]
+                        [--telemetry-token-file FILE]
                         [--edit-password PW] [--regenerate] [--no-generate]
                         [--no-update-check]
 
@@ -22,6 +24,8 @@ What it does, in order:
   3. Serve that output, bound to 0.0.0.0 so a forwarded TCP port reaches it, watching
      the world save for live train updates. Editing is READ-ONLY unless an edit
      password is set (RUN8_EDIT_PASSWORD / --edit-password, #56); no upload endpoint.
+     Optionally prefers the Run8 telemetry REST bridge for near-real-time updates,
+     retaining the world save as the cold-start and outage fallback.
      (The bundle's Start Map.bat passes --host from settings.bat, where HOST defaults
      to 127.0.0.1: a single-player owner just views their route locally, and sharing
      is the opt-in, #108.)
@@ -49,6 +53,7 @@ from config_parser import parse_config
 from output_generator import generate_output
 from serve import (AuthoringState, make_handler, _QuietThreadingHTTPServer,
                    _resolve_writable_areas_file)
+from telemetry_client import TelemetryClient
 from version import __version__
 
 
@@ -224,6 +229,27 @@ def _resolve_world_save(args, config):
     return None
 
 
+def _create_telemetry_client(url=None, token_file=None):
+    """Create the optional live telemetry client used by the Windows host.
+
+    An omitted URL deliberately preserves the historical world-save-only mode.
+    When a token file is configured, fail at startup if it cannot be read or is
+    empty instead of silently running with an unauthenticated client.
+    """
+    if not url:
+        return None
+    token = None
+    if token_file:
+        path = Path(token_file)
+        try:
+            token = path.read_text(encoding='utf-8').strip()
+        except OSError as e:
+            raise ValueError(f"cannot read telemetry token file {path}: {e}") from e
+        if not token:
+            raise ValueError(f"telemetry token file is empty: {path}")
+    return TelemetryClient(url, token)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -255,11 +281,30 @@ def main():
                              'RUN8_EDIT_PASSWORD environment variable so the secret is not in '
                              'the command line. On a public host, serve behind a TLS tunnel '
                              '(see the hosting docs).')
+    parser.add_argument('--telemetry-url', dest='telemetry_url', metavar='URL',
+                        help='Optional Run8 telemetry bridge URL. May also be supplied '
+                             'through RUN8_TELEMETRY_URL. When omitted, the host uses '
+                             'world-save updates only. When supplied, telemetry is '
+                             'preferred and --world remains the cold-start/fallback source.')
+    parser.add_argument('--telemetry-token-file', dest='telemetry_token_file',
+                        metavar='FILE',
+                        help='Optional file containing the telemetry bearer token. May '
+                             'also be supplied through RUN8_TELEMETRY_TOKEN_FILE; keeping '
+                             'the token in a file avoids exposing it in argv/environment.')
     args = parser.parse_args()
 
     # Edit password (#56): presence enables password-gated label editing; absence keeps
     # the map read-only. Env var preferred (keeps the secret out of argv / the console).
     edit_password = args.edit_password or os.environ.get('RUN8_EDIT_PASSWORD') or None
+    telemetry_url = args.telemetry_url or os.environ.get('RUN8_TELEMETRY_URL') or None
+    telemetry_token_file = (args.telemetry_token_file or
+                            os.environ.get('RUN8_TELEMETRY_TOKEN_FILE') or None)
+    try:
+        telemetry_client = _create_telemetry_client(
+            telemetry_url, telemetry_token_file)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Print progress promptly. A frozen console app's stdout is block-buffered when
     # it isn't attached to a real console (e.g. Git Bash / a pipe), which makes the
@@ -372,7 +417,8 @@ def main():
         Path(config_path), output_dir, areas_file,
         config=config, world_save=world_save,
         accept_uploads=False, upload_token=None,
-        edit_password=edit_password if authoring else None)
+        edit_password=edit_password if authoring else None,
+        telemetry_client=telemetry_client)
     handler = make_handler(state, authoring=authoring)
     if authoring:
         try:
@@ -398,6 +444,13 @@ def main():
     else:
         print("  World   : none configured (track map only, no trains). Set WORLD_SAVE in "
               "settings.bat,\n            or pass --world / set [visualization] world_save.")
+    if telemetry_client:
+        auth = ("bearer token" if telemetry_client.bearer_token
+                else "no bearer token")
+        print(f"  Live    : {telemetry_client.base_url}  "
+              f"[{auth}; world-save fallback]")
+    else:
+        print("  Live    : world-save updates only (set RUN8_TELEMETRY_URL to use REST telemetry)")
     print(f"  Local   : http://{shown_host}:{args.port}/")
     if args.host in _LOOPBACK_HOSTS:
         print("  Sharing : off - only this PC can open the map. To let other people see it, "

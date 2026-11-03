@@ -29,6 +29,19 @@ REM                 - Server host:   the SERVER's full-world autosave, e.g.
 REM               ...\Content\V3Routes\Regions\SouthernCA\AutoSaves\Auto Save World.xml
 set "WORLD_SAVE=C:\Run8Studios\Run8 Train Simulator V3\Content\V3Routes\Regions\SouthernCA\AutoSaves\Auto Save World.xml"
 
+REM  RUN8_TELEMETRY_URL (OPTIONAL): leave BLANK to update trains only when the
+REM               world save changes. Set this to a Run8 telemetry bridge URL for
+REM               near-real-time positions, simulation time, and switch state.
+REM               A bridge on this same PC normally uses http://127.0.0.1:40872.
+REM               WORLD_SAVE remains the cold-start and outage fallback when both
+REM               settings are present. Never expose the bridge itself publicly.
+set "RUN8_TELEMETRY_URL="
+
+REM  RUN8_TELEMETRY_TOKEN_FILE (OPTIONAL): full path to a text file containing
+REM               the bridge bearer token. Leave BLANK when bridge authentication
+REM               is disabled. A configured missing or empty file stops startup.
+set "RUN8_TELEMETRY_TOKEN_FILE="
+
 REM  PORT       : the port in the map's address (http://localhost:PORT/). 8000 is
 REM               fine unless something else is already using it. When SHARING,
 REM               this is the TCP port you forward on your router (or point a

@@ -101,14 +101,28 @@ python serve.py <config.ini> [--port 8000] [--host 127.0.0.1] [--areas-file FILE
 
 ### Near-real-time train telemetry
 
-`serve.py` can consume the Run8 telemetry bridge instead of waiting for the
-world autosave cadence:
+`serve.py` and the packaged Windows `Run8MapHost.exe` can consume the Run8
+telemetry bridge instead of waiting for the world autosave cadence. The Windows
+bundle reads the same values from `settings.bat`; leaving
+`RUN8_TELEMETRY_URL` blank preserves world-save-only operation:
 
 ```bash
 RUN8_TELEMETRY_URL=http://127.0.0.1:40872 \
 RUN8_TELEMETRY_TOKEN_FILE=/run/secrets/run8_telemetry_token \
 python serve.py config-se.ini --world ".../Auto Save World.xml"
 ```
+
+Equivalent Windows settings:
+
+```bat
+set "WORLD_SAVE=C:\Run8Studios\Run8 Train Simulator V3\Content\V3Routes\Regions\HRS_Southeast\AutoSaves\Auto Save World.xml"
+set "RUN8_TELEMETRY_URL=http://127.0.0.1:40872"
+set "RUN8_TELEMETRY_TOKEN_FILE=C:\Run8Control\run8_telemetry_token"
+```
+
+The token-file setting is optional when the bridge does not require a bearer
+token. Keep the telemetry bridge on loopback; expose only the map host through
+the chosen HTTPS proxy or tunnel.
 
 The mapper fetches `/v1/snapshot`, maintains it with cursor-based `/v1/changes`
 responses, and re-snapshots when the bridge requires a reset. Telemetry schema
