@@ -49,6 +49,15 @@ it on the first run - open it in Notepad with right-click -> Edit):
     The map re-reads the file whenever Run8 saves it again, so with autosave on
     the trains move by themselves. Leave it blank for the track map only.
 
+  - See near-real-time movement. If this PC also runs the optional Run8 telemetry
+    bridge, set RUN8_TELEMETRY_URL in settings.bat to:
+        http://127.0.0.1:40872
+    If the bridge requires a bearer token, also set RUN8_TELEMETRY_TOKEN_FILE to
+    the full path of the token text file. Leave both settings blank for the
+    original world-save-only behavior. When both telemetry and WORLD_SAVE are
+    configured, telemetry is preferred and the save remains the cold-start and
+    outage fallback. Never forward or publicly expose the telemetry bridge port.
+
   - Add your own labels. Set RUN8_EDIT_PASSWORD to anything, restart, then TYPE
     the word  edit  on the map and enter it. See ENABLE LABEL EDITING below (the
     security notes there are about shared maps and do not apply to a local one).
@@ -241,6 +250,10 @@ ALTERNATIVE - Caddy (if you already own a domain name):
 
 - Trains update automatically each time Run8 saves the world again (every couple
   of minutes with autosave on). You do not need to do anything.
+
+- With RUN8_TELEMETRY_URL configured, trains, simulation time, and switch state
+  update near real time. The map automatically keeps its last good live state if
+  telemetry becomes unavailable; WORLD_SAVE supplies startup/fallback context.
 
 - If your Run8 is installed somewhere non-standard, edit config-socal.ini and fix
   the region "directory =" paths and "region_dir =" to match your install.
