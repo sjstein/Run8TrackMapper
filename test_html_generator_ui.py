@@ -24,6 +24,12 @@ class UiAdjustmentTests(unittest.TestCase):
         self.assertIn("help.textContent='?'", ALIGN_JS)
         self.assertIn('width:17px;height:17px', ALIGN_JS)
 
+    def test_live_train_polling_is_completion_driven_and_non_overlapping(self):
+        self.assertIn('Number(j.train_poll_ms) || 5000', ALIGN_JS)
+        self.assertIn('if (MapApp._trainsRequest) return MapApp._trainsRequest', ALIGN_JS)
+        self.assertIn('pollTrainsOnce().finally(scheduleNextTrainsPoll)', ALIGN_JS)
+        self.assertNotIn('setInterval(pollTrainsOnce', ALIGN_JS)
+
 
 if __name__ == '__main__':
     unittest.main()

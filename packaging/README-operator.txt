@@ -58,6 +58,11 @@ it on the first run - open it in Notepad with right-click -> Edit):
     configured, telemetry is preferred and the save remains the cold-start and
     outage fallback. Never forward or publicly expose the telemetry bridge port.
 
+  - Choose the live refresh rate. RUN8_TRAIN_POLL_MS defaults to 5000 (5 seconds),
+    which is recommended for a public map. Values from 1000 through 60000 are
+    accepted. Every viewer shares one generated and compressed snapshot per
+    interval, and a slow browser never starts a second request over its first one.
+
   - Add your own labels. Set RUN8_EDIT_PASSWORD to anything, restart, then TYPE
     the word  edit  on the map and enter it. See ENABLE LABEL EDITING below (the
     security notes there are about shared maps and do not apply to a local one).

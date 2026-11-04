@@ -73,6 +73,30 @@ AUTH_FAIL_MAX = 8
 AUTH_FAIL_WINDOW = 300
 AUTH_LOCKOUT = 300
 
+# Live train snapshots are intentionally shared between every viewer. SoCal's
+# payload is several megabytes before compression and placement can take more
+# than a second; refreshing it independently for every browser makes server load
+# grow much faster than the useful update rate. Five seconds is still plenty
+# responsive for a dispatcher map and gives all viewers the same cached frame.
+DEFAULT_TRAIN_POLL_MS = 5000
+MIN_TRAIN_POLL_MS = 1000
+MAX_TRAIN_POLL_MS = 60_000
+
+
+def parse_train_poll_ms(value=None):
+    """Validate a live-map refresh interval supplied by CLI or environment."""
+    if value in (None, ''):
+        return DEFAULT_TRAIN_POLL_MS
+    try:
+        poll_ms = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("train poll interval must be an integer number of milliseconds") from exc
+    if not MIN_TRAIN_POLL_MS <= poll_ms <= MAX_TRAIN_POLL_MS:
+        raise ValueError(
+            f"train poll interval must be between {MIN_TRAIN_POLL_MS} and "
+            f"{MAX_TRAIN_POLL_MS} milliseconds")
+    return poll_ms
+
 
 class WorldUploadError(Exception):
     """Raised when an uploaded world save is rejected (bad size / not valid XML)."""
@@ -125,7 +149,8 @@ class AuthoringState:
     def __init__(self, config_path: Path, output_dir: Path, areas_file: Path,
                  config=None, world_save: Path = None,
                  accept_uploads: bool = False, upload_token: str = None,
-                 edit_password: str = None, telemetry_client: TelemetryClient = None):
+                 edit_password: str = None, telemetry_client: TelemetryClient = None,
+                 train_poll_ms: int = DEFAULT_TRAIN_POLL_MS):
         self.config_path = config_path
         self.output_dir = output_dir
         self.manifest_path = output_dir / "manifest.json"
@@ -144,6 +169,7 @@ class AuthoringState:
         self.config = config
         self.world_save = world_save
         self.telemetry_client = telemetry_client
+        self.train_poll_ms = parse_train_poll_ms(train_poll_ms)
         # When accept_uploads is set, POST /api/world writes the pushed save into
         # `world_save` (a server-owned "slot"); the /api/trains mtime-watch then
         # re-plots it exactly as if Run8 had written the file locally. An optional
@@ -155,6 +181,15 @@ class AuthoringState:
         self._sections_cache = {}   # regionId -> [SectionData] (rebuilt from region JSON)
         self._trains_cache = {'mtime': None, 'context_mtime': None,
                               'source': None, 'payload': {'version': 0, 'trains': {}}}
+        # The expensive representation of /api/trains is shared across viewers.
+        # `_trains_response_at` also throttles telemetry placement to at most one
+        # frame per configured poll interval, even when many clients arrive at
+        # slightly different times.
+        self._trains_payload_revision = 0
+        self._trains_response_revision = None
+        self._trains_response_at = 0.0
+        self._trains_response_body = None
+        self._trains_response_gzip = None
         self._world_context_cache = {'mtime': None, 'sim_time': None, 'switches': {}}
         self._last_telemetry_warning = 0.0
         self._prev_positions = {}   # train_id -> (x, y) from the previous save, for movement
@@ -230,8 +265,11 @@ class AuthoringState:
                         switches=switches,
                         speed_by_id=self.telemetry_client.train_speeds,
                     )
-                self._trains_cache['payload']['stale'] = False
-                self._trains_cache['payload'].pop('telemetry_error', None)
+                payload = self._trains_cache['payload']
+                if payload.get('stale') or 'telemetry_error' in payload:
+                    payload['stale'] = False
+                    payload.pop('telemetry_error', None)
+                    self._trains_payload_revision += 1
                 return self._trains_cache['payload']
             except TelemetryUnavailable as exc:
                 now = time.monotonic()
@@ -239,8 +277,12 @@ class AuthoringState:
                     print(f"  Telemetry unavailable; retaining last live state or using world fallback: {exc}")
                     self._last_telemetry_warning = now
                 if self._trains_cache['source'] == 'telemetry':
-                    self._trains_cache['payload']['stale'] = True
-                    self._trains_cache['payload']['telemetry_error'] = str(exc)
+                    payload = self._trains_cache['payload']
+                    error = str(exc)
+                    if not payload.get('stale') or payload.get('telemetry_error') != error:
+                        payload['stale'] = True
+                        payload['telemetry_error'] = error
+                        self._trains_payload_revision += 1
                     return self._trains_cache['payload']
 
         if not self.world_save or not self.world_save.exists():
@@ -258,6 +300,32 @@ class AuthoringState:
         return self._place_trains(parsed, mtime, 'world_save', mtime=mtime,
                                   context_mtime=context_mtime,
                                   sim_time=sim_time, switches=switches)
+
+    def trains_response(self, accept_gzip=False):
+        """Return cached JSON bytes for /api/trains (call under ``self.lock``).
+
+        Placement, JSON serialization, and gzip compression happen at most once
+        per configured refresh window. Every viewer in that window receives the
+        same immutable frame instead of repeating those costs per connection.
+        """
+        now = time.monotonic()
+        max_age = self.train_poll_ms / 1000.0
+        if (self._trains_response_body is not None and
+                now - self._trains_response_at < max_age):
+            return ((self._trains_response_gzip, 'gzip') if accept_gzip
+                    else (self._trains_response_body, None))
+
+        payload = self.trains_payload()
+        if self._trains_response_revision != self._trains_payload_revision:
+            # Compact separators materially reduce the already-large SoCal frame.
+            body = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+            self._trains_response_body = body
+            # Compress once here so Caddy and every client can reuse these bytes.
+            self._trains_response_gzip = gzip.compress(body, compresslevel=5)
+            self._trains_response_revision = self._trains_payload_revision
+        self._trains_response_at = time.monotonic()
+        return ((self._trains_response_gzip, 'gzip') if accept_gzip
+                else (self._trains_response_body, None))
 
     def _world_context(self):
         """Return cached (mtime, simulation time, switch states by region)."""
@@ -360,6 +428,7 @@ class AuthoringState:
                    'switches': switches or {}, 'source': source, 'stale': False}
         self._trains_cache = {'mtime': mtime, 'context_mtime': context_mtime,
                               'source': source, 'payload': payload}
+        self._trains_payload_revision += 1
         return payload
 
     # ---- world-save upload (call under self.lock) ----------------------
@@ -595,11 +664,17 @@ def make_handler(state: AuthoringState, authoring: bool):
         # ---- helpers ---------------------------------------------------
         def _send_json(self, obj, status=200):
             body = json.dumps(obj).encode('utf-8')
+            self._send_json_bytes(body, status=status)
+
+        def _send_json_bytes(self, body, status=200, content_encoding=None):
             try:
                 self.send_response(status)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Content-Length', str(len(body)))
                 self.send_header('Cache-Control', 'no-store')
+                if content_encoding:
+                    self.send_header('Content-Encoding', content_encoding)
+                    self.send_header('Vary', 'Accept-Encoding')
                 self.end_headers()
                 self.wfile.write(body)
             except _CLIENT_DISCONNECT:
@@ -643,7 +718,7 @@ def make_handler(state: AuthoringState, authoring: bool):
                                  'edit_mode': 'locked' if authoring else 'disabled',
                                  'areas_version': state.areas_version,
                                  'uploads': state.accept_uploads,
-                                 'train_poll_ms': 1000 if state.telemetry_client else 3000,
+                                 'train_poll_ms': state.train_poll_ms,
                                  # Report a world as present when uploads are enabled even
                                  # before the first push, so the viewer starts polling
                                  # /api/trains right away and picks up trains on arrival.
@@ -662,8 +737,12 @@ def make_handler(state: AuthoringState, authoring: bool):
                 return
             if path == '/api/trains':
                 try:
+                    accepted = (self.headers.get('Accept-Encoding') or '').lower()
                     with state.lock:
-                        self._send_json(state.trains_payload())
+                        body, encoding = state.trains_response('gzip' in accepted)
+                    # Never hold the shared placement/cache lock while writing a
+                    # multi-megabyte response to a slow client.
+                    self._send_json_bytes(body, content_encoding=encoding)
                 except Exception as e:  # noqa: BLE001
                     self._error(str(e), 500)
                 return
@@ -967,7 +1046,17 @@ def main():
     parser.add_argument('--telemetry-token-file', dest='telemetry_token_file', metavar='FILE',
                         help='File containing the bridge bearer token. May also be supplied via '
                              'RUN8_TELEMETRY_TOKEN_FILE; keeps the token out of argv/environment.')
+    parser.add_argument('--train-poll-ms', dest='train_poll_ms', type=int, metavar='MS',
+                        help='Live-map refresh interval in milliseconds (default 5000; '
+                             'may also be supplied via RUN8_TRAIN_POLL_MS).')
     args = parser.parse_args()
+
+    try:
+        train_poll_ms = parse_train_poll_ms(
+            args.train_poll_ms if args.train_poll_ms is not None
+            else os.environ.get('RUN8_TRAIN_POLL_MS'))
+    except ValueError as e:
+        parser.error(str(e))
 
     # Token resolution: --upload-token wins, else the RUN8_UPLOAD_TOKEN env var. Using
     # the env var keeps the secret out of the command line (visible in `ps` and
@@ -1035,7 +1124,8 @@ def main():
                            accept_uploads=args.accept_uploads,
                            upload_token=upload_token,
                            edit_password=edit_password,
-                           telemetry_client=telemetry_client)
+                           telemetry_client=telemetry_client,
+                           train_poll_ms=train_poll_ms)
     if authoring:
         # Make sure the served manifest matches the areas files on disk at startup.
         try:
