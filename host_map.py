@@ -12,6 +12,7 @@ on the same Windows box that runs the operator's r8server.
                         [--world "...\\AutoSaves\\Auto Save World.xml"]
                         [--telemetry-url http://127.0.0.1:40872]
                         [--telemetry-token-file FILE]
+                        [--train-poll-ms 5000]
                         [--edit-password PW] [--regenerate] [--no-generate]
                         [--no-update-check]
 
@@ -52,7 +53,7 @@ from pathlib import Path
 from config_parser import parse_config
 from output_generator import generate_output
 from serve import (AuthoringState, make_handler, _QuietThreadingHTTPServer,
-                   _resolve_writable_areas_file)
+                   _resolve_writable_areas_file, parse_train_poll_ms)
 from telemetry_client import TelemetryClient
 from version import __version__
 
@@ -291,6 +292,9 @@ def main():
                         help='Optional file containing the telemetry bearer token. May '
                              'also be supplied through RUN8_TELEMETRY_TOKEN_FILE; keeping '
                              'the token in a file avoids exposing it in argv/environment.')
+    parser.add_argument('--train-poll-ms', dest='train_poll_ms', type=int, metavar='MS',
+                        help='Live-map refresh interval in milliseconds (default 5000; '
+                             'may also be supplied through RUN8_TRAIN_POLL_MS).')
     args = parser.parse_args()
 
     # Edit password (#56): presence enables password-gated label editing; absence keeps
@@ -300,6 +304,9 @@ def main():
     telemetry_token_file = (args.telemetry_token_file or
                             os.environ.get('RUN8_TELEMETRY_TOKEN_FILE') or None)
     try:
+        train_poll_ms = parse_train_poll_ms(
+            args.train_poll_ms if args.train_poll_ms is not None
+            else os.environ.get('RUN8_TRAIN_POLL_MS'))
         telemetry_client = _create_telemetry_client(
             telemetry_url, telemetry_token_file)
     except ValueError as e:
@@ -418,7 +425,8 @@ def main():
         config=config, world_save=world_save,
         accept_uploads=False, upload_token=None,
         edit_password=edit_password if authoring else None,
-        telemetry_client=telemetry_client)
+        telemetry_client=telemetry_client,
+        train_poll_ms=train_poll_ms)
     handler = make_handler(state, authoring=authoring)
     if authoring:
         try:
@@ -451,6 +459,7 @@ def main():
               f"[{auth}; world-save fallback]")
     else:
         print("  Live    : world-save updates only (set RUN8_TELEMETRY_URL to use REST telemetry)")
+    print(f"  Refresh : {train_poll_ms / 1000:g} seconds (shared cached snapshot)")
     print(f"  Local   : http://{shown_host}:{args.port}/")
     if args.host in _LOOPBACK_HOSTS:
         print("  Sharing : off - only this PC can open the map. To let other people see it, "

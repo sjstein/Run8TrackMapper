@@ -118,6 +118,7 @@ Equivalent Windows settings:
 set "WORLD_SAVE=C:\Run8Studios\Run8 Train Simulator V3\Content\V3Routes\Regions\HRS_Southeast\AutoSaves\Auto Save World.xml"
 set "RUN8_TELEMETRY_URL=http://127.0.0.1:40872"
 set "RUN8_TELEMETRY_TOKEN_FILE=C:\Run8Control\run8_telemetry_token"
+set "RUN8_TRAIN_POLL_MS=5000"
 ```
 
 The token-file setting is optional when the bridge does not require a bearer
@@ -131,6 +132,13 @@ poll cadence. The world save remains the cold-start and schema-1 context
 fallback. A transient bridge failure retains the last good live render and
 reports `stale: true` from `/api/trains`; it does not replace live positions
 with an older autosave.
+
+Live viewers refresh every five seconds by default. Set `RUN8_TRAIN_POLL_MS`
+or pass `--train-poll-ms` to choose a value from 1000 through 60000
+milliseconds. The server places, serializes, and gzip-compresses at most one
+shared train snapshot per interval; individual browser tabs schedule their next
+poll only after the previous response completes, so slow connections cannot
+accumulate overlapping requests.
 
 ### Area label categories
 

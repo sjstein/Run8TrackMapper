@@ -220,9 +220,12 @@ reconstructing section polylines from the already-generated region JSON (no trac
 reload). New endpoint `GET /api/trains` → `{version, trains:{regionId:[...]}}` (`version`
 is the file mtime; results are cached until it changes). The align viewer probes
 `/api/ping` (now also reports `world`) and, when a watched save is present, **polls
-`/api/trains` every 3 s** and re-renders the Trains layer, so editing/re-saving the world
+`/api/trains` every 5 s by default** and re-renders the Trains layer, so editing/re-saving the world
 in Run8 moves the vehicles on the map with no reload. Static output (served without
 `serve.py`) still shows the trains baked into the region JSON, just without live refresh.
+The interval is configurable with `RUN8_TRAIN_POLL_MS` / `--train-poll-ms` (1000-60000 ms).
+Polling is completion-driven with a per-tab in-flight guard, and the server shares one
+placed, serialized, gzip-compressed response across all viewers for each interval.
 Committing a manual alignment (`rerenderAlign`) rebuilds every region from the raw cache, which only
 has the *baked* trains, so after the reload the poll is re-run (`pollTrainsOnce`, with the version guard
 reset) to restore the live positions - otherwise live-only trains would vanish on align.

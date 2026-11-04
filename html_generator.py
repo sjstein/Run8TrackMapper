@@ -3484,7 +3484,7 @@ ALIGN_JS = r'''
                 if (MapApp.editMode !== 'locked' && MapApp.disableAuthoringUI) MapApp.disableAuthoringUI();
                 // Seed the areas poll version and start it so all viewers see live label edits.
                 MapApp.areasVersion = (typeof j.areas_version === 'number') ? j.areas_version : null;
-                MapApp.trainPollMs = Math.max(500, Number(j.train_poll_ms) || 3000);
+                MapApp.trainPollMs = Math.max(1000, Number(j.train_poll_ms) || 5000);
                 startAreasPolling();
                 // If the server is watching a world save, poll it so rail-vehicle
                 // positions refresh live when the save file is re-written.
@@ -3496,18 +3496,35 @@ ALIGN_JS = r'''
     // ---- Live rail-vehicle refresh (serve.py --world) ----
     MapApp.trainsVersion = null;
     function pollTrainsOnce(){
-        return fetch('api/trains', {cache:'no-store'})
+        // A large SoCal frame can take longer than the requested refresh interval
+        // on a constrained server or connection. Reuse the in-flight promise so a
+        // slow request can never cause overlapping fetches to accumulate.
+        if (MapApp._trainsRequest) return MapApp._trainsRequest;
+        const request = fetch('api/trains', {cache:'no-store'})
             .then(r => r.ok ? r.json() : null)
             .then(applyLiveTrains)
-            .catch(err => console.error('trains poll failed:', err));
+            .catch(err => console.error('trains poll failed:', err))
+            .finally(() => {
+                if (MapApp._trainsRequest === request) MapApp._trainsRequest = null;
+            });
+        MapApp._trainsRequest = request;
+        return request;
     }
     MapApp.pollTrainsOnce = pollTrainsOnce;
+    function scheduleNextTrainsPoll(){
+        if (MapApp._trainsPoll) clearTimeout(MapApp._trainsPoll);
+        MapApp._trainsPoll = setTimeout(() => {
+            MapApp._trainsPoll = null;
+            // Schedule from completion, not start time: this guarantees a quiet
+            // interval between frames and bounds every tab to one active request.
+            pollTrainsOnce().finally(scheduleNextTrainsPoll);
+        }, MapApp.trainPollMs || 5000);
+    }
     function startTrainsPolling(){
         if (MapApp._trainsPoll) return;
-        pollTrainsOnce();
-        MapApp._trainsPoll = setInterval(pollTrainsOnce, MapApp.trainPollMs || 3000);
+        pollTrainsOnce().finally(scheduleNextTrainsPoll);
         // Recover from background-timer throttling / machine sleep: when the tab
-        // becomes visible again, browsers may have stalled the 3s interval, leaving
+        // becomes visible again, browsers may have stalled the refresh timer, leaving
         // the map frozen on stale positions. Force an immediate refresh (and revive
         // the interval if it was cleared), so returning to the tab self-heals with
         // no reload needed. Reset the version guard so the re-poll always re-renders.
@@ -3516,9 +3533,9 @@ ALIGN_JS = r'''
             document.addEventListener('visibilitychange', () => {
                 if (document.visibilityState !== 'visible') return;
                 MapApp.trainsVersion = null;
-                if (!MapApp._trainsPoll) MapApp._trainsPoll = setInterval(
-                    pollTrainsOnce, MapApp.trainPollMs || 3000);
-                pollTrainsOnce();
+                if (MapApp._trainsPoll) clearTimeout(MapApp._trainsPoll);
+                MapApp._trainsPoll = null;
+                pollTrainsOnce().finally(scheduleNextTrainsPoll);
             });
         }
     }

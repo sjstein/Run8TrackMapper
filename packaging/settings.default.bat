@@ -42,6 +42,12 @@ REM               the bridge bearer token. Leave BLANK when bridge authenticatio
 REM               is disabled. A configured missing or empty file stops startup.
 set "RUN8_TELEMETRY_TOKEN_FILE="
 
+REM  RUN8_TRAIN_POLL_MS (OPTIONAL): how often browsers request a shared live train
+REM               snapshot, in milliseconds. 5000 (5 seconds) is recommended for
+REM               public maps. Valid range: 1000 through 60000. The server builds
+REM               and compresses at most one snapshot per interval for all viewers.
+set "RUN8_TRAIN_POLL_MS=5000"
+
 REM  PORT       : the port in the map's address (http://localhost:PORT/). 8000 is
 REM               fine unless something else is already using it. When SHARING,
 REM               this is the TCP port you forward on your router (or point a

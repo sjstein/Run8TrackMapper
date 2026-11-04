@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from host_map import _create_telemetry_client
+from serve import AuthoringState, parse_train_poll_ms
 
 
 class HostMapTelemetryTests(unittest.TestCase):
@@ -35,6 +36,47 @@ class HostMapTelemetryTests(unittest.TestCase):
             empty.write_text("\r\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "telemetry token file is empty"):
                 _create_telemetry_client("http://127.0.0.1:40872", empty)
+
+
+class TrainPollingTests(unittest.TestCase):
+    def test_poll_interval_defaults_and_validation(self):
+        self.assertEqual(parse_train_poll_ms(), 5000)
+        self.assertEqual(parse_train_poll_ms('10000'), 10000)
+        for invalid in ('fast', 999, 60001):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    parse_train_poll_ms(invalid)
+
+    def test_response_is_serialized_and_compressed_once_per_interval(self):
+        import gzip
+        import json
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = AuthoringState(root / 'config.ini', root, root / 'areas.ini',
+                                   train_poll_ms=5000)
+            calls = []
+
+            def fresh_payload():
+                calls.append(1)
+                state._trains_payload_revision += 1
+                return {'version': len(calls), 'trains': {'socal': [{'id': 1}]}}
+
+            state.trains_payload = fresh_payload
+            plain, encoding = state.trains_response(False)
+            zipped, zip_encoding = state.trains_response(True)
+
+            self.assertEqual(len(calls), 1)
+            self.assertIsNone(encoding)
+            self.assertEqual(zip_encoding, 'gzip')
+            self.assertEqual(gzip.decompress(zipped), plain)
+            self.assertEqual(json.loads(plain)['version'], 1)
+
+            # Expiring the shared frame permits exactly one new placement.
+            state._trains_response_at -= 5.1
+            refreshed, _ = state.trains_response(False)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(json.loads(refreshed)['version'], 2)
 
 
 if __name__ == "__main__":

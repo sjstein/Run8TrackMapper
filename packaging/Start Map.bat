@@ -26,7 +26,7 @@ echo    with other people [HOST]. settings.bat is yours - updates won't touch it
 echo.
 :settings_ready
 
-REM Load your settings (defines HOST, WORLD_SAVE, PORT, CONFIG_FILE, RUN8_EDIT_PASSWORD).
+REM Load your settings (including HOST, WORLD_SAVE, telemetry/polling, PORT, and editing).
 set "HOST="
 call "settings.bat"
 
