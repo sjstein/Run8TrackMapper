@@ -250,7 +250,8 @@ html[data-theme="dark"] #mouse-position{
   background:var(--panel-bg); color:var(--panel-fg); box-shadow:0 2px 10px var(--shadow);
 }
 html[data-theme="dark"] #control-panel h3{ border-bottom-color:var(--border); }
-html[data-theme="dark"] #control-panel h4{ color:var(--text-muted); }
+html[data-theme="dark"] #control-panel h4,
+html[data-theme="dark"] #control-panel .ctl-sub{ color:var(--text-muted); }
 html[data-theme="dark"] #selection-info{ border-top-color:var(--border); }
 html[data-theme="dark"] #control-toggle{ background:var(--kbd-bg); color:var(--panel-fg); }
 html[data-theme="dark"] #control-toggle:hover{ background:var(--border-strong); }
@@ -383,6 +384,11 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     overflow-y: auto;
                     font-family: Arial, sans-serif;
                     font-size: 13px;
+                    /* Fixed width: the panel must not resize when Regions expands/collapses
+                       (or when a scrollbar appears), so reserve the scrollbar gutter too. */
+                    width: 250px;
+                    box-sizing: border-box;
+                    scrollbar-gutter: stable;
                     min-width: 200px;
                 }
                 #control-panel h3 {
@@ -396,6 +402,18 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     font-size: 12px;
                     color: #666;
                     text-transform: uppercase;
+                }
+                /* Region list must not widen the panel: contribute 0 to its intrinsic width,
+                   then fill whatever width the rest of the panel needs (long names wrap). */
+                #region-list { width: 0; min-width: 100%; }
+                /* Sub-heading inside a section (e.g. Base Map under Display) */
+                .ctl-sub { margin: 8px 0 2px 0; font-size: 12px; color: #666; }
+                /* Regions +/- : plain text, same colour/size as the REGIONS label */
+                #control-panel h4.ctl-sec { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
+                .ctl-sec-toggle {
+                    background: none; border: none; padding: 0 2px; margin: 0;
+                    color: inherit; font: inherit; font-weight: bold; line-height: 1;
+                    cursor: pointer; text-transform: none;
                 }
                 .region-item, .overlay-item {
                     display: flex;
@@ -499,11 +517,13 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             </style>
             <h3 id="control-title"><span>${MapApp.manifest.name}</span><button id="control-toggle" title="Show/hide controls" aria-label="Show/hide controls">&minus;</button></h3>
             <div id="control-body">
+            <h4 class="ctl-sec" data-body="display-body" data-open="0"><span>Display</span><button type="button" class="ctl-sec-toggle" aria-controls="display-body" title="Show/hide section">+</button></h4>
+            <div id="display-body">
             <div class="overlay-item" style="margin:2px 0 4px 0;">
                 <input type="checkbox" id="theme-toggle">
                 <label for="theme-toggle">Dark mode</label>
             </div>
-            <h4>Base Map</h4>
+            <div class="ctl-sub">Base Map</div>
             <div id="basemap-list">
                 <div class="basemap-item">
                     <input type="radio" name="basemap" id="basemap-osm" value="OpenStreetMap">
@@ -517,22 +537,23 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     <input type="radio" name="basemap" id="basemap-none" value="None" checked>
                     <label for="basemap-none">None</label>
                 </div>
-                <div class="basemap-item" style="margin-top:6px;border-top:1px solid #eee;padding-top:6px;">
+                <div class="basemap-item" style="margin-top:6px;">
                     <input type="checkbox" id="basemap-orm">
-                    <label for="basemap-orm">OpenRailwayMap overlay</label>
+                    <label for="basemap-orm">OpenRailwayMap</label>
                 </div>
             </div>
-            <h4>Regions</h4>
-            <div id="region-list"></div>
-            <h4>Overlays</h4>
-            <div id="overlay-list"></div>
-            <h4>Display</h4>
             <div id="display-settings">
+                <!-- opacity sliders are prepended here by the opacity control -->
                 <div class="overlay-item">
                     <input type="checkbox" id="show-train-summary" checked>
                     <label for="show-train-summary">Show train summary</label>
                 </div>
             </div>
+            </div>
+            <h4 class="ctl-sec" data-body="region-list" data-open="0"><span>Regions</span><button type="button" class="ctl-sec-toggle" aria-controls="region-list" title="Show/hide section">+</button></h4>
+            <div id="region-list" style="display:none;"></div>
+            <h4 class="ctl-sec" data-body="overlay-list" data-open="0"><span>Overlays</span><button type="button" class="ctl-sec-toggle" aria-controls="overlay-list" title="Show/hide section">+</button></h4>
+            <div id="overlay-list"></div>
             <h4>Local Filter</h4>
             <select id="local-symbol-select" style="width:100%;padding:6px;margin-bottom:10px;border:1px solid #ddd;border-radius:4px;">
                 <option value="">-- All Industries --</option>
@@ -609,11 +630,23 @@ html[data-theme="dark"] .leaflet-control-scale-line{
 
         // Build region checkboxes
         const regionList = document.getElementById('region-list');
+        // Collapsible sections (Display / Regions / Overlays): click the heading to toggle.
+        document.querySelectorAll('#control-panel h4.ctl-sec').forEach(h => {
+            const body = document.getElementById(h.dataset.body);
+            const btn = h.querySelector('.ctl-sec-toggle');
+            const setOpen = (open) => {
+                body.style.display = open ? '' : 'none';
+                btn.textContent = open ? '-' : '+';
+                btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+            };
+            setOpen(h.dataset.open === '1');
+            h.addEventListener('click', () => setOpen(body.style.display === 'none'));
+        });
         for (const region of MapApp.manifest.regions) {
             const item = document.createElement('div');
             item.className = 'region-item';
             item.innerHTML = `
-                <input type="checkbox" id="region-${region.id}" ${region.enabled_by_default ? 'checked' : ''}>
+                <input type="checkbox" id="region-${region.id}" checked>
                 <label for="region-${region.id}">${region.display_name}</label>
             `;
             regionList.appendChild(item);
@@ -935,7 +968,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     // Region Loading/Unloading
     // ========================================
     async function loadDefaultRegions() {
-        const defaultRegions = MapApp.manifest.regions.filter(r => r.enabled_by_default);
+        const defaultRegions = MapApp.manifest.regions;  // #126: all regions on by default
         await Promise.all(defaultRegions.map(r => loadRegion(r.id)));
     }
 
@@ -1048,7 +1081,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             }
             // Load regions: the saved-enabled set if present, else the config defaults.
             if (st && st.regions){
-                const ids = MapApp.manifest.regions.filter(r => st.regions[r.id]).map(r => r.id);
+                const ids = MapApp.manifest.regions.filter(r => st.regions[r.id] !== false).map(r => r.id);
                 await Promise.all(ids.map(id => loadRegion(id)));
             } else {
                 await loadDefaultRegions();
