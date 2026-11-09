@@ -517,7 +517,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             </style>
             <h3 id="control-title"><span>${MapApp.manifest.name}</span><button id="control-toggle" title="Show/hide controls" aria-label="Show/hide controls">&minus;</button></h3>
             <div id="control-body">
-            <h4 class="ctl-sec" data-body="display-body" data-open="1"><span>Display</span><button type="button" class="ctl-sec-toggle" aria-controls="display-body" title="Show/hide section">-</button></h4>
+            <h4 class="ctl-sec" data-body="display-body" data-open="0"><span>Display</span><button type="button" class="ctl-sec-toggle" aria-controls="display-body" title="Show/hide section">+</button></h4>
             <div id="display-body">
             <div class="overlay-item" style="margin:2px 0 4px 0;">
                 <input type="checkbox" id="theme-toggle">
@@ -552,7 +552,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             </div>
             <h4 class="ctl-sec" data-body="region-list" data-open="0"><span>Regions</span><button type="button" class="ctl-sec-toggle" aria-controls="region-list" title="Show/hide section">+</button></h4>
             <div id="region-list" style="display:none;"></div>
-            <h4 class="ctl-sec" data-body="overlay-list" data-open="1"><span>Overlays</span><button type="button" class="ctl-sec-toggle" aria-controls="overlay-list" title="Show/hide section">-</button></h4>
+            <h4 class="ctl-sec" data-body="overlay-list" data-open="0"><span>Overlays</span><button type="button" class="ctl-sec-toggle" aria-controls="overlay-list" title="Show/hide section">+</button></h4>
             <div id="overlay-list"></div>
             <h4>Local Filter</h4>
             <select id="local-symbol-select" style="width:100%;padding:6px;margin-bottom:10px;border:1px solid #ddd;border-radius:4px;">
