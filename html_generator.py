@@ -165,7 +165,8 @@ def generate_javascript() -> str:
             coloredCars: false,     // false = paint every non-loco car the box-car colour
             showCuts: false,        // false = only consists led by a loco; true = also loose cuts
             showOnlyMoving: false,  // true = only plot trains moving between saves (live only)
-            highlightPlayers: false // true = highlight player trains (moved this save && not AI && has a loco) with a bright spine
+            highlightPlayers: false, // true = highlight player trains (moved this save && not AI && has a loco) with a bright spine
+            showTags: false         // true = a tag next to each train's lead loco: train symbol + loco number (#127)
         },
         showTrainSummary: true,
 
@@ -1465,6 +1466,44 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     }
     function _highlightWeight(carWeight) { return Math.max(carWeight * 1.6, 4); }
 
+    // ---- Train tag next to the lead loco (#127): "<train symbol> <loco number>" ----
+    // The train symbol is the lead loco's destination tag (e.g. H-BARRIC1-31A). Fill:
+    // red = player train, blue = AI-crewed, grey = neither (a parked / tied-down consist,
+    // or static output where "moved" is unknown, so player vs not can't be told).
+    const TAG_COLORS = { player: '#c62828', ai: '#1565c0', other: '#5f6368' };
+    function _tagKind(train) {
+        if (_isPlayerTrain(train)) return 'player';
+        return train.was_ai ? 'ai' : 'other';
+    }
+    function trainTagText(lead) {
+        const sym = lead.destination_tag || '';
+        const num = lead.unit_number || '';
+        return [sym, num].filter(Boolean).join(' · ');
+    }
+    function trainTagIcon(text, kind) {
+        const px = (12 * (MapApp.areaFontScale || 1)).toFixed(1);
+        return L.divIcon({
+            className: 'rv-train-tag',
+            // Anchored so the box sits just up-and-right of the loco, clear of the track.
+            html: `<div style="transform:translate(8px,-100%);display:inline-block;padding:1px 5px;`
+                + `background:${TAG_COLORS[kind] || TAG_COLORS.other};color:#fff;`
+                + `border:2px solid #8ec5ff;border-radius:5px;`
+                + `font:bold ${px}px/1.25 system-ui,sans-serif;white-space:nowrap;`
+                + `box-shadow:0 1px 3px rgba(0,0,0,.5);">${text}</div>`,
+            iconSize: null, iconAnchor: [0, 0]
+        });
+    }
+    function addTrainTag(train, lead, group) {
+        const text = trainTagText(lead.v);
+        if (!text) return;
+        const kind = _tagKind(train);
+        const m = L.marker(_midpoint(lead.v.body), {
+            icon: trainTagIcon(text, kind), interactive: false, keyboard: false, zIndexOffset: 500
+        });
+        m._tagText = text; m._tagKind = kind;   // so a Text Size change can re-scale it
+        m.addTo(group);
+    }
+
     // Centered destination-tag label for one RV (shown only when zoomed in).
     function trainDestLabelIcon(text) {
         // Honour the global "Text Size" slider (#82): base tag size times the multiplier.
@@ -1487,6 +1526,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             if (!lyr || !lyr.trainLabels) return;
             lyr.trainLabels.eachLayer(m => {
                 if (m._destText != null) m.setIcon(trainDestLabelIcon(m._destText));
+            });
+            if (lyr.trains) lyr.trains.eachLayer(m => {
+                if (m._tagText != null) m.setIcon(trainTagIcon(m._tagText, m._tagKind));
             });
         });
     }
@@ -1532,8 +1574,10 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             const minCars = (window.TRAIN_STYLE && TRAIN_STYLE.lodMinCars) || 3;
             for (const {train, cars, highlight, followed} of drawn) {
                 const hasLoco = train.has_loco || cars.some(c => c.isLoco);
-                if (followed || highlight || hasLoco || cars.length > minCars)
+                if (followed || highlight || hasLoco || cars.length > minCars) {
                     drawCollapsedTrain(regionId, train, cars, layers.trains, highlight, followed);
+                    if (opts.showTags && cars[0].isLoco) addTrainTag(train, cars[0], layers.trains);
+                }
             }
             return;
         }
@@ -1581,6 +1625,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
                     lbl.addTo(layers.trainLabels);
                 }
             }
+            if (opts.showTags && cars[0].isLoco) addTrainTag(train, cars[0], layers.trains);
         }
     }
 
@@ -3753,6 +3798,7 @@ ALIGN_JS = r'''
             ['coloredCars', 'Show colored cars', 'Colour non-loco cars by type. Off: all cars use the box-car colour.'],
             ['showCuts', 'Show cuts of cars', 'Also plot loose cuts of cars (rail vehicles not led by a locomotive).'],
             ['showOnlyMoving', 'Show only moving', 'Only plot trains that moved since the last world save (live only).'],
+            ['showTags', 'Show train tags', 'Label each train with its symbol and lead loco number. Red = player train, blue = AI train, grey = other (parked / unknown).'],
             ['highlightPlayers', 'Highlight player trains', 'Highlight trains that have a locomotive, are not AI-crewed, and moved since the last world save (likely player-driven) with a bright spine. The highlight drops at the first save after the train stops (live only).']
         ];
         const pop = document.createElement('div'); pop.id = 'train-options-popover';
