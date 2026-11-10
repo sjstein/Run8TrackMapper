@@ -91,6 +91,27 @@ class TelemetryClientTests(unittest.TestCase):
             self.assertEqual(client.sequence, 13)
             self.assertEqual(client.simulation_time, "2026-10-30T15:04:07.0000000")
 
+    def test_schema3_signals_snapshot_and_delta(self):
+        health = {"run8Connected": True, "stale": False}
+        sig = {"signals": {"3": {"1": "Proceed"}, "140": {}}}
+        snapshot = {
+            "schemaVersion": 3, "sessionId": "11111111-1111-1111-1111-111111111111",
+            "sequence": 10, "trains": [train(vehicles=[vehicle()])], **context(), **sig,
+        }
+        changes = {
+            "schemaVersion": 3, "sessionId": snapshot["sessionId"],
+            "fromSequence": 10, "toSequence": 11, "resetRequired": False,
+            "trainUpserts": [], "vehicleUpserts": [], "removedTrainIds": [], "removedVehicleIds": [],
+            **context(), "signals": {"3": {"1": "Stop", "4": "Fleet"}, "140": {}},
+        }
+        responses = iter([health, snapshot, health, changes])
+        client = TelemetryClient("http://bridge", health_interval=0)
+        with patch("urllib.request.urlopen", side_effect=lambda *_a, **_k: Response(next(responses))):
+            self.assertTrue(client.refresh())
+            self.assertEqual(client.signal_states, {3: {1: "Proceed"}, 140: {}})
+            self.assertTrue(client.refresh())  # signal-only change still counts as changed
+            self.assertEqual(client.signal_states, {3: {1: "Stop", 4: "Fleet"}, 140: {}})
+
     def test_reset_fetches_new_snapshot(self):
         health = {"run8Connected": True, "stale": False}
         first = {"schemaVersion": 1, "sessionId": "11111111-1111-1111-1111-111111111111",

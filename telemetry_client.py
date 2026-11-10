@@ -54,6 +54,9 @@ class TelemetryClient:
         self.schema_version = None
         self.simulation_time = None
         self.switch_states: Dict[int, list] = {}
+        # schema 3: {route_prefix: {signal_index: aspect}} listing only non-Stop signals;
+        # a route present with {} means every signal on it is Stop. Empty dict = unknown.
+        self.signal_states: Dict[int, Dict[int, str]] = {}
         self.context_available = False
         self._trains: Dict[int, dict] = {}
         self._vehicles: Dict[int, dict] = {}
@@ -121,7 +124,7 @@ class TelemetryClient:
     def _load_snapshot(self):
         snapshot = self._get_json("/v1/snapshot")
         schema_version = snapshot.get("schemaVersion")
-        if schema_version not in (1, 2):
+        if schema_version not in (1, 2, 3):
             raise TelemetryUnavailable("unsupported telemetry snapshot schema")
         session_id = snapshot.get("sessionId")
         sequence = snapshot.get("sequence")
@@ -147,11 +150,13 @@ class TelemetryClient:
                 vehicles[vehicle_id] = vehicle
         self._validate_model(trains, vehicles)
         simulation_time, switch_states = self._read_context(snapshot, schema_version)
+        signal_states = self._read_signals(snapshot, schema_version)
         self._trains = trains
         self._vehicles = vehicles
         self.schema_version = schema_version
         self.simulation_time = simulation_time
         self.switch_states = switch_states
+        self.signal_states = signal_states
         self.context_available = schema_version >= 2
         self.session_id = session_id
         self.sequence = sequence
@@ -176,8 +181,10 @@ class TelemetryClient:
             raise TelemetryUnavailable("invalid telemetry delta collections")
 
         simulation_time, switch_states = self._read_context(changes, self.schema_version)
+        signal_states = self._read_signals(changes, self.schema_version)
         context_changed = (simulation_time != self.simulation_time or
-                           switch_states != self.switch_states)
+                           switch_states != self.switch_states or
+                           signal_states != self.signal_states)
         changed = bool(train_upserts or vehicle_upserts or removed_trains or removed_vehicles or
                        context_changed)
         if changed:
@@ -199,8 +206,36 @@ class TelemetryClient:
             self.model_sequence = to_sequence
         self.simulation_time = simulation_time
         self.switch_states = switch_states
+        self.signal_states = signal_states
         self.sequence = to_sequence
         return changed
+
+    @staticmethod
+    def _read_signals(envelope: dict, schema_version: int) -> Dict[int, Dict[int, str]]:
+        if schema_version < 3:
+            return {}
+        raw_signals = envelope.get("signals")
+        if not isinstance(raw_signals, dict):
+            raise TelemetryUnavailable("invalid telemetry signal context")
+        signal_states: Dict[int, Dict[int, str]] = {}
+        for raw_prefix, raw_aspects in raw_signals.items():
+            try:
+                prefix = int(raw_prefix)
+            except (TypeError, ValueError) as exc:
+                raise TelemetryUnavailable("invalid telemetry signal route prefix") from exc
+            if not isinstance(raw_aspects, dict):
+                raise TelemetryUnavailable("invalid telemetry signal aspects")
+            aspects: Dict[int, str] = {}
+            for raw_index, aspect in raw_aspects.items():
+                try:
+                    index = int(raw_index)
+                except (TypeError, ValueError) as exc:
+                    raise TelemetryUnavailable("invalid telemetry signal index") from exc
+                if index < 0 or not isinstance(aspect, str) or not aspect:
+                    raise TelemetryUnavailable("invalid telemetry signal aspect")
+                aspects[index] = aspect
+            signal_states[prefix] = aspects
+        return signal_states
 
     @staticmethod
     def _read_context(envelope: dict, schema_version: int):
