@@ -1833,7 +1833,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     // mast+crossbar multi-segment latlngs, and the head radius. The crossbar(s) point the
     // facing direction (rotation + 180, same as the old triangle tip); stacked heads add
     // extra shorter crossbars.
-    function signalGlyphGeom(signal) {
+    function signalGlyphGeom(signal, collapse) {
         const s = SIGNAL_STYLE.sizeM || 7.5, headR = 0.34 * s;
         const rot = (signal.rotation * Math.PI / 180) + Math.PI;
         const cosLat = Math.cos(signal.lat * Math.PI / 180) || 1e-6;
@@ -1845,17 +1845,60 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             return [[signal.lat + (F * fN - half * rN) * M2LAT, signal.lon + (F * fE - half * rE) * M2LON],
                     [signal.lat + (F * fN + half * rN) * M2LAT, signal.lon + (F * fE + half * rE) * M2LON]];
         };
-        const heads = (signal.stacked_ids && signal.stacked_ids.length > 1) ? signal.stacked_ids.length : 1;
+        const heads = (!collapse && signal.stacked_ids && signal.stacked_ids.length > 1) ? signal.stacked_ids.length : 1;
         const headC = pt(0);
-        const segs = [[pt(headR), pt(s)]];        // stem (circle edge -> tip)
-        for (let i = 0; i < heads; i++) {         // head 1 full at tip; extras shorter, set back
-            const half = 0.55 * s * (1 - 0.30 * i);
-            segs.push(perp(s - 0.28 * s * i, half));
+        const hr = headR * 0.65;                  // every head, on any mast, is this size
+        if (heads === 1) {
+            return { headC, segs: [[pt(hr), pt(s)], perp(s, 0.25 * s)], headR: hr, headStep: 0, headRadius: hr };
         }
-        return { headC, segs, headR };
+        // Stack: heads in a column along the mast ("top down" view), first head at the base,
+        // each a little smaller with a clear gap. One mast + ONE crossbar at the tip, which
+        // is pushed out far enough to clear the last head.
+        const step = hr * 2.5;
+        const tip = Math.max(s, (heads - 1) * step + hr + 0.35 * s);
+        return { headC, segs: [[pt(hr), pt(tip)], perp(tip, 0.25 * s)], headR: hr, headStep: step, headRadius: hr };
     }
-    function signalInfoHtml(signal) {
+    // Live head display state (telemetry schema 4) -> how the head is drawn. Observed in-sim;
+    // an unlisted value (e.g. 4, not yet identified) falls back to the type colour.
+    const SIGNAL_HEAD_STATES = {
+        2: { name: 'Red', color: '#e53935' },
+        3: { name: 'Lunar', color: '#cfd8dc' },
+        6: { name: 'Yellow', color: '#fdd835' },
+        7: { name: 'Flashing yellow', color: '#fdd835', flashing: true },
+        8: { name: 'Green', color: '#43a047' }
+    };
+    // Most -> least permissive, for the zoomed-out single-circle view of a stack.
+    const HEAD_PERMISSIVE_ORDER = [8, 7, 6, 3, 2];
+    function mostPermissiveState(regionId, headIds) {
+        let best = null, bestRank = 99;
+        for (const id of headIds) {
+            const st = headLiveState(regionId, id);
+            const r = HEAD_PERMISSIVE_ORDER.indexOf(st);
+            if (r >= 0 && r < bestRank) { best = st; bestRank = r; }
+        }
+        return best;
+    }
+    // Zoomed out far enough that individual head colours can't be told apart: draw a stack
+    // as one circle in its most permissive head's colour. Scale-bar metres, like the train
+    // labels; override with SIGNAL_STYLE.collapseScaleM.
+    function signalsCollapsed() {
+        const thr = SIGNAL_STYLE.collapseScaleM || 50;
+        return typeof _scaleBarMeters === 'function' && _scaleBarMeters() >= thr;
+    }
+    function headLiveState(regionId, headId) {
+        const tbl = MapApp.signalHeadStates && MapApp.signalHeadStates.get(regionId);
+        if (!tbl) return null;
+        const v = tbl[headId];
+        return v === undefined ? null : v;
+    }
+    function signalInfoHtml(signal, regionId) {
         let h = `<b>${signal.name}</b><br>`;
+        const ids = (signal.stacked_ids && signal.stacked_ids.length) ? signal.stacked_ids : [signal.id];
+        const live = ids.map(id => [id, headLiveState(regionId, id)]).filter(x => x[1] !== null);
+        if (live.length) {
+            h += live.map(([id, st]) => `Head ${id}: ` + (SIGNAL_HEAD_STATES[st]
+                ? SIGNAL_HEAD_STATES[st].name : 'state ' + st)).join('<br>') + '<br>';
+        }
         h += `Model: ${signal.model_name}<br>`;
         h += `Type: ${signal.type === 'absolute' ? 'Absolute' : 'Intermediate'}<br>`;
         h += `Dwarf: ${signal.is_dwarf ? 'Yes' : 'No'}<br>`;
@@ -1872,6 +1915,14 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             MapApp.signalTypeVisible = { absolute: true, intermediate: SIGNAL_STYLE.showIntermediate !== false };
         const tv = MapApp.signalTypeVisible;
         const border = signalOutlineColor();
+        const collapsed = signalsCollapsed();
+        MapApp._sigCollapsed = collapsed;
+        if (!MapApp._sigZoomHooked && MapApp.map) {
+            MapApp._sigZoomHooked = true;
+            MapApp.map.on('zoomend', () => {
+                if (signalsCollapsed() !== MapApp._sigCollapsed) rerenderSignals();
+            });
+        }
         // Dedupe physical stacks: the extractor emits one record carrying all member ids
         // PLUS a solo record per member, so draw one representative per stack and drop the
         // solo members (their ids still map to the rep's marker below for search).
@@ -1893,16 +1944,57 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         // Type filter (absolute always on; intermediate toggled by the Signals filter).
         const drawSignals = reps.filter(sg => tv[sg.type] !== false);
         for (const signal of drawSignals) {
-            const fillColor = signal.type === 'absolute' ? COLORS.signalAbsolute : COLORS.signalIntermediate;
-            const g = signalGlyphGeom(signal);
+            const typeColor = signal.type === 'absolute' ? COLORS.signalAbsolute : COLORS.signalIntermediate;
+            const g = signalGlyphGeom(signal, collapsed);
             const mast = L.polyline(g.segs, { color: border, weight: 3, lineCap: 'round' });
-            const head = L.circle(g.headC, { radius: g.headR, color: border, weight: 2,
-                fillColor: fillColor, fillOpacity: 0.9 });
-            const marker = L.featureGroup([mast, head]);
+            // One circle per head (a stack = several heads on one mast). Each head is filled by
+            // its own live state; heads with no live data keep the type colour. A single
+            // head sits at the mast base as before; extra heads step out along the mast.
+            const fullIds = (signal.stacked_ids && signal.stacked_ids.length > 1)
+                ? signal.stacked_ids : [signal.id];
+            const headIds = collapsed ? [fullIds[0]] : fullIds;
+            const multi = headIds.length > 1;
+            const hr = g.headRadius;
+            const cosLat = Math.cos(signal.lat * Math.PI / 180) || 1e-6;
+            const rotF = (signal.rotation * Math.PI / 180) + Math.PI;
+            const parts = [mast];
+            headIds.forEach((hid, i) => {
+                const st = SIGNAL_HEAD_STATES[collapsed ? mostPermissiveState(regionId, fullIds)
+                                                        : headLiveState(regionId, hid)];
+                const F = i * g.headStep;
+                const c = [signal.lat + F * Math.cos(rotF) / 111320,
+                           signal.lon + F * Math.sin(rotF) / (111320 * cosLat)];
+                const fill = st ? st.color : typeColor;
+                if (collapsed) {
+                    // Zoomed out the metre-sized circle is ~1 px and a 2 px outline would hide the
+                    // colour entirely: use a fixed-pixel dot with a hairline outline instead.
+                    parts.push(L.circleMarker(c, { radius: 4, color: border, weight: 1,
+                        fillColor: fill, fillOpacity: 1 }));
+                    if (st && st.flashing)
+                        parts.push(L.circleMarker(c, { radius: 7, color: fill, weight: 2,
+                            fill: false, opacity: 0.9 }));
+                    return;
+                }
+                parts.push(L.circle(c, { radius: hr, color: border, weight: 2,
+                    fillColor: fill, fillOpacity: 0.9 }));
+                if (st && st.flashing) {
+                    // Flashing aspect: 6 short rays around the head (static, one polyline per head).
+                    // Offset 30 deg from the mast axis so none points at a neighbouring head.
+                    const rays = [];
+                    for (let k = 0; k < 6; k++) {
+                        const a = rotF + (30 + 60 * k) * Math.PI / 180;
+                        const dE = Math.sin(a), dN = Math.cos(a);
+                        const at = (r) => [c[0] + r * dN / 111320, c[1] + r * dE / (111320 * cosLat)];
+                        rays.push([at(hr * 1.25), at(hr * 1.85)]);
+                    }
+                    parts.push(L.polyline(rays, { color: st.color, weight: 2, lineCap: 'round', opacity: 0.95 }));
+                }
+            });
+            const marker = L.featureGroup(parts);
             const tooltipText = (signal.stacked_ids && signal.stacked_ids.length > 1)
                 ? `Signals ${signal.stacked_ids.join(', ')}` : signal.name;
             marker.bindTooltip(tooltipText, { sticky: true });
-            marker.bindPopup(signalInfoHtml(signal), { maxWidth: 300 });
+            marker.bindPopup(signalInfoHtml(signal, regionId), { maxWidth: 300 });
             layers.signals.addLayer(marker);
             const idxIds = (signal.stacked_ids && signal.stacked_ids.length) ? signal.stacked_ids : [signal.id];
             for (const mid of idxIds)
@@ -3632,6 +3724,14 @@ ALIGN_JS = r'''
         if (j.version === MapApp.trainsVersion && regionsKey === MapApp._trainsRegionsKey) return;
         MapApp.trainsVersion = j.version;
         MapApp._trainsRegionsKey = regionsKey;
+        // Live signal head states (telemetry schema 4); redraw the signals only when they changed.
+        if (j.signal_heads) {
+            const next = new Map(Object.entries(j.signal_heads));
+            const prevJson = MapApp._headJson || '';
+            const json = JSON.stringify(j.signal_heads) + '|' + regionsKey;   // regions load late
+            MapApp.signalHeadStates = next;
+            if (json !== prevJson) { MapApp._headJson = json; rerenderSignals(); }
+        }
         // Live switch positions from the same save (regions absent keep what they had).
         if (j.switches) {
             for (const regionId of MapApp.loadedRegions.keys())

@@ -112,6 +112,39 @@ class TelemetryClientTests(unittest.TestCase):
             self.assertTrue(client.refresh())  # signal-only change still counts as changed
             self.assertEqual(client.signal_states, {3: {1: "Stop", 4: "Fleet"}, 140: {}})
 
+    def test_schema4_signal_heads_snapshot_and_delta(self):
+        health = {"run8Connected": True, "stale": False}
+        snapshot = {
+            "schemaVersion": 4, "sessionId": "11111111-1111-1111-1111-111111111111",
+            "sequence": 10, "trains": [train(vehicles=[vehicle()])], **context(),
+            "signals": {"3": {}}, "signalHeads": {"3": {"7": 2, "8": 2}},
+        }
+        changes = {
+            "schemaVersion": 4, "sessionId": snapshot["sessionId"],
+            "fromSequence": 10, "toSequence": 11, "resetRequired": False,
+            "trainUpserts": [], "vehicleUpserts": [], "removedTrainIds": [], "removedVehicleIds": [],
+            **context(), "signals": {"3": {}}, "signalHeads": {"3": {"7": 2, "8": 6}},
+        }
+        responses = iter([health, snapshot, health, changes])
+        client = TelemetryClient("http://bridge", health_interval=0)
+        with patch("urllib.request.urlopen", side_effect=lambda *_a, **_k: Response(next(responses))):
+            self.assertTrue(client.refresh())
+            self.assertEqual(client.head_states, {3: {7: 2, 8: 2}})
+            self.assertTrue(client.refresh())  # a head-only change counts as changed
+            self.assertEqual(client.head_states, {3: {7: 2, 8: 6}})
+
+    def test_schema4_rejects_bad_head_state(self):
+        snapshot = {
+            "schemaVersion": 4, "sessionId": "11111111-1111-1111-1111-111111111111",
+            "sequence": 1, "trains": [], **context(),
+            "signals": {}, "signalHeads": {"3": {"7": "red"}},
+        }
+        responses = iter([{"run8Connected": True, "stale": False}, snapshot])
+        client = TelemetryClient("http://bridge", health_interval=0)
+        with patch("urllib.request.urlopen", side_effect=lambda *_a, **_k: Response(next(responses))):
+            with self.assertRaises(TelemetryUnavailable):
+                client.refresh()
+
     def test_reset_fetches_new_snapshot(self):
         health = {"run8Connected": True, "stale": False}
         first = {"schemaVersion": 1, "sessionId": "11111111-1111-1111-1111-111111111111",

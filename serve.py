@@ -252,8 +252,13 @@ class AuthoringState:
                     switches = {region_id: live_switches[prefix]
                                 for region_id, prefix in self.region_prefix.items()
                                 if prefix in live_switches}
+                    live_heads = self.telemetry_client.head_states
+                    signal_heads = {region_id: live_heads[prefix]
+                                    for region_id, prefix in self.region_prefix.items()
+                                    if prefix in live_heads}
                 else:
                     context_mtime, sim_time, switches = self._world_context()
+                    signal_heads = {}
                 if (changed or self._trains_cache['source'] != 'telemetry' or
                         context_mtime != self._trains_cache['context_mtime']):
                     return self._place_trains(
@@ -263,6 +268,7 @@ class AuthoringState:
                         context_mtime=context_mtime,
                         sim_time=sim_time,
                         switches=switches,
+                        signal_heads=signal_heads,
                         speed_by_id=self.telemetry_client.train_speeds,
                     )
                 payload = self._trains_cache['payload']
@@ -351,7 +357,7 @@ class AuthoringState:
 
     def _place_trains(self, parsed, version, source, *, mtime=None,
                       context_mtime=None, sim_time=None, switches=None,
-                      speed_by_id=None):
+                      speed_by_id=None, signal_heads=None):
         """Place either world-save or telemetry records through the shared renderer."""
         # Whole-save totals (region-independent) for the viewer status line.
         totals = {'trains': len(parsed),
@@ -425,7 +431,8 @@ class AuthoringState:
 
         payload = {'version': version, 'trains': trains_by_region, 'totals': totals,
                    'sim_time': sim_time, 'moving_count': moving_count,
-                   'switches': switches or {}, 'source': source, 'stale': False}
+                   'switches': switches or {}, 'signal_heads': signal_heads or {},
+                   'source': source, 'stale': False}
         self._trains_cache = {'mtime': mtime, 'context_mtime': context_mtime,
                               'source': source, 'payload': payload}
         self._trains_payload_revision += 1
