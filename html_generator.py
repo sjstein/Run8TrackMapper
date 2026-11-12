@@ -1865,14 +1865,14 @@ html[data-theme="dark"] .leaflet-control-scale-line{
     // an unlisted value (e.g. 0, not yet identified) falls back to the type colour.
     const SIGNAL_HEAD_STATES = {
         2: { name: 'Red', color: '#e53935' },
-        3: { name: 'Lunar', color: '#cfd8dc' },
-        4: { name: 'Lunar', color: '#cfd8dc' },   // 2nd lunar value (seen on an approach-lit intermediate)
+        3: { name: 'Restricted (flashing red)', color: '#e53935', flashing: true },
+        4: { name: 'Lunar', color: '#cfd8dc' },   // seen on an approach-lit intermediate
         6: { name: 'Yellow', color: '#fdd835' },
         7: { name: 'Flashing yellow', color: '#fdd835', flashing: true },
         8: { name: 'Green', color: '#43a047' }
     };
     // Most -> least permissive, for the zoomed-out single-circle view of a stack.
-    const HEAD_PERMISSIVE_ORDER = [8, 7, 6, 3, 2];
+    const HEAD_PERMISSIVE_ORDER = [8, 7, 6, 4, 3, 2];
     function mostPermissiveState(regionId, headIds) {
         let best = null, bestRank = 99;
         for (const id of headIds) {

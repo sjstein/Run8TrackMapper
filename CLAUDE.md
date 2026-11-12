@@ -626,8 +626,8 @@ Needs producer 0.4.0.0 (Run8 must be started via the launcher to load it).
   stacks are `stacked_ids`. A stand is just a mount holding 1+ heads, **each head has its own
   state**; which route a head serves is encoded in which head changes (e.g. stand 129 on route
   100: head 405 = straight, 406 = diverging).
-- **State -> colour** (observed in-sim; `SIGNAL_HEAD_STATES`): 2 red, 3 and 4 lunar (grey; two lunar values, difference unknown), 6 yellow,
-  7 flashing yellow (yellow + 6 short rays), 8 green. Unlisted values (0, seen on 4 heads, is still unidentified)
+- **State -> colour** (observed in-sim; `SIGNAL_HEAD_STATES`): 2 red, 3 restricted (flashing red: red + rays), 4 lunar (grey), 6 yellow,
+  7 flashing yellow (yellow + 6 short rays), 8 green (flashing heads get 6 short rays). Unlisted values (0, seen on 4 heads, is still unidentified)
   and heads with no live data keep the type colour. The underlying type is a 33-value enum.
 - **Plumbing:** `serve.py trains_payload` adds `signal_heads {regionId: {head: state}}` to
   `/api/trains`; head-only changes bump the model sequence so the payload refreshes. The viewer
@@ -637,7 +637,7 @@ Needs producer 0.4.0.0 (Run8 must be started via the launcher to load it).
 - **Zoomed out:** at scale-bar >= 50 m (`SIGNAL_STYLE.collapseScaleM`, no config key yet;
   `signalsCollapsed`) a stack collapses to ONE fixed-pixel dot (4 px, 1 px outline - metre-sized
   circles are ~1 px there and the outline would hide the colour) in its **most permissive** head's
-  colour (green > flashing yellow > yellow > lunar > red, `mostPermissiveState`). Re-rendered on
+  colour (green > flashing yellow > yellow > lunar > restricted > red, `mostPermissiveState`). Re-rendered on
   `zoomend` when the state flips. An attempt to enlarge the glyph between 20 m and the
   threshold looked worse and was removed.
 - **Tool:** `watch_signal_heads.py <route> [--value N] [--once]` polls the bridge and prints
