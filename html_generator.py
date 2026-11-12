@@ -1998,7 +1998,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             layers.signals.addLayer(marker);
             const idxIds = (signal.stacked_ids && signal.stacked_ids.length) ? signal.stacked_ids : [signal.id];
             for (const mid of idxIds)
-                MapApp.signalIndex.set(secKey(regionId, mid), { region_id: regionId, marker, metadata: signal });
+                MapApp.signalIndex.set(secKey(regionId, mid), { region_id: regionId, marker, metadata: signal, head_id: mid });
         }
     }
     function rerenderRegionSignals(regionId) {
@@ -2753,7 +2753,9 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             const queryNum = parseInt(query);
             // Match on the real (per-region) signal id, not the region-qualified map key.
             for (const [, data] of MapApp.signalIndex) {
-                const sig = data.metadata.id;
+                // Each head of a stack is indexed under its own id; match that, not the stack
+                // representative's id (else the 2nd/3rd head of a stack could never be found).
+                const sig = data.head_id != null ? data.head_id : data.metadata.id;
                 if (sig.toString().includes(query) || sig === queryNum) {
                     results.push({
                         type: 'signal',
