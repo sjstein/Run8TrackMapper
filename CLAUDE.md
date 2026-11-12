@@ -580,10 +580,13 @@ the whole map is read-only, and the authoring UI is always compiled into the HTM
   Caddy) is a **Path B** change: set `RUN8_EDIT_PASSWORD` in `run8map.env` and restart.
 
 #### Signals (dispatcher-style glyphs)
-Signals render as a **circle + T** glyph (a head with a mast and one crossbar per head,
+Signals render as a **circle + T** glyph (a head with a mast and ONE crossbar at the tip,
 the crossbar pointing the way the signal faces — same direction the old triangle tip
-pointed, `rotation + 180°`). Fill colour = type (`absolute`/`intermediate`); **stacked
-heads add extra, shorter crossbars** (no ring-colour change). Everything is a canvas
+pointed, `rotation + 180°`; crossbar half-width is `0.25 x size_m`). Fill colour = type
+(`absolute`/`intermediate`) unless live head data is present (see **Live signal head
+aspects**); a **stacked** signal draws one circle per head in a spaced column along the
+mast (first stack member at the base) with the crossbar pushed out past the last head.
+Every head circle is the same size (`0.65 x` the old single-head radius). Everything is a canvas
 vector (`preferCanvas`) built in metres, so there is no DOM per signal and no perf hit at
 scale. Code: `renderSignals` / `signalGlyphGeom` in `ALIGN_JS`.
 
@@ -600,14 +603,47 @@ scale. Code: `renderSignals` / `signalGlyphGeom` in `ALIGN_JS`.
 - **Stacked dedupe.** `extract_signals` emits a stacked signal as ONE record listing every
   member id in `stacked_ids` PLUS a solo record per member; the viewer draws **one
   representative per stack** and drops the members' solo records (each member id still maps
-  to the rep's marker so search by any member id works). Without this a stacked signal is
-  also drawn as a phantom lone signal.
+  to the rep's marker so search by any member id works — the index entry stores the member's
+  own `head_id`, which is what the Signal search matches; matching the rep's id made the 2nd/3rd
+  head of a stack unfindable). Without this a stacked signal is also drawn as a phantom lone signal.
 - **Type filter.** A **Filter** button beside the Signals overlay row opens an
   **Absolute / Intermediate** popover (`addSignalFilterButton` / `toggleSignalFilterPopover`
   / `setSignalTypeVisible`, re-renders via `rerenderSignals`), mirroring the Area Labels
   filter (and the Trains "Filter" button). Intermediates are the usual clutter; hiding them
   gives a dispatcher-style view. Initial state: `[signals] show_intermediate` (default true),
   emitted as `manifest.signal_show_intermediate`.
+
+##### Live signal head aspects (#132, telemetry bridge)
+With `serve.py --telemetry-url http://127.0.0.1:40872` (also `RUN8_TELEMETRY_URL`, optional
+`--telemetry-token-file`) the server takes live state from the **Run8 telemetry bridge**
+(source in the separate `run8_linux` repo: a producer DLL inside Run8 -> launcher -> bridge
+HTTP on 127.0.0.1:40872 `/healthz`, `/v1/snapshot`, `/v1/changes`). `telemetry_client.py` reads
+schema 1-4; trains/switches/sim time come with schema 1-2, schema 3 adds signal-list aspects
+(`signal_states`, non-Stop only), **schema 4 adds `signalHeads`** (`head_states`:
+`{route_prefix: {head_index: raw state}}` for EVERY head incl. intermediates and 2nd heads).
+Needs producer 0.4.0.0 (Run8 must be started via the launcher to load it).
+- **Head index** = the `.r8` `SignalHead.signal_index` (same id the map shows/searches);
+  stacks are `stacked_ids`. A stand is just a mount holding 1+ heads, **each head has its own
+  state**; which route a head serves is encoded in which head changes (e.g. stand 129 on route
+  100: head 405 = straight, 406 = diverging).
+- **State -> colour** (observed in-sim; `SIGNAL_HEAD_STATES`): 2 red, 3 lunar (grey), 6 yellow,
+  7 flashing yellow (yellow + 6 short rays), 8 green. Unlisted values (4 is still unidentified)
+  and heads with no live data keep the type colour. The underlying type is a 33-value enum.
+- **Plumbing:** `serve.py trains_payload` adds `signal_heads {regionId: {head: state}}` to
+  `/api/trains`; head-only changes bump the model sequence so the payload refreshes. The viewer
+  (`applyLiveTrains`) stores `MapApp.signalHeadStates` and calls `rerenderSignals` only when the
+  data (or the loaded regions) changed. The popup lists each head's state. Static output has no
+  live data.
+- **Zoomed out:** at scale-bar >= 50 m (`SIGNAL_STYLE.collapseScaleM`, no config key yet;
+  `signalsCollapsed`) a stack collapses to ONE fixed-pixel dot (4 px, 1 px outline - metre-sized
+  circles are ~1 px there and the outline would hide the colour) in its **most permissive** head's
+  colour (green > flashing yellow > yellow > lunar > red, `mostPermissiveState`). Re-rendered on
+  `zoomend` when the state flips. An attempt to enlarge the glyph between 20 m and the
+  threshold looked worse and was removed.
+- **Tool:** `watch_signal_heads.py <route> [--value N] [--once]` polls the bridge and prints
+  head/aspect changes (used to map the state numbers); needs only the stdlib.
+- **Open:** Barstow (150) lists fewer absolute signals in the save (112) than the `.r8` has
+  absolute stands (140) - unexplained, not relied on.
 
 #### Grade heat map (track coloring by grade, #57)
 An optional **Grade** display mode recolors every track section by its grade magnitude
