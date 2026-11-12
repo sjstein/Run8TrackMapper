@@ -626,8 +626,8 @@ Needs producer 0.4.0.0 (Run8 must be started via the launcher to load it).
   stacks are `stacked_ids`. A stand is just a mount holding 1+ heads, **each head has its own
   state**; which route a head serves is encoded in which head changes (e.g. stand 129 on route
   100: head 405 = straight, 406 = diverging).
-- **State -> colour** (observed in-sim; `SIGNAL_HEAD_STATES`): 2 red, 3 lunar (grey), 6 yellow,
-  7 flashing yellow (yellow + 6 short rays), 8 green. Unlisted values (4 is still unidentified)
+- **State -> colour** (observed in-sim; `SIGNAL_HEAD_STATES`): 2 red, 3 and 4 lunar (grey; two lunar values, difference unknown), 6 yellow,
+  7 flashing yellow (yellow + 6 short rays), 8 green. Unlisted values (0, seen on 4 heads, is still unidentified)
   and heads with no live data keep the type colour. The underlying type is a 33-value enum.
 - **Plumbing:** `serve.py trains_payload` adds `signal_heads {regionId: {head: state}}` to
   `/api/trains`; head-only changes bump the model sequence so the payload refreshes. The viewer

@@ -1848,21 +1848,25 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const heads = (!collapse && signal.stacked_ids && signal.stacked_ids.length > 1) ? signal.stacked_ids.length : 1;
         const headC = pt(0);
         const hr = headR * 0.65;                  // every head, on any mast, is this size
+        // The first head sits half a head-step out along the mast (not on the mast base), so
+        // back-to-back masts a metre or so apart (opposite facings) don't stack their heads.
+        const off = hr * 1.25;
         if (heads === 1) {
-            return { headC, segs: [[pt(hr), pt(s)], perp(s, 0.25 * s)], headR: hr, headStep: 0, headRadius: hr };
+            return { headC, segs: [[pt(0), pt(s)], perp(s, 0.25 * s)], headR: hr, headStep: 0, headOff: off, headRadius: hr };
         }
         // Stack: heads in a column along the mast ("top down" view), first head at the base,
         // each a little smaller with a clear gap. One mast + ONE crossbar at the tip, which
         // is pushed out far enough to clear the last head.
         const step = hr * 2.5;
-        const tip = Math.max(s, (heads - 1) * step + hr + 0.35 * s);
-        return { headC, segs: [[pt(hr), pt(tip)], perp(tip, 0.25 * s)], headR: hr, headStep: step, headRadius: hr };
+        const tip = Math.max(s, off + (heads - 1) * step + hr + 0.35 * s);
+        return { headC, segs: [[pt(0), pt(tip)], perp(tip, 0.25 * s)], headR: hr, headStep: step, headOff: off, headRadius: hr };
     }
     // Live head display state (telemetry schema 4) -> how the head is drawn. Observed in-sim;
-    // an unlisted value (e.g. 4, not yet identified) falls back to the type colour.
+    // an unlisted value (e.g. 0, not yet identified) falls back to the type colour.
     const SIGNAL_HEAD_STATES = {
         2: { name: 'Red', color: '#e53935' },
         3: { name: 'Lunar', color: '#cfd8dc' },
+        4: { name: 'Lunar', color: '#cfd8dc' },   // 2nd lunar value (seen on an approach-lit intermediate)
         6: { name: 'Yellow', color: '#fdd835' },
         7: { name: 'Flashing yellow', color: '#fdd835', flashing: true },
         8: { name: 'Green', color: '#43a047' }
@@ -1961,7 +1965,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             headIds.forEach((hid, i) => {
                 const st = SIGNAL_HEAD_STATES[collapsed ? mostPermissiveState(regionId, fullIds)
                                                         : headLiveState(regionId, hid)];
-                const F = i * g.headStep;
+                const F = g.headOff + i * g.headStep;
                 const c = [signal.lat + F * Math.cos(rotF) / 111320,
                            signal.lon + F * Math.sin(rotF) / (111320 * cosLat)];
                 const fill = st ? st.color : typeColor;
