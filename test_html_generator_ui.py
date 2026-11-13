@@ -8,7 +8,9 @@ class UiAdjustmentTests(unittest.TestCase):
         self.js = generate_javascript()
 
     def test_display_controls_are_inside_main_panel(self):
-        self.assertIn('<h4>Display</h4>', self.js)
+        self.assertIn('data-body="display-body"', self.js)
+        self.assertIn('<span>Display</span>', self.js)
+        self.assertIn('id="display-body"', self.js)
         self.assertIn('id="display-settings"', self.js)
         self.assertIn("document.getElementById('display-settings').prepend(control)", self.js)
 
