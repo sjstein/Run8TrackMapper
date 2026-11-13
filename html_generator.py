@@ -1488,7 +1488,7 @@ html[data-theme="dark"] .leaflet-control-scale-line{
             html: `<div style="transform:translate(8px,-100%);display:inline-block;padding:1px 5px;`
                 + `background:${TAG_COLORS[kind] || TAG_COLORS.other};color:#fff;`
                 + `border:2px solid #8ec5ff;border-radius:5px;`
-                + `font:bold ${px}px/1.25 system-ui,sans-serif;white-space:nowrap;`
+                + `font:bold ${px}px/1.25 system-ui,sans-serif;white-space:nowrap;cursor:pointer;`
                 + `box-shadow:0 1px 3px rgba(0,0,0,.5);">${text}</div>`,
             iconSize: null, iconAnchor: [0, 0]
         });
@@ -1497,9 +1497,13 @@ html[data-theme="dark"] .leaflet-control-scale-line{
         const text = trainTagText(lead.v);
         if (!text) return;
         const kind = _tagKind(train);
+        // Interactive: the tag is an easy hover/click target for the train (hover = the usual
+        // train readout, click = the popup with the Follow button).
         const m = L.marker(_midpoint(lead.v.body), {
-            icon: trainTagIcon(text, kind), interactive: false, keyboard: false, zIndexOffset: 500
+            icon: trainTagIcon(text, kind), interactive: true, keyboard: false, zIndexOffset: 500
         });
+        m.bindTooltip(trainVehicleTooltip(train, lead.v), {direction: 'top', offset: [10, -22]});
+        m.bindPopup(trainVehiclePopup(train, lead.v), {maxWidth: 300, offset: [10, -22]});
         m._tagText = text; m._tagKind = kind;   // so a Text Size change can re-scale it
         m.addTo(group);
     }
